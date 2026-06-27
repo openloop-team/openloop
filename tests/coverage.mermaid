@@ -1,0 +1,74 @@
+---
+config:
+  layout: dagre
+---
+flowchart LR
+    User["Real user Slack mention<br>not automated"] --> Slack["Slack mention handler<br>integration + live smoke"]
+    Slack --> Session["Async session runner / handoff<br>unit + integration + Postgres e2e"]
+    Session --> Runtime["Runtime task handling<br>integration + e2e + live e2e"]
+    Config["Load agents/dev-platform.yaml<br>unit"] --> Runtime
+    Runtime --> Engine["Durable workflow engine<br>unit + integration + Postgres e2e"]
+    Runtime --> Memory["Memory recall<br>unit + integration + Postgres e2e"] & Model["Real LiteLLM model call<br>live e2e"] & Usage["Usage recorded<br>integration + e2e + live e2e"]
+    Model --> ToolCall["Model chooses GitHub issue write<br>live e2e"]
+    ToolCall --> Approval["Approval gate holds write<br>integration + e2e + live e2e"]
+    Approval --> Resolve["Approve as @e2e-runner<br>live e2e"]
+    Resolve --> GitHub["Real GitHub issue created<br>live e2e"] & ApprovalStore["Approval persisted<br>integration + e2e + live e2e"]
+    Resolve --> Worker["Coding-worker workflow<br>unit + integration + live e2e"]
+    Worker --> PR["Draft PR opened<br>live e2e"]
+    GitHub --> Cleanup["Issue closed after test<br>live e2e"]
+    Model -. integration .-> ReadTool["GitHub read before write<br>integration"]
+    Approval -. integration .-> Deny["Denied approval path<br>integration"] & BadApprover["Non-approver rejection<br>integration"]
+    Runtime -. integration .-> HTTP["FastAPI approval/tool endpoints<br>integration"] & MCP["MCP tool path<br>integration"] & Budget["Budget block/enforcement<br>integration"]
+    Session -. continuation .-> Continue["Approval-click + thread-reply continuation<br>unit + integration"]
+    Engine -. resume .-> Reconciler["Startup resume / delivery reconcile<br>integration + Postgres e2e"]
+    Memory & Session & Engine -. Postgres e2e + conditional live e2e .-> Postgres["Postgres stores / pgvector<br>Postgres e2e + conditional live e2e"]
+    Button["Slack approve/deny payload<br>integration only"]
+
+    %% Combined Legend
+    subgraph Legend["Legend"]
+      LiveLegend["Live / End-to-End"]
+      E2ELegend["Postgres E2E"]
+      IntegrationLegend["Integration"]
+      UnitLegend["Unit"]
+      NotLegend["Not automated / planned gap"]
+
+      LiveLegend:::live
+      E2ELegend:::e2e
+      IntegrationLegend:::integration
+      UnitLegend:::unit
+      NotLegend:::not
+    end
+
+     User:::not
+     Slack:::live
+     Session:::e2e
+     Runtime:::live
+     Config:::unit
+     Engine:::e2e
+     Memory:::e2e
+     Model:::live
+     Usage:::live
+     ToolCall:::live
+     Approval:::live
+     Resolve:::live
+     GitHub:::live
+     ApprovalStore:::live
+     Worker:::live
+     PR:::live
+     Cleanup:::live
+     ReadTool:::integration
+     Deny:::integration
+     BadApprover:::integration
+     HTTP:::integration
+     MCP:::integration
+     Budget:::integration
+     Continue:::integration
+     Reconciler:::e2e
+     Postgres:::e2e
+     Button:::integration
+
+    classDef live fill:#d7f8df,stroke:#16833a,color:#0b3d1b
+    classDef e2e fill:#d9ecff,stroke:#2368a2,color:#103653
+    classDef integration fill:#fff1bf,stroke:#ad7d00,color:#4a3300
+    classDef unit fill:#eee2ff,stroke:#7654b8,color:#34245c
+    classDef not fill:#ffd8d8,stroke:#b3261e,color:#5c1010
