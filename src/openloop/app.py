@@ -35,6 +35,9 @@ from openloop.tools.github import GitHubConnector, HttpGitHubClient
 from openloop.tools.mcp import HttpMCPClient, MCPConnector
 from openloop.usage import InMemoryUsageStore, UsageStore, budget_scope_key
 from openloop.usage.postgres import PostgresUsageStore
+from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowStore
+from openloop.workflows.coding_worker import build_coding_worker_workflow
+from openloop.workflows.postgres import PostgresWorkflowStore
 
 log = logging.getLogger("openloop")
 
@@ -83,18 +86,26 @@ def build_checkpoint_store(settings: Settings) -> CheckpointStore:
     return InMemoryCheckpointStore()
 
 
+def build_workflow_store(settings: Settings) -> WorkflowStore:
+    """Pick a workflow-instance backend. Postgres setup happens at startup."""
+    if settings.memory_backend == "postgres":
+        return PostgresWorkflowStore(settings.database_url)
+    return InMemoryWorkflowStore()
+
+
 def build_tool_gateway(
     settings: Settings,
     agents: dict[str, Agent],
     approvals: ApprovalStore,
     checkpoints: CheckpointStore,
+    engine: WorkflowEngine,
 ) -> ToolGateway:
     """Register native connectors plus an MCP connector per configured server.
 
     MCP connectors need an async setup() (tool discovery); the returned list is
     set up in the app lifespan.
     """
-    gateway = ToolGateway(approvals=approvals)
+    gateway = ToolGateway(approvals=approvals, engine=engine)
     if settings.github_token:
         github_client = HttpGitHubClient(settings.github_token)
         gateway.register(GitHubConnector(github_client))
@@ -108,6 +119,8 @@ def build_tool_gateway(
             gateway.register(
                 CodingWorkerConnector(worker, github_client, checkpoints=checkpoints)
             )
+            # Register the worker as a durable workflow (approval = wait node).
+            engine.register(build_coding_worker_workflow(worker, github_client))
             log.info(
                 "registered native tool: coding_worker (model=%s)",
                 settings.coding_worker_model,
@@ -165,7 +178,9 @@ def create_app() -> FastAPI:
     usage = build_usage_store(settings)
     approvals = build_approval_store(settings)
     checkpoints = build_checkpoint_store(settings)
-    tools = build_tool_gateway(settings, agents, approvals, checkpoints)
+    workflows = build_workflow_store(settings)
+    engine = WorkflowEngine(workflows)
+    tools = build_tool_gateway(settings, agents, approvals, checkpoints, engine)
     # The agent that tool/approval endpoints act on (first configured).
     primary_agent: Agent | None = next(iter(agents.values()), None)
 
@@ -221,9 +236,29 @@ def create_app() -> FastAPI:
         else:
             log.info("checkpoint backend: in-memory (process-local)")
 
-        # Resume coding-worker jobs left incomplete by a crash. resolve() won't
-        # re-invoke execute() for an already-approved request, so this reconciler
-        # is what actually triggers the worker's checkpoint resume on startup.
+        if isinstance(workflows, PostgresWorkflowStore):
+            try:
+                await workflows.setup()
+                log.info("workflow backend: postgres")
+            except Exception:
+                log.exception(
+                    "postgres workflow setup failed — durable workflows disabled"
+                )
+                tools.engine = None
+        else:
+            log.info("workflow backend: in-memory (process-local)")
+
+        # Resume work left incomplete by a crash. The workflow engine re-drives
+        # any instance left "running"; the connector reconciler covers the Phase B
+        # (no-engine) checkpoint path. resolve() won't re-invoke an approved
+        # request, so these reconcilers are what actually trigger resume.
+        if tools.engine is not None:
+            try:
+                resumed = await tools.engine.resume_incomplete()
+                if resumed:
+                    log.info("resumed %d incomplete workflow(s)", len(resumed))
+            except Exception:
+                log.exception("workflow resume failed")
         await _resume_worker_jobs(tools)
 
         for connector in getattr(tools, "mcp_connectors", []):
@@ -245,6 +280,8 @@ def create_app() -> FastAPI:
             await approvals.close()
         if isinstance(checkpoints, PostgresCheckpointStore):
             await checkpoints.close()
+        if isinstance(workflows, PostgresWorkflowStore):
+            await workflows.close()
 
     app = FastAPI(title="OpenLoop", version="0.0.1", lifespan=lifespan)
     app.state.settings = settings

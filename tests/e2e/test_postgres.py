@@ -216,3 +216,51 @@ async def test_worker_checkpoint_resume_across_real_postgres():
         except Exception:
             pass
         await store.close()
+
+
+async def test_workflow_resume_across_real_postgres():
+    """A workflow parked at a wait node resumes from Postgres on a fresh engine."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    from openloop.workflows import Step, Workflow, WorkflowEngine
+    from openloop.workflows.postgres import PostgresWorkflowStore
+
+    instance_id = f"wf-{uuid.uuid4().hex[:8]}"
+
+    def _wf():
+        async def finish(ctx):
+            ctx.instance.result = {"ok": True}
+            ctx.state["ran"] = True
+
+        return Workflow("t", [Step("gate", wait=True), Step("finish", finish)])
+
+    store = PostgresWorkflowStore(DSN)
+    await store.setup()
+    try:
+        engine1 = WorkflowEngine(store, {"t": _wf()})
+        parked = await engine1.start("t", instance_id, {"seed": 1})
+        assert parked.status == "waiting" and parked.waiting_on == "gate"
+
+        # Fresh store + engine (a restart) delivers the event and completes.
+        store2 = PostgresWorkflowStore(DSN)
+        await store2.setup()
+        try:
+            engine2 = WorkflowEngine(store2, {"t": _wf()})
+            done = await engine2.send_event(instance_id, "gate", {"by": "x"})
+            assert done.status == "completed"
+            assert done.result == {"ok": True}
+            assert done.state["ran"] is True
+            assert done.state["seed"] == 1  # original state survived the restart
+        finally:
+            await store2.close()
+    finally:
+        try:
+            pool = store._require_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
+                )
+        except Exception:
+            pass
+        await store.close()

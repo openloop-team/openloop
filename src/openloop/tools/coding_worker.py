@@ -180,6 +180,11 @@ class CodingWorkerConnector:
     """Maps ``coding_worker.pr:write`` onto a worker + a :class:`GitHubClient`."""
 
     name = "coding_worker"
+    # When the gateway has a WorkflowEngine, this action runs as a durable
+    # workflow (approval = wait node). Without one, execute() below is the Phase B
+    # fallback path (checkpoint-based resume). Kept in sync with WORKFLOW_NAME in
+    # openloop.workflows.coding_worker.
+    workflow = "coding_worker"
 
     def __init__(
         self,
