@@ -207,15 +207,14 @@ spec:
 | Storage | Postgres + pgvector | — |
 | Queue | Redis | — |
 | Surfaces | Slack | Discord / Zoom / GitHub / Linear |
-| Delivery | inline Slack replies + approval responses | persisted sessions, progress updates, resume after approvals/replies, final postbacks |
+| Delivery | persisted Slack sessions, background progress/final postbacks, approval + thread-reply continuation, startup reconciler | provider idempotency keys, cross-process delivery locks, more surface adapters |
 | Coding worker | draft PRs (clone → edit → push) | OpenHands-style |
 | Dashboard | — | Next.js |
 | Observability | — | OpenTelemetry / Langfuse traces |
 
-The open-source runtime covers: agent runtime, Slack integration, model adapters
-(LiteLLM), MCP tool gateway, local Postgres channel/thread memory, basic
-approval flow, basic token/cost tracking, Docker Compose deploy, and
-config-as-code agents.
+The open-source runtime covers: agent runtime, Slack integration with async delivery, model adapters (LiteLLM), MCP tool gateway,
+local Postgres channel/thread memory, approval flow, basic token/cost tracking,
+Docker Compose deploy, and config-as-code agents.
 
 ## Quickstart *(preliminary — commands are placeholders)*
 
@@ -341,7 +340,7 @@ the workflow.
 ## Roadmap
 
 - [x] Core async runtime + task pipeline
-- [x] Slack surface (mentions, threads, approvals)
+- [x] Slack surface (mentions, thread replies, approvals)
 - [x] LiteLLM gateway + model-policy routing
 - [x] MCP tool gateway + native GitHub connector
 - [x] Channel/thread memory (Postgres + pgvector)
@@ -352,9 +351,12 @@ the workflow.
 - [x] Durable workflows — engine + approval-as-wait-node; worker resumes on crash;
   chat pipeline runs as a workflow (bounded: persisted turn state + idempotent
   writes; model calls are not replayed on crash)
-- [ ] Fully durable chat turns — async surface delivery/session runner (persist
-  surface targets, post progress, resume after approvals/thread replies, deliver
-  outside the original request lifecycle) + a model-call replay/caching policy
+- [x] Claude Tag-like Slack async delivery — persisted surface sessions, progress
+  + final postbacks, approval/thread-reply continuation, startup reconciler, and
+  delivery outside the original request lifecycle
+- [ ] Hardening for full production parity — provider idempotency keys,
+  cross-process wakeups/locks, conversation-history threading, more surface
+  adapters, and an explicit model-call replay/caching policy
 - [ ] Next.js dashboard, OTel/Langfuse tracing
 
 ## Scope
@@ -363,8 +365,8 @@ This repository is the **open-source runtime and control plane** — self-hosted
 inspectable, and the whole product for now.
 
 It covers the agent runtime, model gateway (LiteLLM), MCP tool gateway + native
-connectors, channel/thread memory, approval flow, token/cost tracking, chat
-surfaces, config-as-code, and Docker Compose deployment. The roadmap above
+connectors, channel/thread memory, approval flow, token/cost tracking, Slack
+async delivery, config-as-code, and Docker Compose deployment. The roadmap above
 tracks what's planned.
 
 ## Security
