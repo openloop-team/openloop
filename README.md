@@ -1,9 +1,34 @@
-# OpenLoop
+<div align="center">
 
-Open-source control plane and runtime for **team AI agents** — persistent,
-asynchronous teammates that work across your channels (Slack, Discord, Zoom,
-GitHub, Linear), each with their own memory, tools, model policy, budget,
-approval rules, and audit trail.
+# 🔁 OpenLoop
+
+### The open-source control plane & runtime for **team AI agents**
+
+Persistent, asynchronous teammates that work across your channels — Slack,
+Discord, Zoom, GitHub, Linear — each with their own memory, tools, model
+policy, budget, approval rules, and audit trail.
+
+<br/>
+
+[![CI](https://github.com/p1c2u/openloop/actions/workflows/ci.yml/badge.svg)](https://github.com/p1c2u/openloop/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/pyopenloop?color=blue&logo=pypi&logoColor=white)](https://pypi.org/project/pyopenloop/)
+[![Python](https://img.shields.io/pypi/pyversions/pyopenloop?logo=python&logoColor=white)](https://pypi.org/project/pyopenloop/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
+[![Model-agnostic](https://img.shields.io/badge/models-LiteLLM-7c3aed.svg)](https://github.com/BerriAI/litellm)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![Status: early/WIP](https://img.shields.io/badge/status-early%2FWIP-orange.svg)](#)
+
+<br/>
+
+[**Why**](#why) ·
+[**vs. Claude Tag**](#how-this-differs-from-claude-tag) ·
+[**Features**](#what-it-does-mvp) ·
+[**How it works**](#how-it-works) ·
+[**Quickstart**](#quickstart-preliminary--commands-are-placeholders) ·
+[**Roadmap**](#roadmap) ·
+[**Contributing**](#contributing)
+
+</div>
 
 > **Status: early / WIP.** Not production-ready. APIs, config formats, and the
 > commands below will change. Commands marked *(preliminary)* are placeholders.
