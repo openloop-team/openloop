@@ -1,21 +1,23 @@
 """Deterministic coverage of the Slack ``app_mention`` handler — no live Slack.
 
-Drives :func:`handle_mention` with a synthetic event dict and a fake ``say``,
-which is exactly what Bolt invokes when a mention arrives. This is the CI gate
-for the "Slack mention → runtime → reply" path: the wire (auth, event
-subscription, block rendering) is Slack's concern and lives in the gated live
-smoke; the glue that turns an event into a :class:`Task` and shapes the reply
-is ours, and it's fully testable here.
+Phase D async delivery: a mention creates a :class:`SurfaceSession` and the
+:class:`SessionRunner` posts progress + final (or an approval card) back to the
+thread via a :class:`SurfaceDelivery`. This drives :func:`handle_mention` with a
+synthetic event and a :class:`FakeSurfaceDelivery` — the full glue from event →
+Task → target → delivery, without a live Slack connection.
 """
+
+import types
 
 import pytest
 
 from openloop.agents import load_agent
 from openloop.models.gateway import ModelResponse
-from openloop.runtime import Runtime, Task
-from openloop.surfaces.approvals import APPROVE_ACTION
-from openloop.surfaces.slack import handle_mention
-from openloop.testing import EXAMPLE_AGENT, FakeGitHub
+from openloop.runtime import Task
+from openloop.sessions import InMemorySurfaceSessionStore, SessionRunner
+from openloop.surfaces.approvals import APPROVE_ACTION, approval_blocks
+from openloop.surfaces.slack import _run_mention, handle_mention
+from openloop.testing import EXAMPLE_AGENT, FakeGitHub, FakeSurfaceDelivery
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
 
@@ -39,20 +41,29 @@ class FakeSay:
 class RecordingRuntime:
     """Minimal runtime stand-in: captures Tasks, returns (or raises) a response.
 
-    The handler only touches ``runtime.handle`` and ``runtime.tools``, so a
-    focused fake keeps the test on the glue rather than the pipeline.
+    The runner only touches ``runtime.handle``, ``runtime.agent`` and
+    ``runtime.tools``, so a focused fake keeps the test on the glue rather than
+    the pipeline.
     """
 
     def __init__(self, response, *, tools=None) -> None:
         self._response = response
+        self.agent = load_agent(EXAMPLE_AGENT)
         self.tools = tools
         self.tasks: list[Task] = []
 
-    async def handle(self, task: Task):
+    async def handle(self, task: Task, *, instance_id=None):
         self.tasks.append(task)
         if isinstance(self._response, Exception):
             raise self._response
         return self._response
+
+
+def _runner(response, *, tools=None):
+    runtime = RecordingRuntime(response, tools=tools)
+    delivery = FakeSurfaceDelivery()
+    runner = SessionRunner(runtime, InMemorySurfaceSessionStore(), delivery)
+    return runner, runtime, delivery
 
 
 def _event(text: str, **overrides) -> dict:
@@ -73,10 +84,10 @@ def _reply(text: str = "done", approval_ids=None) -> ModelResponse:
 
 
 async def test_mention_becomes_task_with_slack_identity():
-    runtime = RecordingRuntime(_reply("here you go"))
+    runner, runtime, delivery = _runner(_reply("here you go"))
     say = FakeSay()
 
-    await handle_mention(runtime, _event("<@U0BOT> ship it"), say)
+    await handle_mention(runner, _event("<@U0BOT> ship it"), say)
 
     # Mention stripped; surface/channel/user carried from the event.
     task = runtime.tasks[0]
@@ -84,40 +95,61 @@ async def test_mention_becomes_task_with_slack_identity():
     assert task.surface == "slack"
     assert task.channel == "C01DEV"
     assert task.user == "U07ABC123"
-    # Reply posted in-thread off the message ts.
-    assert say.last["text"] == "here you go"
-    assert say.last["thread_ts"] == "1700000000.000100"
+    # The answer is delivered (progress first, then a single final) in-thread.
+    assert len(delivery.progress) == 1
+    assert delivery.finals[-1]["text"] == "here you go"
+    assert delivery.finals[-1]["target"].thread == "1700000000.000100"
 
 
 async def test_empty_mention_gets_help_and_skips_runtime():
-    runtime = RecordingRuntime(_reply())
+    runner, runtime, delivery = _runner(_reply())
     say = FakeSay()
 
-    await handle_mention(runtime, _event("<@U0BOT>   "), say)
+    await handle_mention(runner, _event("<@U0BOT>   "), say)
 
     assert runtime.tasks == []  # never reached the runtime
+    assert delivery.progress == []  # no session started
     assert say.last["text"].startswith("Hi — mention me")
 
 
 async def test_reply_threads_under_existing_thread_ts():
-    runtime = RecordingRuntime(_reply())
+    runner, runtime, delivery = _runner(_reply())
     say = FakeSay()
 
     await handle_mention(
-        runtime,
+        runner,
         _event("<@U0BOT> follow up", thread_ts="1700000000.000050"),
         say,
     )
 
     # thread_ts wins over ts so replies stay in the original thread.
-    assert say.last["thread_ts"] == "1700000000.000050"
+    assert delivery.finals[-1]["target"].thread == "1700000000.000050"
 
 
 async def test_runtime_failure_posts_error_not_crash():
-    runtime = RecordingRuntime(RuntimeError("boom"))
+    runner, runtime, delivery = _runner(RuntimeError("boom"))
     say = FakeSay()
 
-    await handle_mention(runtime, _event("<@U0BOT> do it"), say)
+    await handle_mention(runner, _event("<@U0BOT> do it"), say)
+
+    # The runner records the failure and delivers an error notice in-thread.
+    assert len(delivery.errors) == 1
+    assert delivery.errors[-1]["target"].thread == "1700000000.000100"
+
+
+async def test_handoff_failure_before_delivery_posts_error_in_thread():
+    # A failure *before* a session/progress message exists (e.g. the session-store
+    # write or the first post_progress) escapes the runner; the background wrapper
+    # must still surface an error in-thread instead of failing silently.
+    class BoomRunner:
+        def __init__(self):
+            self.runtime = types.SimpleNamespace(agent=load_agent(EXAMPLE_AGENT))
+
+        async def run(self, task, target):
+            raise RuntimeError("session store down")
+
+    say = FakeSay()
+    await _run_mention(BoomRunner(), _event("<@U0BOT> do it"), say)
 
     assert say.last["text"].startswith("⚠️")
     assert say.last["thread_ts"] == "1700000000.000100"
@@ -131,15 +163,18 @@ async def test_approval_reply_renders_blocks_in_thread():
     )
     approval_id = inv.approval.id
 
-    runtime = RecordingRuntime(
+    runner, runtime, delivery = _runner(
         _reply("Approval required.", approval_ids=[approval_id]), tools=tools
     )
     say = FakeSay()
 
-    await handle_mention(runtime, _event("<@U0BOT> open an issue"), say)
+    await handle_mention(runner, _event("<@U0BOT> open an issue"), say)
 
-    # Approval path posts interactive blocks (with the approve button) in-thread.
-    assert "blocks" in say.last
-    serialized = repr(say.last["blocks"])
-    assert APPROVE_ACTION in serialized
-    assert say.last["thread_ts"] == "1700000000.000100"
+    # The progress message is turned into an approval card (with the buttons),
+    # carrying the pending request, in-thread.
+    assert len(delivery.approvals) == 1
+    card = delivery.approvals[-1]
+    assert card["target"].thread == "1700000000.000100"
+    assert [r.id for r in card["requests"]] == [approval_id]
+    assert APPROVE_ACTION in repr(approval_blocks(card["requests"]))
+    assert delivery.finals == []  # no final answer until the approval resolves

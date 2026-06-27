@@ -113,13 +113,16 @@ class SessionRunner:
 
         if response.approval_ids:
             # Parked on a human approval. Persist the approval ids so Slice 4 can
-            # map a button click back to this session and post the eventual answer;
-            # for now we just reflect the wait in progress + status.
+            # map a button click back to this session and post the eventual answer.
             session.status = "waiting"
             session.approval_ids = list(response.approval_ids)
             session.result_summary = response.text or WAITING_TEXT
             await self.sessions.upsert(session)
-            await self._update_progress(session, WAITING_TEXT)
+            # Turn the progress message into an approval card (buttons in-thread).
+            requests = await self._approval_requests(session.approval_ids)
+            await self._update_approval(
+                session, response.text or WAITING_TEXT, requests
+            )
             return session
 
         session.status = "completed"
@@ -161,6 +164,25 @@ class SessionRunner:
         await self.delivery.update_progress(
             session.target, session.progress_message_id, text
         )
+
+    async def _update_approval(self, session: SurfaceSession, text: str, requests) -> None:
+        if session.progress_message_id is None:
+            return
+        await self.delivery.update_approval(
+            session.target, session.progress_message_id, text, requests
+        )
+
+    async def _approval_requests(self, approval_ids: list[str]) -> list:
+        """Fetch the pending ApprovalRequest objects so delivery can render them."""
+        tools = getattr(self.runtime, "tools", None)
+        if tools is None:
+            return []
+        out = []
+        for rid in approval_ids:
+            req = await tools.approvals.get(rid)
+            if req is not None:
+                out.append(req)
+        return out
 
     async def _post_final(self, session: SurfaceSession, text: str) -> None:
         if session.final_message_id is not None:

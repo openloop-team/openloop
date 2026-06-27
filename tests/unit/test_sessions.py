@@ -147,9 +147,9 @@ async def test_pending_approval_parks_session_waiting():
     assert (await sessions.get(session.id)).approval_ids == session.approval_ids
     # No final answer yet — the approval continuation (Slice 4) delivers it.
     assert delivery.finals == []
-    # Progress was updated in place to reflect the wait.
-    assert len(delivery.updates) == 1
-    assert "approval" in delivery.updates[0]["text"].lower()
+    # The progress message was turned into an approval card carrying the request.
+    assert len(delivery.approvals) == 1
+    assert [r.id for r in delivery.approvals[0]["requests"]] == session.approval_ids
     assert github.created == []  # write not executed
 
 

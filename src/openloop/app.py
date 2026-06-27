@@ -193,6 +193,10 @@ def create_app() -> FastAPI:
     workflows = build_workflow_store(settings)
     engine = WorkflowEngine(workflows)
     sessions = build_surface_session_store(settings)
+    # The Slack SessionRunner captures the session store by reference; the lifespan
+    # needs a handle to it to repoint after a Postgres fallback. Set in the Slack
+    # block below (stays None when no Slack surface is bound).
+    session_runner = None
     tools = build_tool_gateway(settings, agents, approvals, checkpoints, engine)
     # The agent that tool/approval endpoints act on (first configured).
     primary_agent: Agent | None = next(iter(agents.values()), None)
@@ -273,7 +277,14 @@ def create_app() -> FastAPI:
                     "postgres surface-session setup failed — falling back "
                     "to in-memory"
                 )
-                app.state.sessions = InMemorySurfaceSessionStore()
+                # Repoint BOTH the app state and the already-built Slack runner
+                # (which captured the Postgres store) at one shared in-memory
+                # fallback, so mentions don't hit an un-setup pool in the
+                # background — mirrors the workflow engine's store swap above.
+                fallback_sessions = InMemorySurfaceSessionStore()
+                app.state.sessions = fallback_sessions
+                if session_runner is not None:
+                    session_runner.sessions = fallback_sessions
         else:
             log.info("surface-session backend: in-memory (process-local)")
 
@@ -338,10 +349,14 @@ def create_app() -> FastAPI:
         app.state.runtime = runtime
         slack_app = build_slack_app(
             runtime,
+            sessions,
             bot_token=settings.slack_bot_token,
             signing_secret=settings.slack_signing_secret or None,
         )
         app.state.slack_app = slack_app
+        # Captured so the session-store fallback can repoint the runner (above).
+        session_runner = getattr(slack_app, "_session_runner", None)
+        app.state.session_runner = session_runner
 
         if settings.slack_signing_secret:
             slack_handler = AsyncSlackRequestHandler(slack_app)

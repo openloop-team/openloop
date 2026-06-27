@@ -44,6 +44,7 @@ import pytest
 from openloop.agents import load_agent
 from openloop.models.gateway import ModelResponse
 from openloop.runtime import Runtime
+from openloop.sessions import InMemorySurfaceSessionStore
 from openloop.surfaces.slack import build_slack_app
 from openloop.testing import EXAMPLE_AGENT
 
@@ -137,7 +138,9 @@ async def test_live_slack_mention_round_trip():
     runtime = Runtime(
         load_agent(EXAMPLE_AGENT), gateway=_FixedGateway(f"e2e-ack {nonce}")
     )
-    slack_app = build_slack_app(runtime, bot_token=bot_token)
+    slack_app = build_slack_app(
+        runtime, InMemorySurfaceSessionStore(), bot_token=bot_token
+    )
 
     # Diagnostics: separate "event never reached the socket" from "handler ran
     # but failed to reply". Middleware records every inbound request type; the

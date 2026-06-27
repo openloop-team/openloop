@@ -1,12 +1,16 @@
 """Slack surface.
 
-Handles `app_mention` events: turns a mention into a :class:`Task`, runs it
-through the agent runtime, and posts the reply back in-thread. Built on
+Handles `app_mention` events with Phase D's async-delivery contract: a mention
+creates a persisted :class:`~openloop.sessions.store.SurfaceSession`, the handler
+posts a short in-thread progress message and returns fast, and the
+:class:`~openloop.sessions.runner.SessionRunner` works the turn in the background,
+posting the final answer (or an approval card) back to the thread later. Built on
 slack-bolt's async app, exposed to FastAPI via the request handler.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -14,10 +18,15 @@ from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 from slack_bolt.async_app import AsyncApp
 
 from openloop.runtime import Runtime, Task
+from openloop.sessions import (
+    SessionRunner,
+    SlackSurfaceDelivery,
+    SurfaceSessionStore,
+    SurfaceTarget,
+)
 from openloop.surfaces.approvals import (
     APPROVE_ACTION,
     DENY_ACTION,
-    approval_blocks,
     resolve_from_action,
 )
 
@@ -36,12 +45,27 @@ def _approver_handle(user: dict) -> str:
     return f"@{name}" if name else "unknown"
 
 
-async def handle_mention(runtime: Runtime, event: dict, say) -> None:  # type: ignore[no-untyped-def]
-    """Core ``app_mention`` logic: mention → Task → runtime → in-thread reply.
+def _target_from_event(runtime: Runtime, event: dict, thread_ts: str | None) -> SurfaceTarget:
+    agent = runtime.agent
+    return SurfaceTarget(
+        surface="slack",
+        workspace=agent.metadata.workspace,
+        agent=agent.metadata.name,
+        channel=event.get("channel"),
+        thread=thread_ts,
+        # The event ts is the idempotency key — Slack re-delivers the same event
+        # on a delivery timeout, and the runner dedupes on it.
+        event_id=event.get("event_ts") or event.get("ts"),
+    )
+
+
+async def handle_mention(runner: SessionRunner, event: dict, say) -> None:  # type: ignore[no-untyped-def]
+    """Core ``app_mention`` logic: mention → session → background runner.
 
     Kept module-level (rather than a closure in :func:`build_slack_app`) so it
-    can be driven directly with a synthetic event and a fake ``say`` — the full
-    mention path without a live Slack connection.
+    can be driven directly with a synthetic event and a fake delivery — the full
+    mention path without a live Slack connection. The runner owns progress/final
+    delivery; only the empty-mention help reply uses ``say`` directly.
     """
     text = _strip_mentions(event.get("text", ""))
     thread_ts = event.get("thread_ts") or event.get("ts")
@@ -49,39 +73,19 @@ async def handle_mention(runtime: Runtime, event: dict, say) -> None:  # type: i
         await say(text="Hi — mention me with a request.", thread_ts=thread_ts)
         return
 
+    target = _target_from_event(runner.runtime, event, thread_ts)
     task = Task(
         text=text,
         surface="slack",
         channel=event.get("channel"),
         user=event.get("user"),
     )
-    try:
-        response = await runtime.handle(task)
-    except Exception:
-        logger.exception("runtime failed handling Slack mention")
-        await say(
-            text="⚠️ Something went wrong handling that. Check the runtime logs.",
-            thread_ts=thread_ts,
-        )
-        return
-
-    if response.approval_ids and runtime.tools is not None:
-        requests = [
-            req
-            for rid in response.approval_ids
-            if (req := await runtime.tools.approvals.get(rid)) is not None
-        ]
-        await say(
-            text=response.text or "Approval required.",
-            blocks=approval_blocks(requests),
-            thread_ts=thread_ts,
-        )
-    else:
-        await say(text=response.text or "(no response)", thread_ts=thread_ts)
+    await runner.run(task, target)
 
 
 def build_slack_app(
     runtime: Runtime,
+    sessions: SurfaceSessionStore,
     *,
     bot_token: str,
     signing_secret: str | None = None,
@@ -89,16 +93,26 @@ def build_slack_app(
     """Build the Bolt app (mention + approval handlers) bound to a runtime.
 
     Shared by both transports: the FastAPI HTTP handler and Socket Mode. With
-    no signing secret (Socket-Mode-only), request verification is disabled.
+    no signing secret (Socket-Mode-only), request verification is disabled. A
+    :class:`SessionRunner` over a :class:`SlackSurfaceDelivery` (bound to the
+    app's web client) handles the async delivery.
     """
     if signing_secret:
         app = AsyncApp(token=bot_token, signing_secret=signing_secret)
     else:
         app = AsyncApp(token=bot_token, request_verification_enabled=False)
 
+    runner = SessionRunner(runtime, sessions, SlackSurfaceDelivery(app.client))
+    # Exposed so the app lifespan can repoint the runner's session store after a
+    # Postgres-setup fallback (mirrors how the workflow engine's store is swapped)
+    # — and so the approval handler can reach the runner in a later slice.
+    app._session_runner = runner  # type: ignore[attr-defined]
+
     @app.event("app_mention")
     async def on_mention(event, say):  # type: ignore[no-untyped-def]
-        await handle_mention(runtime, event, say)
+        # Return fast: the whole turn runs in the background so Slack's event
+        # request isn't held open for the agent's (possibly long) work.
+        asyncio.create_task(_run_mention(runner, event, say))
 
     async def _on_decision(ack, body, action, respond, approve):  # type: ignore[no-untyped-def]
         await ack()
@@ -121,14 +135,38 @@ def build_slack_app(
     return app
 
 
+async def _run_mention(runner: SessionRunner, event: dict, say) -> None:  # type: ignore[no-untyped-def]
+    """Background wrapper around :func:`handle_mention` that swallows errors.
+
+    The runner already records + delivers its own failures *once a session and
+    its progress message exist*. This guard covers the earlier handoff steps
+    (session-store write, the very first ``post_progress``) whose failure would
+    otherwise leave the user staring at a mention that silently went nowhere — so
+    on any escape it posts a best-effort error notice in-thread.
+    """
+    try:
+        await handle_mention(runner, event, say)
+    except Exception:
+        logger.exception("Slack mention handling failed for event %s", event.get("ts"))
+        thread_ts = event.get("thread_ts") or event.get("ts")
+        try:
+            await say(
+                text="⚠️ Something went wrong starting that. Please try again.",
+                thread_ts=thread_ts,
+            )
+        except Exception:
+            logger.exception("failed to post mention-handoff error to the thread")
+
+
 def build_slack_handler(
     runtime: Runtime,
+    sessions: SurfaceSessionStore,
     *,
     bot_token: str,
     signing_secret: str,
 ) -> AsyncSlackRequestHandler:
     """Wrap the Bolt app in a FastAPI request handler (HTTP events transport)."""
     app = build_slack_app(
-        runtime, bot_token=bot_token, signing_secret=signing_secret
+        runtime, sessions, bot_token=bot_token, signing_secret=signing_secret
     )
     return AsyncSlackRequestHandler(app)

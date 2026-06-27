@@ -15,9 +15,12 @@ provider message id from each post; ``update_progress`` takes one back.
 from __future__ import annotations
 
 import logging
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from openloop.sessions.store import SurfaceTarget
+
+if TYPE_CHECKING:
+    from openloop.approvals.store import ApprovalRequest
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +35,21 @@ class SurfaceDelivery(Protocol):
         self, target: SurfaceTarget, message_id: str, text: str
     ) -> None:
         """Edit an existing progress message in place."""
+        ...
+
+    async def update_approval(
+        self,
+        target: SurfaceTarget,
+        message_id: str,
+        text: str,
+        requests: "list[ApprovalRequest]",
+    ) -> None:
+        """Turn an existing progress message into an approval card with buttons.
+
+        Editing the progress message in place (rather than posting a new one)
+        keeps it idempotent: a re-run edits the same message instead of stacking
+        duplicate approval prompts in the thread.
+        """
         ...
 
     async def post_final(
@@ -67,6 +85,19 @@ class SlackSurfaceDelivery:
     ) -> None:
         await self.client.chat_update(
             channel=target.channel, ts=message_id, text=text
+        )
+
+    async def update_approval(
+        self, target, message_id, text, requests
+    ) -> None:
+        # Local import keeps the Block Kit helper out of the surface-agnostic core.
+        from openloop.surfaces.approvals import approval_blocks
+
+        await self.client.chat_update(
+            channel=target.channel,
+            ts=message_id,
+            text=text,
+            blocks=approval_blocks(requests),
         )
 
     async def post_final(

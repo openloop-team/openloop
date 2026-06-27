@@ -141,6 +141,7 @@ class FakeSurfaceDelivery:
     def __init__(self) -> None:
         self.progress: list[dict] = []
         self.updates: list[dict] = []
+        self.approvals: list[dict] = []
         self.finals: list[dict] = []
         self.errors: list[dict] = []
         self._seq = 0
@@ -156,6 +157,11 @@ class FakeSurfaceDelivery:
 
     async def update_progress(self, target, message_id, text) -> None:
         self.updates.append({"id": message_id, "target": target, "text": text})
+
+    async def update_approval(self, target, message_id, text, requests) -> None:
+        self.approvals.append(
+            {"id": message_id, "target": target, "text": text, "requests": requests}
+        )
 
     async def post_final(self, target, text, *, blocks=None) -> str:
         mid = self._next_id("final")
