@@ -26,6 +26,11 @@ from openloop.config import Settings, get_settings
 from openloop.memory import Embedder, InMemoryStore, LiteLLMEmbedder, MemoryStore
 from openloop.memory.postgres import PostgresMemoryStore
 from openloop.runtime import Runtime
+from openloop.sessions import (
+    InMemorySurfaceSessionStore,
+    SurfaceSessionStore,
+)
+from openloop.sessions.postgres import PostgresSurfaceSessionStore
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 
 from openloop.surfaces.slack import build_slack_app
@@ -91,6 +96,13 @@ def build_workflow_store(settings: Settings) -> WorkflowStore:
     if settings.memory_backend == "postgres":
         return PostgresWorkflowStore(settings.database_url)
     return InMemoryWorkflowStore()
+
+
+def build_surface_session_store(settings: Settings) -> SurfaceSessionStore:
+    """Pick a surface-session backend (Phase D). Postgres setup at startup."""
+    if settings.memory_backend == "postgres":
+        return PostgresSurfaceSessionStore(settings.database_url)
+    return InMemorySurfaceSessionStore()
 
 
 def build_tool_gateway(
@@ -180,6 +192,7 @@ def create_app() -> FastAPI:
     checkpoints = build_checkpoint_store(settings)
     workflows = build_workflow_store(settings)
     engine = WorkflowEngine(workflows)
+    sessions = build_surface_session_store(settings)
     tools = build_tool_gateway(settings, agents, approvals, checkpoints, engine)
     # The agent that tool/approval endpoints act on (first configured).
     primary_agent: Agent | None = next(iter(agents.values()), None)
@@ -251,6 +264,19 @@ def create_app() -> FastAPI:
         else:
             log.info("workflow backend: in-memory (process-local)")
 
+        if isinstance(sessions, PostgresSurfaceSessionStore):
+            try:
+                await sessions.setup()
+                log.info("surface-session backend: postgres")
+            except Exception:
+                log.exception(
+                    "postgres surface-session setup failed — falling back "
+                    "to in-memory"
+                )
+                app.state.sessions = InMemorySurfaceSessionStore()
+        else:
+            log.info("surface-session backend: in-memory (process-local)")
+
         # Resume work left incomplete by a crash. The workflow engine re-drives
         # any instance left "running"; the connector reconciler covers the Phase B
         # (no-engine) checkpoint path. resolve() won't re-invoke an approved
@@ -285,6 +311,8 @@ def create_app() -> FastAPI:
             await checkpoints.close()
         if isinstance(workflows, PostgresWorkflowStore):
             await workflows.close()
+        if isinstance(sessions, PostgresSurfaceSessionStore):
+            await sessions.close()
 
     app = FastAPI(title="OpenLoop", version="0.0.1", lifespan=lifespan)
     app.state.settings = settings
@@ -292,6 +320,7 @@ def create_app() -> FastAPI:
     app.state.memory = store
     app.state.usage = usage
     app.state.tools = tools
+    app.state.sessions = sessions
     app.state.primary_agent = primary_agent
 
     # Bind the first Slack-enabled agent. The Bolt app is built when a bot

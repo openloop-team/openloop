@@ -125,9 +125,11 @@ class Runtime:
         vectors = await self.embedder.embed([text])
         return vectors[0] if vectors else None
 
-    async def handle(self, task: Task) -> ModelResponse:
+    async def handle(
+        self, task: Task, *, instance_id: str | None = None
+    ) -> ModelResponse:
         if self.engine is not None:
-            return await self._handle_workflow(task)
+            return await self._handle_workflow(task, instance_id)
         return await self._handle_inline(task)
 
     async def _handle_inline(self, task: Task) -> ModelResponse:
@@ -217,9 +219,15 @@ class Runtime:
             ],
         )
 
-    async def _handle_workflow(self, task: Task) -> ModelResponse:
+    async def _handle_workflow(
+        self, task: Task, instance_id: str | None = None
+    ) -> ModelResponse:
+        # A caller (e.g. the Phase D session runner) can bind the workflow
+        # instance to its own id so the two share one identity; otherwise mint one.
         instance = await self.engine.start(
-            self.workflow_name, uuid.uuid4().hex, {"task": _task_to_dict(task)}
+            self.workflow_name,
+            instance_id or uuid.uuid4().hex,
+            {"task": _task_to_dict(task)},
         )
         return self._response_from(instance)
 

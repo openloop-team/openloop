@@ -131,6 +131,43 @@ class FakeCodingWorker:
         return WorkerOutcome(branch=state.branch, title=self.title, body=self.body)
 
 
+class FakeSurfaceDelivery:
+    """In-memory SurfaceDelivery — records posts/updates without a live surface.
+
+    Mints monotonic message ids so the runner's id-guarded idempotency can be
+    exercised, and keeps every call for assertions (progress vs final, updates).
+    """
+
+    def __init__(self) -> None:
+        self.progress: list[dict] = []
+        self.updates: list[dict] = []
+        self.finals: list[dict] = []
+        self.errors: list[dict] = []
+        self._seq = 0
+
+    def _next_id(self, prefix: str) -> str:
+        self._seq += 1
+        return f"{prefix}-{self._seq}"
+
+    async def post_progress(self, target, text) -> str:
+        mid = self._next_id("progress")
+        self.progress.append({"id": mid, "target": target, "text": text})
+        return mid
+
+    async def update_progress(self, target, message_id, text) -> None:
+        self.updates.append({"id": message_id, "target": target, "text": text})
+
+    async def post_final(self, target, text, *, blocks=None) -> str:
+        mid = self._next_id("final")
+        self.finals.append({"id": mid, "target": target, "text": text, "blocks": blocks})
+        return mid
+
+    async def post_error(self, target, text) -> str:
+        mid = self._next_id("error")
+        self.errors.append({"id": mid, "target": target, "text": text})
+        return mid
+
+
 class FakeEmbedder(Embedder):
     """Deterministic 26-dim bag-of-letters embedding without network calls."""
 

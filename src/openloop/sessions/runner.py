@@ -1,0 +1,177 @@
+"""Session runner — binds one surface session to one ``agent_task`` workflow.
+
+This is the delivery layer Phase D adds on top of Phase C's durable chat turn.
+Given an inbound surface event the runner:
+
+1. creates (or re-uses) a :class:`SurfaceSession`, idempotent on the event id;
+2. posts a short progress message and marks the session ``running``;
+3. drives the turn via :meth:`Runtime.handle`, binding the workflow instance id
+   to the session id so the two share one identity;
+4. records the result/error on the session and asks the
+   :class:`~openloop.sessions.delivery.SurfaceDelivery` to post the final answer.
+
+Progress is coarse for this first pass (``queued`` → ``running`` → ``waiting`` /
+``completed`` / ``failed``). Every delivery is guarded by a persisted message id,
+so a duplicate event never posts a second final answer, and a retry of a session
+that crashed *after* reaching a terminal state but *before* posting re-delivers
+it once. Two gaps remain by design: a session that crashed mid-turn is recovered
+by the startup reconciler (Slice 6), not this inline path (it must not replay the
+model call); and the narrow window between a successful provider post and
+recording its message id is at-least-once — closing it needs a provider
+idempotency key. The original request does not own the task's lifetime — the
+runner does, and it can be awaited inline (tests) or scheduled in the background
+(Slack).
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+
+from openloop.runtime import Runtime, Task
+from openloop.sessions.delivery import SurfaceDelivery
+from openloop.sessions.store import (
+    SurfaceSession,
+    SurfaceSessionStore,
+    SurfaceTarget,
+)
+
+logger = logging.getLogger(__name__)
+
+PROGRESS_TEXT = "🤖 On it…"
+WAITING_TEXT = "⏳ Waiting for approval…"
+ERROR_TEXT = "⚠️ This task was interrupted and could not be completed."
+
+
+class SessionRunner:
+    """Runs a task as a background session and delivers the answer back."""
+
+    def __init__(
+        self,
+        runtime: Runtime,
+        sessions: SurfaceSessionStore,
+        delivery: SurfaceDelivery,
+    ) -> None:
+        self.runtime = runtime
+        self.sessions = sessions
+        self.delivery = delivery
+
+    async def run(self, task: Task, target: SurfaceTarget) -> SurfaceSession:
+        """Create/resume a session for ``task`` and deliver its outcome.
+
+        Idempotent on ``target.event_id``: a duplicate inbound event reuses the
+        existing session rather than starting a second turn. If that session
+        reached a terminal state but crashed before its answer was posted, the
+        retry re-delivers it (guarded by the persisted message id, so never
+        twice). A session still mid-turn is left for the startup reconciler
+        (Slice 6) — this inline retry path does not replay the model call.
+        """
+        existing = await self.sessions.get_by_event(target.event_id)
+        if existing is not None:
+            return await self._ensure_delivered(existing)
+
+        session = SurfaceSession(id=uuid.uuid4().hex, target=target, status="queued")
+        # One session : one workflow instance — share the id so the approval
+        # continuation / reconciler can map between them trivially.
+        session.workflow_instance_id = session.id
+        try:
+            await self.sessions.upsert(session)
+        except Exception:  # noqa: BLE001 — a concurrent duplicate won the race
+            # The event_id unique index rejected this insert: another delivery of
+            # the same event created the session first. Defer to the winner.
+            racer = await self.sessions.get_by_event(target.event_id)
+            if racer is not None:
+                return await self._ensure_delivered(racer)
+            raise
+
+        await self._post_progress(session)
+        session.status = "running"
+        await self.sessions.upsert(session)
+
+        try:
+            response = await self.runtime.handle(
+                task, instance_id=session.workflow_instance_id
+            )
+        except Exception as exc:  # noqa: BLE001 — record + deliver, don't crash caller
+            logger.exception("session %s failed while handling the task", session.id)
+            session.status = "failed"
+            session.error = str(exc)
+            await self.sessions.upsert(session)
+            await self._post_error(session)
+            return session
+
+        return await self._deliver(session, response)
+
+    async def _deliver(self, session: SurfaceSession, response) -> SurfaceSession:
+        if response.model == "error":
+            # The workflow was interrupted inside a non-resumable model step.
+            session.status = "abandoned"
+            session.error = response.text or ERROR_TEXT
+            await self.sessions.upsert(session)
+            await self._post_error(session)
+            return session
+
+        if response.approval_ids:
+            # Parked on a human approval. Persist the approval ids so Slice 4 can
+            # map a button click back to this session and post the eventual answer;
+            # for now we just reflect the wait in progress + status.
+            session.status = "waiting"
+            session.approval_ids = list(response.approval_ids)
+            session.result_summary = response.text or WAITING_TEXT
+            await self.sessions.upsert(session)
+            await self._update_progress(session, WAITING_TEXT)
+            return session
+
+        session.status = "completed"
+        session.result_summary = response.text or "(no response)"
+        await self.sessions.upsert(session)
+        await self._post_final(session, session.result_summary)
+        return session
+
+    async def _ensure_delivered(self, session: SurfaceSession) -> SurfaceSession:
+        """Re-deliver an existing session's answer if it crashed before posting.
+
+        Called for a duplicate event / retry. The ``_post_*`` helpers are guarded
+        by ``final_message_id``, so a fully delivered session is returned
+        untouched while a terminal-but-undelivered one finally gets its answer. A
+        session still ``queued`` / ``running`` (a mid-turn crash) or ``waiting``
+        is returned as-is — recovering those is the reconciler's job, not this
+        synchronous retry path (which must not replay the model call).
+        """
+        if session.final_message_id is not None:
+            return session
+        if session.status == "completed":
+            await self._post_final(session, session.result_summary or "(no response)")
+        elif session.status in ("failed", "abandoned"):
+            await self._post_error(session)
+        return session
+
+    # --- idempotent delivery helpers (guarded by persisted message ids) ---
+
+    async def _post_progress(self, session: SurfaceSession) -> None:
+        if session.progress_message_id is not None:
+            return
+        mid = await self.delivery.post_progress(session.target, PROGRESS_TEXT)
+        session.progress_message_id = mid
+        await self.sessions.upsert(session)
+
+    async def _update_progress(self, session: SurfaceSession, text: str) -> None:
+        if session.progress_message_id is None:
+            return
+        await self.delivery.update_progress(
+            session.target, session.progress_message_id, text
+        )
+
+    async def _post_final(self, session: SurfaceSession, text: str) -> None:
+        if session.final_message_id is not None:
+            return  # already delivered — never post a second final answer
+        mid = await self.delivery.post_final(session.target, text)
+        session.final_message_id = mid
+        await self.sessions.upsert(session)
+
+    async def _post_error(self, session: SurfaceSession) -> None:
+        if session.final_message_id is not None:
+            return
+        mid = await self.delivery.post_error(session.target, session.error or ERROR_TEXT)
+        session.final_message_id = mid
+        await self.sessions.upsert(session)
