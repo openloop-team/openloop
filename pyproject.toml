@@ -1,7 +1,10 @@
 [project]
-name = "openloop"
+name = "pyopenloop"
 version = "0.0.1"
-description = "Open-source control plane and runtime for team AI agents"
+description = "The open-source control plane and runtime for team AI agents"
+authors = [
+  { name = "Artur Maciag", email = "maciag.artur@gmail.com" },
+]
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
