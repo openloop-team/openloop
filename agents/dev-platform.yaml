@@ -1,0 +1,60 @@
+# Example team agent — config-as-code.
+#
+# This is a PRELIMINARY schema (apiVersion v1alpha1) and will evolve.
+# Register it with the (placeholder) CLI:
+#   openloop agents apply -f agents/dev-platform.yaml
+apiVersion: openloop.ai/v1alpha1
+kind: Agent
+metadata:
+  name: dev-platform
+  workspace: acme
+
+spec:
+  # Surfaces where this team agent is reachable
+  surfaces:
+    - type: slack
+      channel: "#dev-platform"
+    - type: discord
+      channel: "eng"
+
+  # Memory can be scoped per channel so context doesn't leak across teams
+  memory:
+    scope: channel
+    backend: postgres        # pgvector-backed
+    retention_days: 90
+
+  # Which models handle which kinds of task
+  model_policy:
+    default: openai/gpt-4o-mini
+    routes:
+      - match: { task: summarize }
+        model: openai/gpt-4o-mini
+      - match: { task: code }
+        model: anthropic/claude-sonnet-4-6
+      - match: { task: investigate }
+        model: openrouter/google/gemini-2.5-pro
+
+  # Explicit tool allowlist (least privilege)
+  tools:
+    - name: github
+      type: native
+      permissions: ["issues:read", "issues:write", "pulls:read"]
+    - name: ci-logs
+      type: mcp
+      server: http://localhost:8931
+      # For MCP tools, permissions are the exact server tool names the agent
+      # may call (least privilege); discovered from the server at startup.
+      permissions: [get_run_logs, list_runs]
+
+  # Risky / write actions require a human
+  approvals:
+    require_for:
+      - github.issues:write
+      - github.pulls:write
+    approvers: ["@priya", "@maintainers"]
+
+  # Spend guardrails
+  budget:
+    monthly_usd: 50
+    per_task_usd: 0.50
+    on_exceeded: block        # block | warn

@@ -1,0 +1,39 @@
+name: Runtime/GitHub Live E2E
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-e2e
+  cancel-in-progress: false
+
+jobs:
+  live-e2e:
+    name: Runtime/GitHub live E2E
+    runs-on: ubuntu-latest
+    environment: live-e2e
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up mise
+        uses: jdx/mise-action@v2
+
+      - name: Install dependencies
+        run: mise run install
+
+      - name: Run runtime/GitHub live E2E
+        run: mise run test-e2e-runtime-github-live
+        env:
+          E2E_CONFIRM: "1"
+          E2E_GITHUB_REPO: p1c2u/openloop-e2e-sandbox
+          E2E_MODEL: groq/llama-3.3-70b-versatile
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.LIVE_E2E_GITHUB_TOKEN }}

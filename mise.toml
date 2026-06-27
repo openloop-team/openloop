@@ -1,0 +1,75 @@
+[tools]
+python = "3.12"
+uv = "latest"
+
+# Auto-create and activate a project virtualenv when entering the directory.
+[env]
+_.python.venv = { path = ".venv", create = true }
+
+[tasks.install]
+description = "Install the runtime with dev dependencies into the project venv"
+run = "uv pip install -e '.[dev]'"
+
+[tasks.test]
+description = "Run unit and integration tests"
+run = "python -m pytest tests/unit tests/integration -q"
+
+[tasks.test-unit]
+description = "Run isolated unit tests"
+run = "python -m pytest tests/unit -q"
+
+[tasks.test-integration]
+description = "Run in-process integration tests without external services"
+run = "python -m pytest tests/integration -v"
+
+[tasks.test-e2e]
+description = "Bring up Postgres and run Postgres E2E tests"
+run = """
+docker compose up -d postgres
+until [ "$(docker inspect --format '{% raw %}{{.State.Health.Status}}{% endraw %}' "$(docker compose ps -q postgres)")" = healthy ]; do sleep 2; done
+python -m pytest tests/e2e/test_postgres.py -v
+"""
+
+[tasks.test-e2e-runtime-github-live]
+description = "Run opt-in runtime/GitHub live E2E against a real model and GitHub"
+run = """
+if [ "${E2E_CONFIRM:-}" != "1" ]; then
+  echo "Refusing to run runtime/GitHub live E2E. Set E2E_CONFIRM=1 after choosing a sandbox repo."
+  exit 1
+fi
+if [ -z "${GITHUB_TOKEN:-}" ] || [ -z "${E2E_GITHUB_REPO:-}" ]; then
+  echo "GITHUB_TOKEN and E2E_GITHUB_REPO are required."
+  exit 1
+fi
+if [ -z "${E2E_MODEL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "Set E2E_MODEL or one provider key: OPENAI_API_KEY or ANTHROPIC_API_KEY."
+  exit 1
+fi
+E2E_LIVE=1 python -m pytest tests/e2e/test_runtime_github_live.py -v
+"""
+
+[tasks.test-e2e-slack-live]
+description = "Run opt-in Slack Socket Mode live E2E with a stubbed model"
+run = """
+if [ "${E2E_CONFIRM:-}" != "1" ]; then
+  echo "Refusing to run Slack live E2E. Set E2E_CONFIRM=1 after choosing a test channel."
+  exit 1
+fi
+if [ -z "${SLACK_BOT_TOKEN:-}" ] || [ -z "${SLACK_APP_TOKEN:-}" ] || [ -z "${E2E_SLACK_USER_TOKEN:-}" ] || [ -z "${E2E_SLACK_CHANNEL:-}" ]; then
+  echo "SLACK_BOT_TOKEN, SLACK_APP_TOKEN, E2E_SLACK_USER_TOKEN, and E2E_SLACK_CHANNEL are required."
+  exit 1
+fi
+E2E_LIVE=1 python -m pytest tests/e2e/test_slack_socket_live.py -v
+"""
+
+[tasks.dev]
+description = "Run the FastAPI runtime with autoreload"
+run = "python -m uvicorn openloop.app:app --reload"
+
+[tasks.serve]
+description = "Run the runtime (production-style, no reload)"
+run = "python -m uvicorn openloop.app:app --host 0.0.0.0 --port 8000"
+
+[tasks.apply]
+description = "Validate an agent config, e.g. mise run apply -- -f agents/dev-platform.yaml"
+run = "openloop agents apply"

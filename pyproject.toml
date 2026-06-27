@@ -1,0 +1,49 @@
+[project]
+name = "openloop"
+version = "0.0.1"
+description = "Open-source control plane and runtime for team AI agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "pyyaml>=6.0",
+    "litellm>=1.40",
+    "slack-bolt>=1.18",
+    "asyncpg>=0.29",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+]
+mcp = [
+    "mcp>=1.0",
+]
+
+[project.scripts]
+openloop = "openloop.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openloop"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "unit: isolated unit tests",
+    "integration: in-process tests spanning runtime boundaries with fakes",
+    "e2e: end-to-end tests spanning runtime boundaries",
+    "postgres: tests that require reachable Postgres/pgvector",
+    "live: tests that hit external model/provider or GitHub services",
+]

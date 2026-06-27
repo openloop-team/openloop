@@ -1,0 +1,42 @@
+name: Slack Live E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Slack channel ID to use, overriding E2E_SLACK_CHANNEL"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: slack-live-e2e
+  cancel-in-progress: false
+
+jobs:
+  slack-live-e2e:
+    name: Slack Socket Mode live E2E
+    runs-on: ubuntu-latest
+    environment: slack-live-e2e
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up mise
+        uses: jdx/mise-action@v2
+
+      - name: Install dependencies
+        run: mise run install
+
+      - name: Run Slack live E2E
+        run: mise run test-e2e-slack-live
+        env:
+          E2E_CONFIRM: "1"
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_APP_TOKEN: ${{ secrets.SLACK_APP_TOKEN }}
+          E2E_SLACK_USER_TOKEN: ${{ secrets.E2E_SLACK_USER_TOKEN }}
+          E2E_SLACK_CHANNEL: ${{ inputs.channel || vars.E2E_SLACK_CHANNEL }}
