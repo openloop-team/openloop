@@ -96,12 +96,18 @@ class FakeGitHub:
         self.pulls.append(pull)
         return pull
 
+    async def find_pull(self, repo, head):
+        for pull in self.pulls:
+            if pull["repo"] == repo and pull["head"] == head:
+                return pull
+        return None
+
 
 class FakeCodingWorker:
     """A CodingWorker that records its runs and returns a canned outcome.
 
-    Walks the named steps without touching git or a model, so the connector and
-    approval flow can be tested network-free.
+    Walks the named steps (calling ``on_step`` after each, so checkpointing can
+    be exercised) without touching git or a model — network-free.
     """
 
     def __init__(
@@ -113,10 +119,14 @@ class FakeCodingWorker:
         self.body = body
         self.runs: list = []
 
-    async def run(self, state):
+    async def run(self, state, on_step=None):
         from openloop.tools.coding_worker import STEPS, WorkerOutcome
 
-        state.completed_steps.extend(STEPS)
+        for step in STEPS:
+            state.completed_steps.append(step)
+            if on_step is not None:
+                await on_step(state)
+        state.title, state.body = self.title, self.body
         self.runs.append(state)
         return WorkerOutcome(branch=state.branch, title=self.title, body=self.body)
 

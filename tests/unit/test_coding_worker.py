@@ -74,7 +74,7 @@ async def test_pr_body_stamps_job_id():
 
 async def test_worker_failure_records_outcome_without_opening_pr():
     class BoomWorker:
-        async def run(self, state):
+        async def run(self, state, on_step=None):
             state.completed_steps.append("clone")
             raise RuntimeError("clone failed")
 
@@ -115,7 +115,7 @@ async def test_open_pr_failure_records_outcome_without_crashing():
 
 async def test_result_surfaces_worker_model_spend():
     class CostingWorker:
-        async def run(self, state):
+        async def run(self, state, on_step=None):
             state.completed_steps.extend(STEPS)
             return WorkerOutcome(
                 branch=state.branch, title="t", body="b",

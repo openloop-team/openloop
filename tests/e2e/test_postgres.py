@@ -138,3 +138,81 @@ async def test_happy_path_end_to_end(stores):
     assert "Use Redis Streams for ingestion v1." in texts
     # The requester's message was remembered this turn.
     assert any("open an issue to track" in t for t in texts)
+
+
+async def test_worker_checkpoint_resume_across_real_postgres():
+    """A worker job persisted to Postgres resumes on a fresh store instance."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    from openloop.checkpoints.postgres import PostgresCheckpointStore
+    from openloop.tools.coding_worker import (
+        STEPS,
+        CodingWorkerConnector,
+        WorkerOutcome,
+    )
+
+    job_id = f"e2e-{uuid.uuid4().hex[:8]}"
+
+    class _Worker:
+        def __init__(self):
+            self.runs = 0
+
+        async def run(self, state, on_step=None):
+            self.runs += 1
+            for step in STEPS:
+                state.completed_steps.append(step)
+                if on_step is not None:
+                    await on_step(state)
+            state.title, state.body = "t", "b"
+            return WorkerOutcome(branch=state.branch, title="t", body="b")
+
+    class _FlakyGitHub(FakeGitHub):
+        def __init__(self):
+            super().__init__()
+            self.fail_next = True
+
+        async def create_pull(self, *a, **k):
+            if self.fail_next:
+                self.fail_next = False
+                raise RuntimeError("blip")
+            return await super().create_pull(*a, **k)
+
+    store = PostgresCheckpointStore(DSN)
+    await store.setup()
+    try:
+        args = {"repo": "acme/x", "instruction": "do x", "job_id": job_id}
+
+        # First store/worker: pushes, but the PR open fails — persisted to PG.
+        worker1, github1 = _Worker(), _FlakyGitHub()
+        conn1 = CodingWorkerConnector(worker1, github1, checkpoints=store)
+        first = await conn1.execute("pr:write", args)
+        assert not first.ok
+        cp = await store.get(job_id)
+        assert cp.status == "open_pr_failed" and "push" in cp.completed_steps
+
+        # A *fresh* store + connector (simulating a restart) resumes from PG:
+        # the worker is not re-run and exactly one PR is opened.
+        store2 = PostgresCheckpointStore(DSN)
+        await store2.setup()
+        try:
+            worker2, github2 = _Worker(), FakeGitHub()
+            conn2 = CodingWorkerConnector(worker2, github2, checkpoints=store2)
+            second = await conn2.execute("pr:write", args)
+            assert second.ok
+            assert worker2.runs == 0  # resumed past the push
+            assert len(github2.pulls) == 1
+            assert (await store2.get(job_id)).status == "opened"
+        finally:
+            await store2.close()
+    finally:
+        # Best-effort cleanup of this run's row.
+        try:
+            pool = store._require_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM worker_checkpoints WHERE job_id = $1", job_id
+                )
+        except Exception:
+            pass
+        await store.close()

@@ -20,6 +20,8 @@ from openloop.agents import load_agents
 from openloop.agents.schema import Agent
 from openloop.approvals import ApprovalStore, InMemoryApprovalStore
 from openloop.approvals.postgres import PostgresApprovalStore
+from openloop.checkpoints import CheckpointStore, InMemoryCheckpointStore
+from openloop.checkpoints.postgres import PostgresCheckpointStore
 from openloop.config import Settings, get_settings
 from openloop.memory import Embedder, InMemoryStore, LiteLLMEmbedder, MemoryStore
 from openloop.memory.postgres import PostgresMemoryStore
@@ -74,8 +76,18 @@ def build_approval_store(settings: Settings) -> ApprovalStore:
     return InMemoryApprovalStore()
 
 
+def build_checkpoint_store(settings: Settings) -> CheckpointStore:
+    """Pick a worker-checkpoint backend. Postgres setup happens at startup."""
+    if settings.memory_backend == "postgres":
+        return PostgresCheckpointStore(settings.database_url)
+    return InMemoryCheckpointStore()
+
+
 def build_tool_gateway(
-    settings: Settings, agents: dict[str, Agent], approvals: ApprovalStore
+    settings: Settings,
+    agents: dict[str, Agent],
+    approvals: ApprovalStore,
+    checkpoints: CheckpointStore,
 ) -> ToolGateway:
     """Register native connectors plus an MCP connector per configured server.
 
@@ -93,7 +105,9 @@ def build_tool_gateway(
             worker = GitCodingWorker(
                 settings.github_token, model=settings.coding_worker_model
             )
-            gateway.register(CodingWorkerConnector(worker, github_client))
+            gateway.register(
+                CodingWorkerConnector(worker, github_client, checkpoints=checkpoints)
+            )
             log.info(
                 "registered native tool: coding_worker (model=%s)",
                 settings.coding_worker_model,
@@ -150,7 +164,8 @@ def create_app() -> FastAPI:
     store = build_memory_store(settings)
     usage = build_usage_store(settings)
     approvals = build_approval_store(settings)
-    tools = build_tool_gateway(settings, agents, approvals)
+    checkpoints = build_checkpoint_store(settings)
+    tools = build_tool_gateway(settings, agents, approvals, checkpoints)
     # The agent that tool/approval endpoints act on (first configured).
     primary_agent: Agent | None = next(iter(agents.values()), None)
 
@@ -194,6 +209,23 @@ def create_app() -> FastAPI:
         else:
             log.info("approval backend: in-memory (process-local)")
 
+        if isinstance(checkpoints, PostgresCheckpointStore):
+            try:
+                await checkpoints.setup()
+                log.info("checkpoint backend: postgres")
+            except Exception:
+                log.exception(
+                    "postgres checkpoint setup failed — worker resume disabled"
+                )
+                _disable_checkpoints(tools)
+        else:
+            log.info("checkpoint backend: in-memory (process-local)")
+
+        # Resume coding-worker jobs left incomplete by a crash. resolve() won't
+        # re-invoke execute() for an already-approved request, so this reconciler
+        # is what actually triggers the worker's checkpoint resume on startup.
+        await _resume_worker_jobs(tools)
+
         for connector in getattr(tools, "mcp_connectors", []):
             try:
                 await connector.setup()
@@ -211,6 +243,8 @@ def create_app() -> FastAPI:
             await usage.close()
         if isinstance(approvals, PostgresApprovalStore):
             await approvals.close()
+        if isinstance(checkpoints, PostgresCheckpointStore):
+            await checkpoints.close()
 
     app = FastAPI(title="OpenLoop", version="0.0.1", lifespan=lifespan)
     app.state.settings = settings
@@ -356,6 +390,30 @@ def _rebind(app: FastAPI, attr: str, value) -> None:
     runtime = getattr(app.state, "runtime", None)
     if runtime is not None:
         setattr(runtime, attr, value)
+
+
+def _disable_checkpoints(tools: ToolGateway) -> None:
+    """Fall back to process-local checkpoints if the durable store can't start.
+
+    The worker still runs and stays idempotent within a process, but jobs no
+    longer resume across a restart.
+    """
+    worker = tools._tools.get("coding_worker")
+    if worker is not None:
+        worker.checkpoints = InMemoryCheckpointStore()
+
+
+async def _resume_worker_jobs(tools: ToolGateway) -> None:
+    """Drive the coding worker's startup reconciler, if it is registered."""
+    worker = tools._tools.get("coding_worker")
+    if worker is None or not hasattr(worker, "resume_incomplete"):
+        return
+    try:
+        resumed = await worker.resume_incomplete()
+        if resumed:
+            log.info("resumed %d incomplete coding-worker job(s)", len(resumed))
+    except Exception:
+        log.exception("coding-worker job resume failed")
 
 
 app = create_app()

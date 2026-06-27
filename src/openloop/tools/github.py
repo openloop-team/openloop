@@ -34,6 +34,8 @@ class GitHubClient(Protocol):
         draft: bool = True,
     ) -> dict: ...
 
+    async def find_pull(self, repo: str, head: str) -> dict | None: ...
+
 
 class HttpGitHubClient:
     """Thin httpx-backed client against the GitHub REST API."""
@@ -92,6 +94,15 @@ class HttpGitHubClient:
                 "draft": draft,
             },
         )
+
+    async def find_pull(self, repo: str, head: str) -> dict | None:
+        owner = repo.split("/", 1)[0]
+        pulls = await self._request(
+            "GET",
+            f"/repos/{repo}/pulls",
+            params={"head": f"{owner}:{head}", "state": "all"},
+        )
+        return pulls[0] if pulls else None
 
 
 class GitHubConnector:

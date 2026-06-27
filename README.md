@@ -201,7 +201,7 @@ spec:
 | Layer | Now | Later |
 | --- | --- | --- |
 | API / backend | FastAPI | — |
-| Agent runtime | async task pipeline | durable workflows (LangGraph-style) |
+| Agent runtime | async task pipeline + durable coding worker | general durable workflows (LangGraph-style) |
 | Model gateway | LiteLLM | routing analytics |
 | Tools | MCP gateway + native GitHub/Slack | more native connectors |
 | Storage | Postgres + pgvector | — |
@@ -347,8 +347,9 @@ the workflow.
 - [x] Human approval flow + token/cost tracking
 - [x] Docker Compose + config-as-code
 - [ ] Discord / Zoom / GitHub / Linear surfaces
-- [x] Coding worker (draft PRs) — Phase A: connector + approval gate
-- [ ] Durable workflows, Next.js dashboard, OTel/Langfuse tracing
+- [x] Coding worker (draft PRs) — connector + approval gate + crash-resumable
+- [~] Durable workflows — worker-scoped checkpoints/resume done; general engine next
+- [ ] Next.js dashboard, OTel/Langfuse tracing
 
 ## Scope
 
