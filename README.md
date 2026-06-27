@@ -117,7 +117,7 @@ flowchart TB
     end
 
     subgraph MODELS["☁️ &nbsp;Model providers <sub>(external)</sub>"]
-        direction LR
+        direction TB
         M1[OpenAI] ~~~ M2[Anthropic] ~~~ M3[Gemini] ~~~ M4[Ollama] ~~~ M5[OpenRouter]
     end
 
