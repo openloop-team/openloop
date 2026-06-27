@@ -63,6 +63,11 @@ class PostgresSurfaceSessionStore:
                 "CREATE INDEX IF NOT EXISTS surface_sessions_approval_idx "
                 "ON surface_sessions USING GIN (approval_ids)"
             )
+            # Backs the thread-reply lookup (is the bot part of this thread?).
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS surface_sessions_thread_idx "
+                "ON surface_sessions (channel, thread)"
+            )
 
     async def close(self) -> None:
         if self._pool is not None:
@@ -107,6 +112,25 @@ class PostgresSurfaceSessionStore:
                 "SELECT * FROM surface_sessions WHERE approval_ids @> $1::jsonb "
                 "ORDER BY updated_at DESC LIMIT 1",
                 json.dumps([approval_id]),
+            )
+        return _row_to_session(row) if row else None
+
+    async def get_by_thread(self, target: SurfaceTarget) -> SurfaceSession | None:
+        if not target.thread:
+            return None
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            # Scope on the full target (not just channel/thread) so a shared store
+            # never crosses agents/workspaces. (channel, thread) index drives it.
+            row = await conn.fetchrow(
+                "SELECT * FROM surface_sessions WHERE surface = $1 "
+                "AND workspace = $2 AND agent = $3 AND channel = $4 AND thread = $5 "
+                "ORDER BY updated_at DESC LIMIT 1",
+                target.surface,
+                target.workspace,
+                target.agent,
+                target.channel,
+                target.thread,
             )
         return _row_to_session(row) if row else None
 

@@ -37,6 +37,22 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _same_thread_scope(a: "SurfaceTarget", b: "SurfaceTarget") -> bool:
+    """Whether two targets address the same thread for the same bot.
+
+    Thread ownership is keyed on the full scope — surface + workspace + agent +
+    channel + thread — not just channel/thread, so a shared store can't let one
+    agent's reply continue another agent's (or workspace's) session.
+    """
+    return (
+        a.surface == b.surface
+        and a.workspace == b.workspace
+        and a.agent == b.agent
+        and a.channel == b.channel
+        and a.thread == b.thread
+    )
+
+
 @dataclass(slots=True)
 class SurfaceTarget:
     """Where a session's output is delivered — the surface-addressing tuple.
@@ -82,6 +98,10 @@ class SurfaceSessionStore(Protocol):
 
     async def get_by_approval(self, approval_id: str) -> SurfaceSession | None: ...
 
+    async def get_by_thread(
+        self, target: "SurfaceTarget"
+    ) -> SurfaceSession | None: ...
+
     async def upsert(self, session: SurfaceSession) -> None: ...
 
     async def recent(self, limit: int = 100) -> list[SurfaceSession]: ...
@@ -114,6 +134,16 @@ class InMemorySurfaceSessionStore:
             self._by_id.values(), key=lambda s: s.updated_at, reverse=True
         ):
             if approval_id in session.approval_ids:
+                return session
+        return None
+
+    async def get_by_thread(self, target: SurfaceTarget) -> SurfaceSession | None:
+        if not target.thread:
+            return None
+        for session in sorted(
+            self._by_id.values(), key=lambda s: s.updated_at, reverse=True
+        ):
+            if _same_thread_scope(session.target, target):
                 return session
         return None
 

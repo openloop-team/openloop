@@ -35,6 +35,17 @@ def _strip_mentions(text: str) -> str:
     return _MENTION_RE.sub("", text or "").strip()
 
 
+def _strip_bot_mention(text: str, bot_user_id: str | None) -> str:
+    """Strip only the bot's own mention, preserving mentions of other users.
+
+    A thread reply like "ask <@U123> about it" is *about* that user, so we must
+    keep their mention in the task text — only the bot's own @ is noise.
+    """
+    if bot_user_id:
+        text = (text or "").replace(f"<@{bot_user_id}>", " ")
+    return " ".join((text or "").split())
+
+
 def _approver_handle(user: dict) -> str:
     """Best-effort Slack identity → approver handle (e.g. '@priya')."""
     name = user.get("username") or user.get("name") or user.get("id", "")
@@ -79,6 +90,45 @@ async def handle_mention(runner: SessionRunner, event: dict, say) -> None:  # ty
     await runner.run(task, target)
 
 
+async def handle_message(
+    runner: SessionRunner, event: dict, say, *, bot_user_id: str | None = None
+) -> None:  # type: ignore[no-untyped-def]
+    """A non-mention reply in a thread the bot already owns → continue it.
+
+    Slack fires ``message`` for every channel post, so this is deliberately
+    narrow: it only acts on a **thread reply** (has ``thread_ts``) whose thread
+    already has a session — so the bot continues its own conversations but stays
+    silent on unrelated chatter. Bot/self and edited/deleted messages are skipped.
+
+    Only a mention **of the bot** is left to :func:`handle_mention`
+    (``app_mention`` fires solely for bot mentions); a reply mentioning some other
+    user is a perfectly valid follow-up and is handled here. The reply runs as a
+    fresh turn in the same thread; ``run`` dedupes on the message ts.
+    """
+    if event.get("bot_id") or event.get("subtype"):
+        return  # bot message, or an edit/delete/join subtype — not a user reply
+    thread_ts = event.get("thread_ts")
+    if not thread_ts:
+        return  # only thread replies continue a session
+    raw = event.get("text", "")
+    if bot_user_id and f"<@{bot_user_id}>" in raw:
+        return  # the bot itself was @mentioned — app_mention owns that message
+    # Preserve mentions of other users — the reply may be *about* them.
+    text = _strip_bot_mention(raw, bot_user_id)
+    if not text:
+        return
+
+    target = _target_from_event(runner.runtime, event, thread_ts)
+    if await runner.sessions.get_by_thread(target) is None:
+        return  # the bot isn't part of this thread — stay silent
+
+    task = Task(
+        text=text, surface="slack", channel=event.get("channel"),
+        user=event.get("user"),
+    )
+    await runner.run(task, target)
+
+
 def build_slack_app(
     runtime: Runtime,
     sessions: SurfaceSessionStore,
@@ -109,6 +159,15 @@ def build_slack_app(
         # Return fast: the whole turn runs in the background so Slack's event
         # request isn't held open for the agent's (possibly long) work.
         asyncio.create_task(_run_mention(runner, event, say))
+
+    @app.event("message")
+    async def on_message(event, say, context):  # type: ignore[no-untyped-def]
+        # Thread replies that continue one of the bot's sessions (handle_message
+        # filters out everything else). `context.bot_user_id` lets it tell a
+        # mention of the bot (app_mention's job) from one of another user.
+        asyncio.create_task(
+            _run_message(runner, event, say, context.get("bot_user_id"))
+        )
 
     async def _on_decision(ack, body, action, respond, approve):  # type: ignore[no-untyped-def]
         await ack()
@@ -154,6 +213,21 @@ async def _run_mention(runner: SessionRunner, event: dict, say) -> None:  # type
             )
         except Exception:
             logger.exception("failed to post mention-handoff error to the thread")
+
+
+async def _run_message(
+    runner: SessionRunner, event: dict, say, bot_user_id: str | None
+) -> None:  # type: ignore[no-untyped-def]
+    """Background wrapper around :func:`handle_message`.
+
+    Thread replies are ambient (most are filtered out before any work), so an
+    unexpected failure is logged rather than announced in-thread — unlike a direct
+    mention, where the user is explicitly waiting on a reply.
+    """
+    try:
+        await handle_message(runner, event, say, bot_user_id=bot_user_id)
+    except Exception:
+        logger.exception("Slack message handling failed for event %s", event.get("ts"))
 
 
 def build_slack_handler(

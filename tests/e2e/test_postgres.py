@@ -11,6 +11,7 @@ suite stays green without Docker.
 
 import os
 import uuid
+from dataclasses import replace
 
 import pytest
 
@@ -305,6 +306,19 @@ async def test_surface_session_roundtrip_across_real_postgres():
             # The `@>` containment lookup (button → session) resolves the owner.
             assert (await store2.get_by_approval(approval_id)).id == session_id
             assert await store2.get_by_approval("nope") is None
+            # The (scope-aware) thread lookup finds the session for this bot...
+            in_thread = SurfaceTarget(
+                surface="slack", workspace="acme", agent="dev-platform",
+                channel="C1", thread="100.1",
+            )
+            assert (await store2.get_by_thread(in_thread)).id == session_id
+            assert await store2.get_by_thread(
+                replace(in_thread, thread="other")
+            ) is None
+            # ...but not a different agent sharing the same channel/thread.
+            assert await store2.get_by_thread(
+                replace(in_thread, agent="other-agent")
+            ) is None
         finally:
             await store2.close()
     finally:
@@ -317,3 +331,78 @@ async def test_surface_session_roundtrip_across_real_postgres():
         except Exception:
             pass
         await store.close()
+
+
+async def test_session_reconcile_across_real_postgres():
+    """A session that crashed before delivery is recovered + delivered on a fresh
+    runner reading both the session and workflow state from Postgres (Phase D)."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    from openloop.runtime import Runtime
+    from openloop.sessions import SessionRunner
+    from openloop.sessions.postgres import PostgresSurfaceSessionStore
+    from openloop.sessions.store import SurfaceSession, SurfaceTarget
+    from openloop.testing import FakeGateway, FakeSurfaceDelivery
+    from openloop.workflows import WorkflowEngine, WorkflowInstance
+    from openloop.workflows.postgres import PostgresWorkflowStore
+
+    sid = f"sess-{uuid.uuid4().hex[:8]}"
+    agent = load_agent(EXAMPLE_AGENT)
+    workflow_name = f"agent_task:{agent.metadata.name}"
+
+    sessions = PostgresSurfaceSessionStore(DSN)
+    workflows = PostgresWorkflowStore(DSN)
+    await sessions.setup()
+    await workflows.setup()
+    try:
+        # The turn's workflow completed, but the session crashed before delivery.
+        await workflows.upsert(WorkflowInstance(
+            id=sid, workflow=workflow_name, status="completed",
+            state={
+                "final_text": "recovered across restart",
+                "accounted": {"model": "m", "prompt_tokens": 1,
+                              "completion_tokens": 1, "cost_usd": 0.0},
+                "approval_ids": [],
+            },
+        ))
+        await sessions.upsert(SurfaceSession(
+            id=sid,
+            target=SurfaceTarget(surface="slack", workspace="acme",
+                                 agent=agent.metadata.name, channel="C1",
+                                 thread="100.1", event_id=f"ev-{sid}"),
+            status="running", workflow_instance_id=sid, progress_message_id="p0",
+        ))
+
+        # Fresh stores + runner (a restart) reconcile and deliver the answer.
+        sessions2 = PostgresSurfaceSessionStore(DSN)
+        workflows2 = PostgresWorkflowStore(DSN)
+        await sessions2.setup()
+        await workflows2.setup()
+        try:
+            engine = WorkflowEngine(workflows2)
+            runtime = Runtime(agent, gateway=FakeGateway(), engine=engine)
+            delivery = FakeSurfaceDelivery()
+            runner = SessionRunner(runtime, sessions2, delivery)
+
+            repaired = await runner.reconcile()
+
+            assert sid in repaired
+            assert delivery.finals[-1]["text"] == "recovered across restart"
+            assert (await sessions2.get(sid)).status == "completed"
+            assert (await sessions2.get(sid)).final_message_id is not None
+        finally:
+            await sessions2.close()
+            await workflows2.close()
+    finally:
+        try:
+            pool = sessions._require_pool()
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM surface_sessions WHERE id = $1", sid)
+            pool = workflows._require_pool()
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM workflow_instances WHERE id = $1", sid)
+        except Exception:
+            pass
+        await sessions.close()
+        await workflows.close()

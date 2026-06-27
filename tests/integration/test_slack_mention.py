@@ -16,7 +16,8 @@ from openloop.models.gateway import ModelResponse
 from openloop.runtime import Task
 from openloop.sessions import InMemorySurfaceSessionStore, SessionRunner
 from openloop.surfaces.approvals import APPROVE_ACTION, approval_blocks
-from openloop.surfaces.slack import _run_mention, handle_mention
+from openloop.sessions.store import SurfaceSession, SurfaceTarget
+from openloop.surfaces.slack import _run_mention, handle_message, handle_mention
 from openloop.testing import EXAMPLE_AGENT, FakeGitHub, FakeSurfaceDelivery
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
@@ -153,6 +154,105 @@ async def test_handoff_failure_before_delivery_posts_error_in_thread():
 
     assert say.last["text"].startswith("⚠️")
     assert say.last["thread_ts"] == "1700000000.000100"
+
+
+# --- thread-reply continuation (Slice 5) --------------------------------
+
+async def _seed_thread_session(runner, channel="C01DEV", thread="1700000000.000100"):
+    # Match the runtime's agent scope so the (scope-aware) thread lookup finds it.
+    md = runner.runtime.agent.metadata
+    await runner.sessions.upsert(SurfaceSession(
+        id="prev",
+        target=SurfaceTarget(
+            surface="slack", workspace=md.workspace, agent=md.name,
+            channel=channel, thread=thread,
+        ),
+        status="completed", final_message_id="f0",
+    ))
+
+
+def _reply_event(text, **overrides):
+    return _event(text, thread_ts="1700000000.000100", ts="1700000000.000200",
+                  **overrides)
+
+
+async def test_thread_reply_continues_existing_session():
+    runner, runtime, delivery = _runner(_reply("follow-up answer"))
+    await _seed_thread_session(runner)
+
+    await handle_message(runner, _reply_event("a follow-up question"), FakeSay())
+
+    assert runtime.tasks[-1].text == "a follow-up question"
+    assert delivery.finals[-1]["text"] == "follow-up answer"
+    assert delivery.finals[-1]["target"].thread == "1700000000.000100"
+
+
+async def test_thread_reply_ignored_without_existing_session():
+    runner, runtime, delivery = _runner(_reply())
+
+    await handle_message(runner, _reply_event("just chatting"), FakeSay())
+
+    assert runtime.tasks == []  # the bot isn't part of this thread
+    assert delivery.progress == [] and delivery.finals == []
+
+
+async def test_bot_message_is_ignored():
+    runner, runtime, delivery = _runner(_reply())
+    await _seed_thread_session(runner)
+
+    await handle_message(runner, _reply_event("beep", bot_id="B1"), FakeSay())
+
+    assert runtime.tasks == []
+
+
+async def test_edited_message_subtype_is_ignored():
+    runner, runtime, delivery = _runner(_reply())
+    await _seed_thread_session(runner)
+
+    await handle_message(
+        runner, _reply_event("edited", subtype="message_changed"), FakeSay()
+    )
+
+    assert runtime.tasks == []
+
+
+async def test_bot_mention_in_thread_is_left_to_app_mention():
+    runner, runtime, delivery = _runner(_reply())
+    await _seed_thread_session(runner)
+
+    # The bot itself is mentioned → app_mention owns this message.
+    await handle_message(
+        runner, _reply_event("<@U0BOT> hey again"), FakeSay(), bot_user_id="U0BOT"
+    )
+
+    assert runtime.tasks == []
+
+
+async def test_thread_reply_mentioning_another_user_is_handled():
+    # A follow-up mentioning a *different* user is not an app_mention, so it must
+    # be handled here rather than silently dropped.
+    runner, runtime, delivery = _runner(_reply("done"))
+    await _seed_thread_session(runner)
+
+    await handle_message(
+        runner, _reply_event("can you ask <@U999> about it?"),
+        FakeSay(), bot_user_id="U0BOT",
+    )
+
+    assert len(runtime.tasks) == 1
+    # The referenced user is preserved in the task text, not stripped away.
+    assert runtime.tasks[-1].text == "can you ask <@U999> about it?"
+    assert delivery.finals[-1]["text"] == "done"
+
+
+async def test_top_level_message_is_ignored():
+    runner, runtime, delivery = _runner(_reply())
+    await _seed_thread_session(runner)
+
+    # No thread_ts → not a reply continuing a thread.
+    await handle_message(runner, _event("hello channel"), FakeSay())
+
+    assert runtime.tasks == []
 
 
 async def test_approval_reply_renders_blocks_in_thread():
