@@ -1,8 +1,9 @@
 """Native GitHub connector.
 
-Exposes permissioned actions (`issues:read`, `issues:write`, `pulls:read`)
-over a small :class:`GitHubClient` interface so the REST calls can be faked in
-tests. Use a fine-grained, least-privilege token (see Security in the README).
+Exposes permissioned actions (`issues:read`, `issues:write`, `pulls:read`,
+`pulls:write`) over a small :class:`GitHubClient` interface so the REST calls can
+be faked in tests. Use a fine-grained, least-privilege token (see Security in the
+README); `pulls:write` additionally needs `contents:write` to push the branch.
 """
 
 from __future__ import annotations
@@ -22,6 +23,16 @@ class GitHubClient(Protocol):
     async def get_issue(self, repo: str, number: int) -> dict: ...
 
     async def get_pull(self, repo: str, number: int) -> dict: ...
+
+    async def create_pull(
+        self,
+        repo: str,
+        head: str,
+        base: str,
+        title: str,
+        body: str,
+        draft: bool = True,
+    ) -> dict: ...
 
 
 class HttpGitHubClient:
@@ -61,6 +72,27 @@ class HttpGitHubClient:
     async def get_pull(self, repo: str, number: int) -> dict:
         return await self._request("GET", f"/repos/{repo}/pulls/{number}")
 
+    async def create_pull(
+        self,
+        repo: str,
+        head: str,
+        base: str,
+        title: str,
+        body: str,
+        draft: bool = True,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            f"/repos/{repo}/pulls",
+            json={
+                "head": head,
+                "base": base,
+                "title": title,
+                "body": body,
+                "draft": draft,
+            },
+        )
+
 
 class GitHubConnector:
     """Maps permissioned actions onto a :class:`GitHubClient`."""
@@ -71,7 +103,7 @@ class GitHubConnector:
         self.client = client
 
     def supported_permissions(self) -> set[str]:
-        return {"issues:read", "issues:write", "pulls:read"}
+        return {"issues:read", "issues:write", "pulls:read", "pulls:write"}
 
     def describe(self, permission: str) -> ActionSpec:
         if permission == "issues:write":
@@ -94,6 +126,28 @@ class GitHubConnector:
                     "type": "object",
                     "properties": {"repo": _REPO, "number": _NUMBER},
                     "required": ["repo", "number"],
+                },
+            )
+        if permission == "pulls:write":
+            return ActionSpec(
+                "Open a GitHub pull request from an existing pushed branch.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "repo": _REPO,
+                        "head": {
+                            "type": "string",
+                            "description": "branch with the changes",
+                        },
+                        "base": {
+                            "type": "string",
+                            "description": "branch to merge into",
+                        },
+                        "title": {"type": "string"},
+                        "body": {"type": "string"},
+                        "draft": {"type": "boolean"},
+                    },
+                    "required": ["repo", "head", "title"],
                 },
             )
         # pulls:read
@@ -128,6 +182,20 @@ class GitHubConnector:
             return ToolResult(
                 ok=True,
                 summary=f"read PR #{args['number']} in {args['repo']}",
+                data=pull,
+            )
+        if permission == "pulls:write":
+            pull = await self.client.create_pull(
+                args["repo"],
+                args["head"],
+                args.get("base", "main"),
+                args["title"],
+                args.get("body", ""),
+                bool(args.get("draft", True)),
+            )
+            return ToolResult(
+                ok=True,
+                summary=f"opened PR #{pull.get('number')} in {args['repo']}",
                 data=pull,
             )
         return ToolResult(ok=False, summary=f"unsupported permission {permission}")

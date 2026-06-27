@@ -105,6 +105,13 @@ class ToolGateway:
                 message=f"no registered tool provides {action}",
             )
 
+        # Let a tool finalize its args before they cross the approval boundary
+        # (e.g. the coding worker mints a job_id here so it's persisted in the
+        # approval request and reused verbatim at execute time).
+        prepare = getattr(tool, "prepare_args", None)
+        if prepare is not None:
+            args = prepare(permission, args)
+
         if agent.spec.approvals.requires_approval(action):
             request = ApprovalRequest(
                 agent=agent.metadata.name,
@@ -165,4 +172,17 @@ class ToolGateway:
 def _summarize(action: str, args: dict) -> str:
     if action == "github.issues:write":
         return f"create issue in {args.get('repo', '?')}: {args.get('title', '')}".strip()
+    if action == "github.pulls:write":
+        return (
+            f"open PR in {args.get('repo', '?')} "
+            f"({args.get('head', '?')} → {args.get('base', 'main')}): "
+            f"{args.get('title', '')}"
+        ).strip()
+    if action == "coding_worker.pr:write":
+        # Be explicit: this gate lets the worker START and open a *draft* PR.
+        # It is NOT a review of a generated diff (the draft PR is that gate).
+        return (
+            f"run coding worker + open draft PR in {args.get('repo', '?')}: "
+            f"{args.get('instruction', '')}"
+        ).strip()
     return f"{action} {args}"

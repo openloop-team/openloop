@@ -38,7 +38,11 @@ spec:
   tools:
     - name: github
       type: native
-      permissions: ["issues:read", "issues:write", "pulls:read"]
+      permissions: ["issues:read", "issues:write", "pulls:read", "pulls:write"]
+    - name: coding_worker
+      type: native
+      # Runs the worker (clone → model-edit → commit → push) and opens a draft PR.
+      permissions: ["pr:write"]
     - name: ci-logs
       type: mcp
       server: http://localhost:8931
@@ -51,6 +55,8 @@ spec:
     require_for:
       - github.issues:write
       - github.pulls:write
+      # Gates the worker STARTING + opening a draft PR — not a diff review.
+      - coding_worker.pr:write
     approvers: ["@priya", "@maintainers"]
 
   # Spend guardrails

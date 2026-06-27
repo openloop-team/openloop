@@ -207,7 +207,7 @@ spec:
 | Storage | Postgres + pgvector | — |
 | Queue | Redis | — |
 | Surfaces | Slack | Discord / Zoom / GitHub / Linear |
-| Coding worker | — | OpenHands-style |
+| Coding worker | draft PRs (clone → edit → push) | OpenHands-style |
 | Dashboard | — | Next.js |
 | Observability | — | OpenTelemetry / Langfuse traces |
 
@@ -347,7 +347,7 @@ the workflow.
 - [x] Human approval flow + token/cost tracking
 - [x] Docker Compose + config-as-code
 - [ ] Discord / Zoom / GitHub / Linear surfaces
-- [ ] Coding worker (draft PRs)
+- [x] Coding worker (draft PRs) — Phase A: connector + approval gate
 - [ ] Durable workflows, Next.js dashboard, OTel/Langfuse tracing
 
 ## Scope

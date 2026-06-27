@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     # GitHub connector
     github_token: str | None = None
 
+    # Coding worker — model the worker uses to generate edits. Matches the
+    # `task: code` route in the example agent. Codegen is multi-step and
+    # token-heavy; revisit `per_task_usd` for `task: code` accordingly.
+    coding_worker_model: str = "anthropic/claude-sonnet-4-6"
+    # Enable the real git-backed worker (needs a contents:write token + a
+    # sandboxed checkout). Off by default — the connector stays unregistered.
+    coding_worker_enabled: bool = False
+
     # Storage / queue
     database_url: str = (
         "postgresql://openloop:change-me@localhost:5432/openloop_agents"

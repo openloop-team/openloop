@@ -28,6 +28,7 @@ from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 
 from openloop.surfaces.slack import build_slack_app
 from openloop.tools import Invocation, ToolGateway
+from openloop.tools.coding_worker import CodingWorkerConnector, GitCodingWorker
 from openloop.tools.github import GitHubConnector, HttpGitHubClient
 from openloop.tools.mcp import HttpMCPClient, MCPConnector
 from openloop.usage import InMemoryUsageStore, UsageStore, budget_scope_key
@@ -83,8 +84,24 @@ def build_tool_gateway(
     """
     gateway = ToolGateway(approvals=approvals)
     if settings.github_token:
-        gateway.register(GitHubConnector(HttpGitHubClient(settings.github_token)))
+        github_client = HttpGitHubClient(settings.github_token)
+        gateway.register(GitHubConnector(github_client))
         log.info("registered native tool: github")
+        # The coding worker runs model-generated edits, so it stays off unless
+        # explicitly enabled (it needs a contents:write token + a sandbox).
+        if settings.coding_worker_enabled:
+            worker = GitCodingWorker(
+                settings.github_token, model=settings.coding_worker_model
+            )
+            gateway.register(CodingWorkerConnector(worker, github_client))
+            log.info(
+                "registered native tool: coding_worker (model=%s)",
+                settings.coding_worker_model,
+            )
+        else:
+            log.info(
+                "coding_worker tool not registered: set CODING_WORKER_ENABLED=1"
+            )
     else:
         log.warning("github tool not registered: GITHUB_TOKEN unset")
 
