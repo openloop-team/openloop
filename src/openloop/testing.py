@@ -136,6 +136,10 @@ class FakeSurfaceDelivery:
 
     Mints monotonic message ids so the runner's id-guarded idempotency can be
     exercised, and keeps every call for assertions (progress vs final, updates).
+    Models the keyed-idempotency contract: a tagged post (``key``) is remembered,
+    and a ``recover=True`` post with a known key returns the existing id without
+    recording a duplicate — exactly the provider-dedup the runner relies on to
+    close the post-succeeded-but-id-lost window.
     """
 
     def __init__(self) -> None:
@@ -145,15 +149,26 @@ class FakeSurfaceDelivery:
         self.finals: list[dict] = []
         self.errors: list[dict] = []
         self._seq = 0
+        self._by_key: dict[str, str] = {}
 
     def _next_id(self, prefix: str) -> str:
         self._seq += 1
         return f"{prefix}-{self._seq}"
 
-    async def post_progress(self, target, text) -> str:
-        mid = self._next_id("progress")
-        self.progress.append({"id": mid, "target": target, "text": text})
+    def _post(self, bucket: list[dict], prefix: str, record: dict, key, recover) -> str:
+        # Recovery of a previously tagged message → return its id, no duplicate.
+        if key and recover and key in self._by_key:
+            return self._by_key[key]
+        mid = self._next_id(prefix)
+        if key:
+            self._by_key[key] = mid
+        bucket.append({"id": mid, **record})
         return mid
+
+    async def post_progress(self, target, text, *, key=None, recover=False) -> str:
+        return self._post(
+            self.progress, "progress", {"target": target, "text": text}, key, recover
+        )
 
     async def update_progress(self, target, message_id, text) -> None:
         self.updates.append({"id": message_id, "target": target, "text": text})
@@ -163,15 +178,16 @@ class FakeSurfaceDelivery:
             {"id": message_id, "target": target, "text": text, "requests": requests}
         )
 
-    async def post_final(self, target, text, *, blocks=None) -> str:
-        mid = self._next_id("final")
-        self.finals.append({"id": mid, "target": target, "text": text, "blocks": blocks})
-        return mid
+    async def post_final(self, target, text, *, blocks=None, key=None, recover=False) -> str:
+        return self._post(
+            self.finals, "final",
+            {"target": target, "text": text, "blocks": blocks}, key, recover,
+        )
 
-    async def post_error(self, target, text) -> str:
-        mid = self._next_id("error")
-        self.errors.append({"id": mid, "target": target, "text": text})
-        return mid
+    async def post_error(self, target, text, *, key=None, recover=False) -> str:
+        return self._post(
+            self.errors, "error", {"target": target, "text": text}, key, recover
+        )
 
 
 class FakeEmbedder(Embedder):

@@ -231,11 +231,13 @@ async def test_failed_outcome_delivery_is_repaired_on_second_click():
             super().__init__()
             self.fail_finals = 1
 
-        async def post_final(self, target, text, *, blocks=None):
+        async def post_final(self, target, text, *, blocks=None, key=None, recover=False):
             if self.fail_finals > 0:
                 self.fail_finals -= 1
                 raise RuntimeError("slack down")
-            return await super().post_final(target, text, blocks=blocks)
+            return await super().post_final(
+                target, text, blocks=blocks, key=key, recover=recover
+            )
 
     runner, sessions, delivery, github = _waiting_runner(delivery=FlakyDelivery())
     session = await runner.run(_task("open an issue"), _target())
@@ -391,6 +393,29 @@ async def test_retry_redelivers_terminal_session_without_final():
     again = await runner.run(_task(), _target("ev-crash"))
     assert again.final_message_id == session.final_message_id
     assert len(delivery.finals) == 1
+
+
+async def test_final_delivery_is_idempotent_across_lost_id_window():
+    # The narrow window the persisted id can't cover: the provider ACCEPTED the
+    # final post but the process crashed before recording its id, so
+    # final_message_id is still None. The deterministic delivery key lets the
+    # retry recover the original message instead of posting a duplicate answer.
+    runner, sessions, delivery = _runner(
+        ScriptedGateway([ModelResponse(text="answer", model="m")])
+    )
+    session = await runner.run(_task(), _target())
+    assert len(delivery.finals) == 1
+    delivered_id = session.final_message_id
+    assert delivered_id is not None
+
+    # Simulate the lost-id crash window: the post landed, the id was never saved.
+    session.final_message_id = None
+    await sessions.upsert(session)
+
+    # Recovery path (recover=True) dedups by key: no second message, id restored.
+    await runner._ensure_delivered(session)
+    assert len(delivery.finals) == 1
+    assert session.final_message_id == delivered_id
 
 
 # --- runner: interrupted / error ----------------------------------------

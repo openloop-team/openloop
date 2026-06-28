@@ -14,13 +14,15 @@ Progress is coarse for this first pass (``queued`` → ``running`` → ``waiting
 ``completed`` / ``failed``). Every delivery is guarded by a persisted message id,
 so a duplicate event never posts a second final answer, and a retry of a session
 that crashed *after* reaching a terminal state but *before* posting re-delivers
-it once. Two gaps remain by design: a session that crashed mid-turn is recovered
-by the startup reconciler (Slice 6), not this inline path (it must not replay the
-model call); and the narrow window between a successful provider post and
-recording its message id is at-least-once — closing it needs a provider
-idempotency key. The original request does not own the task's lifetime — the
-runner does, and it can be awaited inline (tests) or scheduled in the background
-(Slack).
+it once. The narrow window between a successful provider post and recording its
+message id — where the persisted-id guard can't help — is covered by a
+deterministic delivery key: every post is tagged with it and the recovery path
+looks the message up by key instead of re-posting (best-effort; a surface whose
+lookup can't run degrades back to at-least-once). One gap remains by design: a
+session that crashed mid-turn is recovered by the startup reconciler (Slice 6),
+not this inline path (it must not replay the model call). The original request
+does not own the task's lifetime — the runner does, and it can be awaited inline
+(tests) or scheduled in the background (Slack).
 """
 
 from __future__ import annotations
@@ -303,18 +305,35 @@ class SessionRunner:
         """
         if session.final_message_id is not None:
             return session
+        # This is the retry path: the post may already have landed before its id
+        # was persisted, so ask delivery to recover-or-post (recover=True) rather
+        # than blindly re-posting and duplicating the answer.
         if session.status == "completed":
-            await self._post_final(session, session.result_summary or "(no response)")
+            await self._post_final(
+                session, session.result_summary or "(no response)", recover=True
+            )
         elif session.status in ("failed", "abandoned"):
-            await self._post_error(session)
+            await self._post_error(session, recover=True)
         return session
 
     # --- idempotent delivery helpers (guarded by persisted message ids) ---
 
+    @staticmethod
+    def _delivery_key(session: SurfaceSession, role: str) -> str:
+        """Deterministic dedup key for one of a session's posts.
+
+        Stable across retries (keyed on the session id), so a recovery post can
+        find the message a crashed first attempt already sent. One key per role so
+        progress / final / error never collide.
+        """
+        return f"{session.id}:{role}"
+
     async def _post_progress(self, session: SurfaceSession) -> None:
         if session.progress_message_id is not None:
             return
-        mid = await self.delivery.post_progress(session.target, PROGRESS_TEXT)
+        mid = await self.delivery.post_progress(
+            session.target, PROGRESS_TEXT, key=self._delivery_key(session, "progress")
+        )
         session.progress_message_id = mid
         await self.sessions.upsert(session)
 
@@ -344,16 +363,26 @@ class SessionRunner:
                 out.append(req)
         return out
 
-    async def _post_final(self, session: SurfaceSession, text: str) -> None:
+    async def _post_final(
+        self, session: SurfaceSession, text: str, *, recover: bool = False
+    ) -> None:
         if session.final_message_id is not None:
             return  # already delivered — never post a second final answer
-        mid = await self.delivery.post_final(session.target, text)
+        mid = await self.delivery.post_final(
+            session.target, text,
+            key=self._delivery_key(session, "final"), recover=recover,
+        )
         session.final_message_id = mid
         await self.sessions.upsert(session)
 
-    async def _post_error(self, session: SurfaceSession) -> None:
+    async def _post_error(
+        self, session: SurfaceSession, *, recover: bool = False
+    ) -> None:
         if session.final_message_id is not None:
             return
-        mid = await self.delivery.post_error(session.target, session.error or ERROR_TEXT)
+        mid = await self.delivery.post_error(
+            session.target, session.error or ERROR_TEXT,
+            key=self._delivery_key(session, "error"), recover=recover,
+        )
         session.final_message_id = mid
         await self.sessions.upsert(session)

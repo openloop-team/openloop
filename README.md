@@ -354,10 +354,12 @@ the workflow.
 - [x] Claude Tag-like Slack async delivery — persisted surface sessions, progress
   + final postbacks, approval/thread-reply continuation, startup reconciler,
   conversation-history threading (a follow-up turn replays the thread's prior
-  exchanges), and delivery outside the original request lifecycle
-- [ ] Hardening for full production parity — provider idempotency keys,
-  cross-process wakeups/locks, more surface adapters, and an explicit
-  model-call replay/caching policy
+  exchanges), idempotency-keyed delivery (a crash between a successful post and
+  recording its id is recovered by key instead of re-posting; best-effort, falls
+  back to at-least-once if the surface lookup can't run), and delivery outside the
+  original request lifecycle
+- [ ] Hardening for full production parity — cross-process wakeups/locks, more
+  surface adapters, and an explicit model-call replay/caching policy
 - [ ] Next.js dashboard, OTel/Langfuse tracing
 
 ## Scope
