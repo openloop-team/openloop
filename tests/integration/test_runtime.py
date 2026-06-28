@@ -117,7 +117,7 @@ async def test_runtime_memory_tool_approval_usage_flow():
     assert pending[0].requested_by == "U_requester"
     assert pending[0].args["title"] == "Track: Redis Streams for v1"
 
-    resolved = await tools.resolve(approval_id, "@priya", approve=True)
+    resolved = await tools.resolve(approval_id, "@maciag.artur", approve=True)
     assert resolved.status == "executed"
     assert github.created == [
         {
@@ -130,7 +130,7 @@ async def test_runtime_memory_tool_approval_usage_flow():
     stored = await approvals.get(approval_id)
     assert stored is not None
     assert stored.status == "approved"
-    assert stored.decided_by == "@priya"
+    assert stored.decided_by == "@maciag.artur"
 
     records = await usage.recent(limit=10)
     assert len(records) == 1

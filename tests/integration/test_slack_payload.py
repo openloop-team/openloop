@@ -23,7 +23,7 @@ from openloop.testing import EXAMPLE_AGENT, FakeGitHub
 # A realistic Slack interactive payload for an Approve button click.
 BLOCK_ACTIONS = {
     "type": "block_actions",
-    "user": {"id": "U07ABC123", "username": "priya", "name": "priya",
+    "user": {"id": "U07ABC123", "username": "maciag.artur", "name": "maciag.artur",
              "team_id": "T01"},
     "api_app_id": "A01",
     "container": {"type": "message", "message_ts": "1700000000.000100"},
@@ -62,8 +62,8 @@ def _payload(approval_id: str, action_id: str = APPROVE_ACTION, **user):
 
 
 def test_approver_handle_from_block_actions_user():
-    # block_actions carries username — maps to the configured "@priya" approver.
-    assert _approver_handle(BLOCK_ACTIONS["user"]) == "@priya"
+    # block_actions carries username — maps to the configured "@maciag.artur" approver.
+    assert _approver_handle(BLOCK_ACTIONS["user"]) == "@maciag.artur"
 
 
 def test_approver_handle_falls_back_when_username_absent():
@@ -82,7 +82,7 @@ async def test_approve_payload_executes_via_handler_path():
     action = body["actions"][0]
     msg = await resolve_from_action(gw, action["value"], approver, approve=True)
 
-    assert msg.startswith("✅ Approved by @priya")
+    assert msg.startswith("✅ Approved by @maciag.artur")
     assert github.created  # real execution on approval
 
 

@@ -69,7 +69,7 @@ async def test_approve_runs_worker_and_opens_draft_pr():
     )
     job_id = pending.approval.args["job_id"]
 
-    resolved = await gw.resolve(pending.approval.id, "@priya", approve=True)
+    resolved = await gw.resolve(pending.approval.id, "@maciag.artur", approve=True)
 
     assert resolved.status == "executed"
     assert resolved.result.ok
@@ -89,7 +89,7 @@ async def test_denied_approval_never_runs_worker():
     pending = await gw.invoke(
         agent, "coding_worker.pr:write", {"repo": "acme/x", "instruction": "x"}
     )
-    inv = await gw.resolve(pending.approval.id, "@priya", approve=False)
+    inv = await gw.resolve(pending.approval.id, "@maciag.artur", approve=False)
 
     assert inv.status == "denied"
     assert worker.runs == []

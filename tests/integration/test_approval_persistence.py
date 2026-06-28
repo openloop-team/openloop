@@ -32,14 +32,14 @@ async def test_resolution_persists_through_get_copies():
     pending = await gw.invoke(
         agent, "github.issues:write", {"repo": "acme/x", "title": "T"}
     )
-    resolved = await gw.resolve(pending.approval.id, "@priya", approve=True)
+    resolved = await gw.resolve(pending.approval.id, "@maciag.artur", approve=True)
 
     assert resolved.status == "executed"
     assert github.created  # executed
     # The persisted record reflects the decision (only true if update() ran).
     stored = await store.get(pending.approval.id)
     assert stored.status == "approved"
-    assert stored.decided_by == "@priya"
+    assert stored.decided_by == "@maciag.artur"
 
 
 async def test_denied_resolution_persists():
@@ -50,7 +50,7 @@ async def test_denied_resolution_persists():
     pending = await gw.invoke(
         agent, "github.issues:write", {"repo": "acme/x", "title": "T"}
     )
-    await gw.resolve(pending.approval.id, "@priya", approve=False)
+    await gw.resolve(pending.approval.id, "@maciag.artur", approve=False)
 
     stored = await store.get(pending.approval.id)
     assert stored.status == "denied"

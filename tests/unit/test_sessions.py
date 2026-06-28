@@ -178,9 +178,9 @@ async def test_approve_continues_session_and_posts_outcome_in_thread():
     session = await runner.run(_task("open an issue"), _target())
     approval_id = session.approval_ids[0]
 
-    message = await runner.resolve_approval(approval_id, "@priya", approve=True)
+    message = await runner.resolve_approval(approval_id, "@maciag.artur", approve=True)
 
-    assert message.startswith("✅ Approved by @priya")
+    assert message.startswith("✅ Approved by @maciag.artur")
     assert github.created  # the write executed on approval
     # The outcome is delivered as the final answer in the original thread.
     assert len(delivery.finals) == 1
@@ -197,7 +197,7 @@ async def test_deny_continues_session_without_executing():
     session = await runner.run(_task("open an issue"), _target())
 
     message = await runner.resolve_approval(
-        session.approval_ids[0], "@priya", approve=False
+        session.approval_ids[0], "@maciag.artur", approve=False
     )
 
     assert message.startswith("🚫 Denied")
@@ -244,15 +244,15 @@ async def test_failed_outcome_delivery_is_repaired_on_second_click():
     approval_id = session.approval_ids[0]
 
     # First click: write executes, but delivering the answer fails (swallowed).
-    msg1 = await runner.resolve_approval(approval_id, "@priya", approve=True)
-    assert msg1.startswith("✅ Approved by @priya")
+    msg1 = await runner.resolve_approval(approval_id, "@maciag.artur", approve=True)
+    assert msg1.startswith("✅ Approved by @maciag.artur")
     assert len(github.created) == 1
     stuck = await sessions.get(session.id)
     assert stuck.status == "completed" and stuck.final_message_id is None
     assert delivery.finals == []  # nothing delivered yet
 
     # Second click: no re-execution, and the persisted outcome is re-delivered.
-    await runner.resolve_approval(approval_id, "@priya", approve=True)
+    await runner.resolve_approval(approval_id, "@maciag.artur", approve=True)
     assert len(github.created) == 1  # write was not repeated
     repaired = await sessions.get(session.id)
     assert repaired.final_message_id is not None

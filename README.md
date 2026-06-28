@@ -159,15 +159,15 @@ usage, cost, and outcome to the audit trail and memory.
 agent  📝 Summary (last 24 messages):
        • Moving ingestion off the legacy queue.
        • Redis Streams chosen over Kafka for v1 (lower ops overhead).
-       • Owner: @priya, target: end of next sprint.
+       • Owner: @maciag.artur, target: end of next sprint.
 
-       🧠 Saved to channel memory: "Use Redis Streams for ingestion v1. Owner: @priya."
+       🧠 Saved to channel memory: "Use Redis Streams for ingestion v1. Owner: @maciag.artur."
        Open a GitHub issue to track it?
 
 @dev-platform  yes
 
 agent  ⏳ Write action (create issue in openloop/ingestion) — approval required.
-       @priya / @maintainers, approve?   💸 est. $0.004 · gpt-4o-mini
+       @maciag.artur / @maintainers, approve?   💸 est. $0.004 · gpt-4o-mini
 ```
 
 ## Example: agent config
@@ -192,7 +192,7 @@ spec:
     - { name: github, type: native, permissions: ["issues:write", "pulls:read"] }
   approvals:
     require_for: ["github.issues:write", "github.pulls:write"]
-    approvers: ["@priya", "@maintainers"]
+    approvers: ["@maciag.artur", "@maintainers"]
   budget: { monthly_usd: 50, per_task_usd: 0.50, on_exceeded: block }
 ```
 

@@ -39,12 +39,12 @@ async def test_runs_until_wait_node_then_parks():
 async def test_event_wakes_and_drives_to_completion():
     engine, store = _engine()
     await engine.start("t", "i1", {})
-    inst = await engine.send_event("i1", "gate", {"by": "priya"})
+    inst = await engine.send_event("i1", "gate", {"by": "maciag.artur"})
     assert inst.status == "completed"
     assert inst.completed_steps == ["a", "gate", "b"]
     assert inst.state["log"] == ["a", "b"]
     assert inst.result == {"done": True}
-    assert inst.state["events"]["gate"] == {"by": "priya"}
+    assert inst.state["events"]["gate"] == {"by": "maciag.artur"}
 
 
 async def test_send_event_is_idempotent_after_completion():

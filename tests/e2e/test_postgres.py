@@ -123,13 +123,13 @@ async def test_happy_path_end_to_end(stores):
     assert github.created == []  # nothing executed yet
 
     # --- a human approves; the action executes and persists ---
-    inv = await tools.resolve(approval_id, "@priya", approve=True)
+    inv = await tools.resolve(approval_id, "@maciag.artur", approve=True)
     assert inv.status == "executed"
     assert github.created  # the issue was created on approval
 
     stored = await approvals.get(approval_id)
     assert stored.status == "approved"
-    assert stored.decided_by == "@priya"
+    assert stored.decided_by == "@maciag.artur"
 
     # Usage was recorded to the real audit trail, and the turn was remembered.
     spent_records = await usage.recent(limit=200)

@@ -76,7 +76,7 @@ async def test_approval_then_execute():
     pending = await gw.invoke(
         agent, "github.issues:write", {"repo": "acme/x", "title": "T"}
     )
-    resolved = await gw.resolve(pending.approval.id, "@priya", approve=True)
+    resolved = await gw.resolve(pending.approval.id, "@maciag.artur", approve=True)
     assert resolved.status == "executed"
     assert resolved.result.ok
     assert client.created == [{"number": 1, "repo": "acme/x", "title": "T"}]
@@ -99,6 +99,6 @@ async def test_denied_approval_does_not_execute():
     pending = await gw.invoke(
         agent, "github.issues:write", {"repo": "acme/x", "title": "T"}
     )
-    inv = await gw.resolve(pending.approval.id, "@priya", approve=False)
+    inv = await gw.resolve(pending.approval.id, "@maciag.artur", approve=False)
     assert inv.status == "denied"
     assert client.created == []

@@ -58,7 +58,7 @@ def test_write_requires_approval_then_executes(client):
     # 4. An approver approves — the issue is created.
     ok = client.post(
         f"/approvals/{approval_id}/resolve",
-        json={"approver": "@priya", "approve": True},
+        json={"approver": "@maciag.artur", "approve": True},
     )
     assert ok.json()["status"] == "executed"
     assert client.fake_github.created[0]["title"] == "Track decision"

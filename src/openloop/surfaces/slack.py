@@ -47,7 +47,7 @@ def _strip_bot_mention(text: str, bot_user_id: str | None) -> str:
 
 
 def _approver_handle(user: dict) -> str:
-    """Best-effort Slack identity → approver handle (e.g. '@priya')."""
+    """Best-effort Slack identity → approver handle (e.g. '@maciag.artur')."""
     name = user.get("username") or user.get("name") or user.get("id", "")
     return f"@{name}" if name else "unknown"
 

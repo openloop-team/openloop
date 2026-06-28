@@ -57,8 +57,8 @@ async def test_resolve_approve_executes():
     github = FakeGitHub()
     gateway = ToolGateway(tools=[GitHubConnector(github)])
     req = await _pending(gateway)
-    msg = await resolve_from_action(gateway, req.id, "@priya", approve=True)
-    assert msg.startswith("✅ Approved by @priya")
+    msg = await resolve_from_action(gateway, req.id, "@maciag.artur", approve=True)
+    assert msg.startswith("✅ Approved by @maciag.artur")
     assert github.created  # the issue was created on approval
 
 
@@ -66,7 +66,7 @@ async def test_resolve_deny_does_not_execute():
     github = FakeGitHub()
     gateway = ToolGateway(tools=[GitHubConnector(github)])
     req = await _pending(gateway)
-    msg = await resolve_from_action(gateway, req.id, "@priya", approve=False)
+    msg = await resolve_from_action(gateway, req.id, "@maciag.artur", approve=False)
     assert msg.startswith("🚫 Denied")
     assert github.created == []
 

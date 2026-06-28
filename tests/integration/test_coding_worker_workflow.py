@@ -56,7 +56,7 @@ async def test_approval_event_drives_worker_and_opens_pr():
     )
     job_id = pending.approval.args["job_id"]
 
-    resolved = await gw.resolve(pending.approval.id, "@priya", approve=True)
+    resolved = await gw.resolve(pending.approval.id, "@maciag.artur", approve=True)
 
     assert resolved.status == "executed"
     assert resolved.result.ok
@@ -81,7 +81,7 @@ async def test_resolve_recovers_when_workflow_was_never_started():
     store._by_id.pop(job_id)  # simulate the lost workflow start
     assert await store.get(job_id) is None
 
-    resolved = await gw.resolve(pending.approval.id, "@priya", approve=True)
+    resolved = await gw.resolve(pending.approval.id, "@maciag.artur", approve=True)
 
     assert resolved.status == "executed" and resolved.result.ok
     assert (await store.get(job_id)).status == "completed"
@@ -109,7 +109,7 @@ async def test_result_includes_full_spend_telemetry():
     pending = await gw.invoke(
         _agent(), "coding_worker.pr:write", {"repo": "acme/x", "instruction": "x"},
     )
-    resolved = await gw.resolve(pending.approval.id, "@priya", approve=True)
+    resolved = await gw.resolve(pending.approval.id, "@maciag.artur", approve=True)
 
     data = resolved.result.data
     assert data["cost_usd"] == 0.2
@@ -124,7 +124,7 @@ async def test_denied_approval_cancels_workflow():
     )
     job_id = pending.approval.args["job_id"]
 
-    inv = await gw.resolve(pending.approval.id, "@priya", approve=False)
+    inv = await gw.resolve(pending.approval.id, "@maciag.artur", approve=False)
 
     assert inv.status == "denied"
     assert (await store.get(job_id)).status == "cancelled"
@@ -143,7 +143,7 @@ async def test_open_pr_failure_marks_workflow_failed():
     )
     job_id = pending.approval.args["job_id"]
 
-    resolved = await gw.resolve(pending.approval.id, "@priya", approve=True)
+    resolved = await gw.resolve(pending.approval.id, "@maciag.artur", approve=True)
 
     assert resolved.status == "executed"
     assert not resolved.result.ok
