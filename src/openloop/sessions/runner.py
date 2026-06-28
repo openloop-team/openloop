@@ -4,25 +4,25 @@ This is the delivery layer Phase D adds on top of Phase C's durable chat turn.
 Given an inbound surface event the runner:
 
 1. creates (or re-uses) a :class:`SurfaceSession`, idempotent on the event id;
-2. posts a short progress message and marks the session ``running``;
+2. sets a transient progress indicator and marks the session ``running``;
 3. drives the turn via :meth:`Runtime.handle`, binding the workflow instance id
    to the session id so the two share one identity;
 4. records the result/error on the session and asks the
    :class:`~openloop.sessions.delivery.SurfaceDelivery` to post the final answer.
 
 Progress is coarse for this first pass (``queued`` → ``running`` → ``waiting`` /
-``completed`` / ``failed``). Every delivery is guarded by a persisted message id,
-so a duplicate event never posts a second final answer, and a retry of a session
-that crashed *after* reaching a terminal state but *before* posting re-delivers
-it once. The narrow window between a successful provider post and recording its
-message id — where the persisted-id guard can't help — is covered by a
-deterministic delivery key: every post is tagged with it and the recovery path
-looks the message up by key instead of re-posting (best-effort; a surface whose
-lookup can't run degrades back to at-least-once). One gap remains by design: a
-session that crashed mid-turn is recovered by the startup reconciler (Slice 6),
-not this inline path (it must not replay the model call). The original request
-does not own the task's lifetime — the runner does, and it can be awaited inline
-(tests) or scheduled in the background (Slack).
+``completed`` / ``failed``). Every durable delivery is guarded by a persisted
+message id, so a duplicate event never posts a second final answer, and a retry
+of a session that crashed *after* reaching a terminal state but *before* posting
+re-delivers it once. The narrow window between a successful provider post and
+recording its message id — where the persisted-id guard can't help — is covered
+by a deterministic delivery key: every post is tagged with it and the recovery
+path looks the message up by key instead of re-posting (best-effort; a surface
+whose lookup can't run degrades back to at-least-once). One gap remains by
+design: a session that crashed mid-turn is recovered by the startup reconciler
+(Slice 6), not this inline path (it must not replay the model call). The
+original request does not own the task's lifetime — the runner does, and it can
+be awaited inline (tests) or scheduled in the background (Slack).
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ from openloop.sessions.store import (
 
 logger = logging.getLogger(__name__)
 
-PROGRESS_TEXT = "🤖 On it…"
+PROGRESS_STATUS_TEXT = "is thinking..."
 WAITING_TEXT = "⏳ Waiting for approval…"
 ERROR_TEXT = "⚠️ This task was interrupted and could not be completed."
 
@@ -98,7 +98,7 @@ class SessionRunner:
                 return await self._ensure_delivered(racer)
             raise
 
-        await self._post_progress(session)
+        await self._set_progress_status(session)
         session.status = "running"
         await self.sessions.upsert(session)
 
@@ -137,9 +137,9 @@ class SessionRunner:
             session.approval_ids = list(response.approval_ids)
             session.result_summary = response.text or WAITING_TEXT
             await self.sessions.upsert(session)
-            # Turn the progress message into an approval card (buttons in-thread).
+            # Post (or update) a durable approval card with buttons in-thread.
             requests = await self._approval_requests(session.approval_ids)
-            await self._update_approval(
+            await self._post_or_update_approval(
                 session, response.text or WAITING_TEXT, requests
             )
             return session
@@ -214,7 +214,19 @@ class SessionRunner:
         """
         repaired: list[str] = []
         for session in await self.sessions.recent(limit=1000):
-            if session.status == "waiting" or session.final_message_id is not None:
+            if session.status == "waiting":
+                if session.progress_message_id is None and session.approval_ids:
+                    requests = await self._approval_requests(session.approval_ids)
+                    if requests:
+                        await self._post_or_update_approval(
+                            session,
+                            session.result_summary or WAITING_TEXT,
+                            requests,
+                            recover=True,
+                        )
+                        repaired.append(session.id)
+                continue
+            if session.final_message_id is not None:
                 continue
             if session.status in TERMINAL:
                 await self._ensure_delivered(session)
@@ -302,9 +314,11 @@ class SessionRunner:
         Called for a duplicate event / retry. The ``_post_*`` helpers are guarded
         by ``final_message_id``, so a fully delivered session is returned
         untouched while a terminal-but-undelivered one finally gets its answer. A
-        session still ``queued`` / ``running`` (a mid-turn crash) or ``waiting``
-        is returned as-is — recovering those is the reconciler's job, not this
-        synchronous retry path (which must not replay the model call).
+        session still ``queued`` / ``running`` (a mid-turn crash) is returned
+        as-is — recovering those is the reconciler's job, not this synchronous
+        retry path (which must not replay the model call). A waiting session
+        that lacks an approval card can repair that card from persisted approval
+        ids.
         """
         if session.final_message_id is not None:
             return session
@@ -317,6 +331,15 @@ class SessionRunner:
             )
         elif session.status in ("failed", "abandoned"):
             await self._post_error(session, recover=True)
+        elif session.status == "waiting" and session.progress_message_id is None:
+            requests = await self._approval_requests(session.approval_ids)
+            if requests:
+                await self._post_or_update_approval(
+                    session,
+                    session.result_summary or WAITING_TEXT,
+                    requests,
+                    recover=True,
+                )
         return session
 
     # --- idempotent delivery helpers (guarded by persisted message ids) ---
@@ -327,32 +350,46 @@ class SessionRunner:
 
         Stable across retries (keyed on the session id), so a recovery post can
         find the message a crashed first attempt already sent. One key per role so
-        progress / final / error never collide.
+        approval / final / error never collide.
         """
         return f"{session.id}:{role}"
 
-    async def _post_progress(self, session: SurfaceSession) -> None:
-        if session.progress_message_id is not None:
-            return
-        mid = await self.delivery.post_progress(
-            session.target, PROGRESS_TEXT, key=self._delivery_key(session, "progress")
-        )
-        session.progress_message_id = mid
-        await self.sessions.upsert(session)
+    async def _set_progress_status(self, session: SurfaceSession) -> None:
+        try:
+            await self.delivery.set_progress_status(
+                session.target, PROGRESS_STATUS_TEXT
+            )
+        except Exception:  # noqa: BLE001 — status is transient UI polish
+            logger.warning(
+                "failed to set progress status for session %s",
+                session.id,
+                exc_info=True,
+            )
 
-    async def _update_progress(self, session: SurfaceSession, text: str) -> None:
-        if session.progress_message_id is None:
-            return
-        await self.delivery.update_progress(
-            session.target, session.progress_message_id, text
-        )
-
-    async def _update_approval(self, session: SurfaceSession, text: str, requests) -> None:
+    async def _update_approval(
+        self, session: SurfaceSession, text: str, requests
+    ) -> None:
         if session.progress_message_id is None:
             return
         await self.delivery.update_approval(
             session.target, session.progress_message_id, text, requests
         )
+
+    async def _post_or_update_approval(
+        self, session: SurfaceSession, text: str, requests, *, recover: bool = False
+    ) -> None:
+        if session.progress_message_id is not None:
+            await self._update_approval(session, text, requests)
+            return
+        mid = await self.delivery.post_approval(
+            session.target,
+            text,
+            requests,
+            key=self._delivery_key(session, "approval"),
+            recover=recover,
+        )
+        session.progress_message_id = mid
+        await self.sessions.upsert(session)
 
     async def _approval_requests(self, approval_ids: list[str]) -> list:
         """Fetch the pending ApprovalRequest objects so delivery can render them."""
@@ -372,8 +409,10 @@ class SessionRunner:
         if session.final_message_id is not None:
             return  # already delivered — never post a second final answer
         mid = await self.delivery.post_final(
-            session.target, text,
-            key=self._delivery_key(session, "final"), recover=recover,
+            session.target,
+            text,
+            key=self._delivery_key(session, "final"),
+            recover=recover,
         )
         session.final_message_id = mid
         await self.sessions.upsert(session)

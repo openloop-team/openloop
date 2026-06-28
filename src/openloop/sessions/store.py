@@ -3,9 +3,10 @@
 Phase C made the chat pipeline durable *internally*, but Slack still replied
 inside the original request lifecycle. Phase D turns that into Claude Tag-like
 delivery: a surface event creates a persisted :class:`SurfaceSession`, the agent
-works in the background, and progress / final answers are posted back to the
-thread later. A ``session_id`` is the stable thread tying the surface event → the
-``agent_task`` workflow instance → the progress message → the final answer.
+works in the background, and status indicators, approval cards, and final answers
+are delivered back to the thread later. A ``session_id`` is the stable thread
+tying the surface event → the ``agent_task`` workflow instance → any approval
+card → the final answer.
 
 The session persists its **surface target** (where to deliver) and its **delivery
 state** (which messages were already posted) so the runner can keep delivery
@@ -97,6 +98,8 @@ class SurfaceSession:
     target: SurfaceTarget
     status: str = "queued"
     workflow_instance_id: str | None = None
+    # Durable in-thread approval card id. The column name is historical from the
+    # earlier posted-progress-message flow.
     progress_message_id: str | None = None
     final_message_id: str | None = None
     # Approvals the turn is parked on (Slice 4 maps a button click back here).

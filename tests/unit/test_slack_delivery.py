@@ -18,6 +18,7 @@ class FakeSlackClient:
 
     def __init__(self, *, lookup_error: bool = False) -> None:
         self.posted: list[dict] = []
+        self.statuses: list[dict] = []
         self.lookups = 0
         self.lookup_error = lookup_error
         self._seq = 0
@@ -27,11 +28,27 @@ class FakeSlackClient:
     ):
         self._seq += 1
         ts = f"{self._seq}.0001"
-        self.posted.append({
-            "channel": channel, "thread_ts": thread_ts, "text": text,
-            "blocks": blocks, "metadata": metadata, "ts": ts,
-        })
+        self.posted.append(
+            {
+                "channel": channel,
+                "thread_ts": thread_ts,
+                "text": text,
+                "blocks": blocks,
+                "metadata": metadata,
+                "ts": ts,
+            }
+        )
         return {"ts": ts}
+
+    async def assistant_threads_setStatus(
+        self, *, channel_id, thread_ts, status, **kwargs
+    ):
+        if self.lookup_error:
+            raise RuntimeError("missing assistant scope")
+        self.statuses.append(
+            {"channel_id": channel_id, "thread_ts": thread_ts, "status": status}
+        )
+        return {"ok": True}
 
     async def conversations_replies(
         self, *, channel, ts, include_all_metadata=False, limit=200
@@ -54,7 +71,8 @@ class FakeSlackClient:
             raise RuntimeError("missing channels:history scope")
         msgs = [
             {"ts": p["ts"], "metadata": p["metadata"]}
-            for p in self.posted if p["channel"] == channel
+            for p in self.posted
+            if p["channel"] == channel
         ]
         return {"messages": msgs}
 
@@ -77,6 +95,27 @@ async def test_tagged_post_records_metadata_without_scanning():
     md = client.posted[0]["metadata"]
     assert md["event_type"] == "openloop_delivery"
     assert md["event_payload"]["key"] == "s1:final"
+
+
+async def test_progress_status_uses_assistant_thread_indicator():
+    client = FakeSlackClient()
+    delivery = SlackSurfaceDelivery(client)
+
+    await delivery.set_progress_status(_target(), "is thinking...")
+
+    assert client.statuses == [
+        {"channel_id": "C1", "thread_ts": "100.1", "status": "is thinking..."}
+    ]
+    assert client.posted == []
+
+
+async def test_progress_status_failure_is_non_blocking():
+    client = FakeSlackClient(lookup_error=True)
+    delivery = SlackSurfaceDelivery(client)
+
+    await delivery.set_progress_status(_target(), "is thinking...")
+
+    assert client.statuses == []
 
 
 async def test_recover_returns_existing_message_instead_of_duplicating():

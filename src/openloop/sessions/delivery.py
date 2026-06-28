@@ -1,15 +1,15 @@
-"""Surface delivery — posting progress and final answers back to a surface.
+"""Surface delivery — posting status, approvals, and final answers to a surface.
 
 Phase D decouples the *answer* from the inbound request lifecycle. A
 :class:`SurfaceDelivery` is the surface-agnostic seam the session runner uses to
-post a short progress message, update it as the agent works, and post the final
-answer (or an error) later — possibly long after the original HTTP/Bolt request
-returned.
+set transient progress status, post approval cards when human input is needed,
+and post the final answer (or an error) later — possibly long after the original
+HTTP/Bolt request returned.
 
 Delivery must be **idempotent**: the runner persists the ids returned here on the
 session, so a crash-and-resume or a duplicate inbound event reuses the existing
-progress/final message instead of posting a second one. The protocol returns the
-provider message id from each post; ``update_progress`` takes one back.
+approval/final message instead of posting a second one. The protocol returns the
+provider message id from each durable post; ``update_approval`` takes one back.
 
 That persisted id is the primary guard, but it leaves one window open: between a
 provider accepting a post and the runner recording the returned id, a crash means
@@ -38,22 +38,12 @@ logger = logging.getLogger(__name__)
 
 @runtime_checkable
 class SurfaceDelivery(Protocol):
-    async def post_progress(
-        self, target: SurfaceTarget, text: str, *, key: str | None = None,
-        recover: bool = False,
-    ) -> str:
-        """Post a new progress message; return its provider id.
+    async def set_progress_status(self, target: SurfaceTarget, text: str) -> None:
+        """Set a transient, surface-native progress indicator.
 
-        ``key`` tags the message for idempotent recovery; ``recover`` asks the
-        implementation to first return an already-posted message with this key
-        (closing the post-succeeded-but-id-lost window) rather than duplicating.
+        This is best-effort UI polish: implementations should not let missing
+        provider support or transient provider errors block the actual answer.
         """
-        ...
-
-    async def update_progress(
-        self, target: SurfaceTarget, message_id: str, text: str
-    ) -> None:
-        """Edit an existing progress message in place."""
         ...
 
     async def update_approval(
@@ -63,11 +53,28 @@ class SurfaceDelivery(Protocol):
         text: str,
         requests: "list[ApprovalRequest]",
     ) -> None:
-        """Turn an existing progress message into an approval card with buttons.
+        """Update an existing approval card with buttons or resolution text.
 
-        Editing the progress message in place (rather than posting a new one)
-        keeps it idempotent: a re-run edits the same message instead of stacking
-        duplicate approval prompts in the thread.
+        Editing the approval card in place keeps button handling tidy; the final
+        answer is delivered separately so a cosmetic update failure cannot lose
+        the outcome.
+        """
+        ...
+
+    async def post_approval(
+        self,
+        target: SurfaceTarget,
+        text: str,
+        requests: "list[ApprovalRequest]",
+        *,
+        key: str | None = None,
+        recover: bool = False,
+    ) -> str:
+        """Post a new approval card with buttons; return its provider id.
+
+        ``key`` tags the message for idempotent recovery; ``recover`` asks the
+        implementation to first return an already-posted message with this key
+        (closing the post-succeeded-but-id-lost window) rather than duplicating.
         """
         ...
 
@@ -77,7 +84,7 @@ class SurfaceDelivery(Protocol):
     ) -> str:
         """Post the final answer; return its provider id.
 
-        See :meth:`post_progress` for ``key`` / ``recover``.
+        See :meth:`post_approval` for ``key`` / ``recover``.
         """
         ...
 
@@ -87,7 +94,7 @@ class SurfaceDelivery(Protocol):
     ) -> str:
         """Post an error/interrupted notice; return its provider id.
 
-        See :meth:`post_progress` for ``key`` / ``recover``.
+        See :meth:`post_approval` for ``key`` / ``recover``.
         """
         ...
 
@@ -130,8 +137,10 @@ class SlackSurfaceDelivery:
         try:
             if target.thread:
                 resp = await self.client.conversations_replies(
-                    channel=target.channel, ts=target.thread,
-                    include_all_metadata=True, limit=_LOOKUP_LIMIT,
+                    channel=target.channel,
+                    ts=target.thread,
+                    include_all_metadata=True,
+                    limit=_LOOKUP_LIMIT,
                 )
             else:
                 resp = await self.client.conversations_history(
@@ -147,13 +156,47 @@ class SlackSurfaceDelivery:
         for msg in resp.get("messages", []) or []:
             md = msg.get("metadata") or {}
             payload = md.get("event_payload") or {}
-            if md.get("event_type") == _DELIVERY_EVENT_TYPE and payload.get("key") == key:
+            if (
+                md.get("event_type") == _DELIVERY_EVENT_TYPE
+                and payload.get("key") == key
+            ):
                 return msg.get("ts")
         return None
 
+    async def set_progress_status(self, target: SurfaceTarget, text: str) -> None:
+        """Set Slack's assistant-thread status, e.g. "<App> is thinking..."."""
+        if not target.channel or not target.thread:
+            return
+        try:
+            setter = getattr(self.client, "assistant_threads_setStatus", None)
+            if setter is not None:
+                await setter(
+                    channel_id=target.channel, thread_ts=target.thread, status=text
+                )
+            else:
+                await self.client.api_call(
+                    "assistant.threads.setStatus",
+                    json={
+                        "channel_id": target.channel,
+                        "thread_ts": target.thread,
+                        "status": text,
+                    },
+                )
+        except Exception:  # noqa: BLE001 — status must never block delivery
+            logger.warning(
+                "failed to set Slack assistant status for thread %s",
+                target.thread,
+                exc_info=True,
+            )
+
     async def _post(
-        self, target: SurfaceTarget, text: str, *,
-        blocks: list[dict] | None, key: str | None, recover: bool,
+        self,
+        target: SurfaceTarget,
+        text: str,
+        *,
+        blocks: list[dict] | None,
+        key: str | None,
+        recover: bool,
     ) -> str:
         """Tagged, idempotent post: recover an existing keyed message or post one."""
         if key and recover:
@@ -161,29 +204,15 @@ class SlackSurfaceDelivery:
             if existing is not None:
                 return existing
         resp = await self.client.chat_postMessage(
-            channel=target.channel, thread_ts=target.thread, text=text,
-            blocks=blocks, metadata=self._metadata(key),
+            channel=target.channel,
+            thread_ts=target.thread,
+            text=text,
+            blocks=blocks,
+            metadata=self._metadata(key),
         )
         return resp["ts"]
 
-    async def post_progress(
-        self, target: SurfaceTarget, text: str, *, key: str | None = None,
-        recover: bool = False,
-    ) -> str:
-        return await self._post(
-            target, text, blocks=None, key=key, recover=recover
-        )
-
-    async def update_progress(
-        self, target: SurfaceTarget, message_id: str, text: str
-    ) -> None:
-        await self.client.chat_update(
-            channel=target.channel, ts=message_id, text=text
-        )
-
-    async def update_approval(
-        self, target, message_id, text, requests
-    ) -> None:
+    async def update_approval(self, target, message_id, text, requests) -> None:
         # Local import keeps the Block Kit helper out of the surface-agnostic core.
         from openloop.surfaces.approvals import approval_blocks
 
@@ -194,18 +223,37 @@ class SlackSurfaceDelivery:
             blocks=approval_blocks(requests),
         )
 
-    async def post_final(
-        self, target: SurfaceTarget, text: str, *, blocks: list[dict] | None = None,
-        key: str | None = None, recover: bool = False,
+    async def post_approval(
+        self, target, text, requests, *, key=None, recover=False
     ) -> str:
+        # Local import keeps the Block Kit helper out of the surface-agnostic core.
+        from openloop.surfaces.approvals import approval_blocks
+
         return await self._post(
-            target, text, blocks=blocks, key=key, recover=recover
+            target,
+            text,
+            blocks=approval_blocks(requests),
+            key=key,
+            recover=recover,
         )
 
-    async def post_error(
-        self, target: SurfaceTarget, text: str, *, key: str | None = None,
+    async def post_final(
+        self,
+        target: SurfaceTarget,
+        text: str,
+        *,
+        blocks: list[dict] | None = None,
+        key: str | None = None,
         recover: bool = False,
     ) -> str:
-        return await self._post(
-            target, text, blocks=None, key=key, recover=recover
-        )
+        return await self._post(target, text, blocks=blocks, key=key, recover=recover)
+
+    async def post_error(
+        self,
+        target: SurfaceTarget,
+        text: str,
+        *,
+        key: str | None = None,
+        recover: bool = False,
+    ) -> str:
+        return await self._post(target, text, blocks=None, key=key, recover=recover)

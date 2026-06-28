@@ -132,10 +132,10 @@ class FakeCodingWorker:
 
 
 class FakeSurfaceDelivery:
-    """In-memory SurfaceDelivery — records posts/updates without a live surface.
+    """In-memory SurfaceDelivery — records delivery calls without a live surface.
 
     Mints monotonic message ids so the runner's id-guarded idempotency can be
-    exercised, and keeps every call for assertions (progress vs final, updates).
+    exercised, and keeps every call for assertions (status, approvals, final).
     Models the keyed-idempotency contract: a tagged post (``key``) is remembered,
     and a ``recover=True`` post with a known key returns the existing id without
     recording a duplicate — exactly the provider-dedup the runner relies on to
@@ -143,8 +143,7 @@ class FakeSurfaceDelivery:
     """
 
     def __init__(self) -> None:
-        self.progress: list[dict] = []
-        self.updates: list[dict] = []
+        self.statuses: list[dict] = []
         self.approvals: list[dict] = []
         self.finals: list[dict] = []
         self.errors: list[dict] = []
@@ -165,23 +164,34 @@ class FakeSurfaceDelivery:
         bucket.append({"id": mid, **record})
         return mid
 
-    async def post_progress(self, target, text, *, key=None, recover=False) -> str:
-        return self._post(
-            self.progress, "progress", {"target": target, "text": text}, key, recover
-        )
-
-    async def update_progress(self, target, message_id, text) -> None:
-        self.updates.append({"id": message_id, "target": target, "text": text})
+    async def set_progress_status(self, target, text) -> None:
+        self.statuses.append({"target": target, "text": text})
 
     async def update_approval(self, target, message_id, text, requests) -> None:
         self.approvals.append(
             {"id": message_id, "target": target, "text": text, "requests": requests}
         )
 
-    async def post_final(self, target, text, *, blocks=None, key=None, recover=False) -> str:
+    async def post_approval(
+        self, target, text, requests, *, key=None, recover=False
+    ) -> str:
         return self._post(
-            self.finals, "final",
-            {"target": target, "text": text, "blocks": blocks}, key, recover,
+            self.approvals,
+            "approval",
+            {"target": target, "text": text, "requests": requests},
+            key,
+            recover,
+        )
+
+    async def post_final(
+        self, target, text, *, blocks=None, key=None, recover=False
+    ) -> str:
+        return self._post(
+            self.finals,
+            "final",
+            {"target": target, "text": text, "blocks": blocks},
+            key,
+            recover,
         )
 
     async def post_error(self, target, text, *, key=None, recover=False) -> str:

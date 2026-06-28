@@ -351,8 +351,8 @@ the workflow.
 - [x] Durable workflows — engine + approval-as-wait-node; worker resumes on crash;
   chat pipeline runs as a workflow (bounded: persisted turn state + idempotent
   writes; model calls are not replayed on crash)
-- [x] Claude Tag-like Slack async delivery — persisted surface sessions, progress
-  + final postbacks, approval/thread-reply continuation, startup reconciler,
+- [x] Slack async delivery — persisted surface sessions, thinking
+  status + final postbacks, approval/thread-reply continuation, startup reconciler,
   conversation-history threading (a follow-up turn replays the thread's prior
   exchanges), idempotency-keyed delivery (a crash between a successful post and
   recording its id is recovered by key instead of re-posting; best-effort, falls

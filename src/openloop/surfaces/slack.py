@@ -2,7 +2,7 @@
 
 Handles `app_mention` events with Phase D's async-delivery contract: a mention
 creates a persisted :class:`~openloop.sessions.store.SurfaceSession`, the handler
-posts a short in-thread progress message and returns fast, and the
+sets a transient in-thread progress indicator and returns fast, and the
 :class:`~openloop.sessions.runner.SessionRunner` works the turn in the background,
 posting the final answer (or an approval card) back to the thread later. Built on
 slack-bolt's async app, exposed to FastAPI via the request handler.
@@ -195,9 +195,8 @@ def build_slack_app(
 async def _run_mention(runner: SessionRunner, event: dict, say) -> None:  # type: ignore[no-untyped-def]
     """Background wrapper around :func:`handle_mention` that swallows errors.
 
-    The runner already records + delivers its own failures *once a session and
-    its progress message exist*. This guard covers the earlier handoff steps
-    (session-store write, the very first ``post_progress``) whose failure would
+    The runner already records + delivers its own failures *once a session
+    exists*. This guard covers the earlier handoff steps whose failure would
     otherwise leave the user staring at a mention that silently went nowhere — so
     on any escape it posts a best-effort error notice in-thread.
     """

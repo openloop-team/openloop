@@ -103,12 +103,13 @@ async def test_mention_to_progress_then_final():
 
     assert session.status == "completed"
     assert session.result_summary == "here you go"
-    # Progress posted first, then a single final answer.
-    assert len(delivery.progress) == 1
+    # A transient thinking indicator is set, then a single final answer is posted.
+    assert delivery.statuses[0]["text"] == "is thinking..."
     assert len(delivery.finals) == 1
     assert delivery.finals[0]["text"] == "here you go"
-    # Both message ids persisted on the session, and the workflow shares its id.
-    assert session.progress_message_id == delivery.progress[0]["id"]
+    # The final message id is persisted on the session, and the workflow shares
+    # its id. The transient status indicator has no durable message id.
+    assert session.progress_message_id is None
     assert session.final_message_id == delivery.finals[0]["id"]
     assert session.workflow_instance_id == session.id
 
@@ -149,9 +150,12 @@ async def test_pending_approval_parks_session_waiting():
     assert (await sessions.get(session.id)).approval_ids == session.approval_ids
     # No final answer yet — the approval continuation (Slice 4) delivers it.
     assert delivery.finals == []
-    # The progress message was turned into an approval card carrying the request.
+    # The thinking indicator was set, then an approval card was posted carrying
+    # the request.
+    assert delivery.statuses[0]["text"] == "is thinking..."
     assert len(delivery.approvals) == 1
     assert [r.id for r in delivery.approvals[0]["requests"]] == session.approval_ids
+    assert session.progress_message_id == delivery.approvals[0]["id"]
     assert github.created == []  # write not executed
 
 
@@ -367,6 +371,23 @@ async def test_reconcile_leaves_waiting_and_delivered_sessions_alone():
 
     assert repaired == []
     assert delivery.finals == [] and delivery.errors == []
+
+
+async def test_reconcile_repairs_waiting_session_without_approval_card_id():
+    runner, sessions, delivery, _github = _waiting_runner()
+    session = await runner.run(_task("open an issue"), _target("ev-waiting"))
+    original_card = session.progress_message_id
+
+    # Simulate a crash after Slack accepted the approval card but before its ts
+    # was persisted. The delivery key lets reconcile recover the same card id.
+    session.progress_message_id = None
+    await sessions.upsert(session)
+
+    repaired = await runner.reconcile()
+
+    assert repaired == [session.id]
+    assert len(delivery.approvals) == 1
+    assert (await sessions.get(session.id)).progress_message_id == original_card
 
 
 # --- runner: crash-before-delivery repaired on retry ---------------------

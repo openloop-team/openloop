@@ -1,10 +1,10 @@
 """Deterministic coverage of the Slack ``app_mention`` handler — no live Slack.
 
 Phase D async delivery: a mention creates a :class:`SurfaceSession` and the
-:class:`SessionRunner` posts progress + final (or an approval card) back to the
-thread via a :class:`SurfaceDelivery`. This drives :func:`handle_mention` with a
-synthetic event and a :class:`FakeSurfaceDelivery` — the full glue from event →
-Task → target → delivery, without a live Slack connection.
+:class:`SessionRunner` sets status + posts final (or an approval card) back to
+the thread via a :class:`SurfaceDelivery`. This drives :func:`handle_mention`
+with a synthetic event and a :class:`FakeSurfaceDelivery` — the full glue from
+event → Task → target → delivery, without a live Slack connection.
 """
 
 import types
@@ -96,8 +96,8 @@ async def test_mention_becomes_task_with_slack_identity():
     assert task.surface == "slack"
     assert task.channel == "C01DEV"
     assert task.user == "U07ABC123"
-    # The answer is delivered (progress first, then a single final) in-thread.
-    assert len(delivery.progress) == 1
+    # The indicator is set, then the answer is delivered in-thread.
+    assert delivery.statuses[0]["text"] == "is thinking..."
     assert delivery.finals[-1]["text"] == "here you go"
     assert delivery.finals[-1]["target"].thread == "1700000000.000100"
 
@@ -109,7 +109,7 @@ async def test_empty_mention_gets_help_and_skips_runtime():
     await handle_mention(runner, _event("<@U0BOT>   "), say)
 
     assert runtime.tasks == []  # never reached the runtime
-    assert delivery.progress == []  # no session started
+    assert delivery.statuses == []  # no thinking indicator for help text
     assert say.last["text"].startswith("Hi — mention me")
 
 
@@ -139,9 +139,9 @@ async def test_runtime_failure_posts_error_not_crash():
 
 
 async def test_handoff_failure_before_delivery_posts_error_in_thread():
-    # A failure *before* a session/progress message exists (e.g. the session-store
-    # write or the first post_progress) escapes the runner; the background wrapper
-    # must still surface an error in-thread instead of failing silently.
+    # A failure *before* a session exists (e.g. the session-store write) escapes
+    # the runner; the background wrapper must still surface an error in-thread
+    # instead of failing silently.
     class BoomRunner:
         def __init__(self):
             self.runtime = types.SimpleNamespace(agent=load_agent(EXAMPLE_AGENT))
@@ -193,7 +193,7 @@ async def test_thread_reply_ignored_without_existing_session():
     await handle_message(runner, _reply_event("just chatting"), FakeSay())
 
     assert runtime.tasks == []  # the bot isn't part of this thread
-    assert delivery.progress == [] and delivery.finals == []
+    assert delivery.statuses == [] and delivery.finals == []
 
 
 async def test_bot_message_is_ignored():
@@ -270,8 +270,8 @@ async def test_approval_reply_renders_blocks_in_thread():
 
     await handle_mention(runner, _event("<@U0BOT> open an issue"), say)
 
-    # The progress message is turned into an approval card (with the buttons),
-    # carrying the pending request, in-thread.
+    # A durable approval card is posted (with the buttons), carrying the pending
+    # request, in-thread.
     assert len(delivery.approvals) == 1
     card = delivery.approvals[-1]
     assert card["target"].thread == "1700000000.000100"
