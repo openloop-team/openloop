@@ -28,11 +28,11 @@ spec:
     default: openai/gpt-4o-mini
     routes:
       - match: { task: summarize }
-        model: openai/gpt-4o-mini
+        model: groq/llama-3.1-8b-instant
       - match: { task: code }
-        model: anthropic/claude-sonnet-4-6
+        model: anthropic/claude-opus-4-8
       - match: { task: investigate }
-        model: openrouter/google/gemini-2.5-pro
+        model: anthropic/claude-sonnet-4-6
 
   # Explicit tool allowlist (least privilege)
   tools:
@@ -57,7 +57,7 @@ spec:
       - github.pulls:write
       # Gates the worker STARTING + opening a draft PR — not a diff review.
       - coding_worker.pr:write
-    approvers: ["@priya", "@maintainers"]
+    approvers: ["@maciag.artur"]
 
   # Spend guardrails
   budget:

@@ -1,0 +1,49 @@
+# Production-ish deploy: single always-on Slack agent over Socket Mode.
+#
+# Differs from the dev docker-compose.yml on purpose:
+#   - runs the Socket Mode entrypoint (no public URL / inbound port needed)
+#   - Postgres on by default (durable memory + sessions + workflows)
+#   - no Redis (not used by the runtime yet)
+#   - restart: unless-stopped so it survives reboots
+#
+# Usage on the server:
+#   cp .env.example .env   # then fill in tokens/keys
+#   docker compose -f docker-compose.deploy.yml up -d --build
+#   docker compose -f docker-compose.deploy.yml logs -f runtime
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-openloop}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: ${POSTGRES_DB:-openloop}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-openloop}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  runtime:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    # Derive the DB URL from the same vars Postgres uses, pointed at the
+    # in-network service host. Overrides any DATABASE_URL in .env so the
+    # localhost example value can't leak in.
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-openloop}
+    # Socket Mode opens an OUTBOUND WebSocket to Slack — no inbound port.
+    command: openloop slack socket
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Edit agents/*.yaml and `docker compose ... restart runtime` — no rebuild.
+    volumes:
+      - ./agents:/app/agents:ro
+
+volumes:
+  pgdata:
