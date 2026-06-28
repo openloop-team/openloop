@@ -43,6 +43,10 @@ PROGRESS_TEXT = "🤖 On it…"
 WAITING_TEXT = "⏳ Waiting for approval…"
 ERROR_TEXT = "⚠️ This task was interrupted and could not be completed."
 
+# How many prior thread turns to replay as conversation history. A safety bound
+# on context size, not a correctness limit — older turns fall back to recall.
+HISTORY_TURN_LIMIT = 20
+
 
 class SessionRunner:
     """Runs a task as a background session and delivers the answer back."""
@@ -71,7 +75,14 @@ class SessionRunner:
         if existing is not None:
             return await self._ensure_delivered(existing)
 
-        session = SurfaceSession(id=uuid.uuid4().hex, target=target, status="queued")
+        session = SurfaceSession(
+            id=uuid.uuid4().hex,
+            target=target,
+            status="queued",
+            # Persist the inbound text so a later turn in this thread can replay it
+            # as conversation history (see _apply_thread_history).
+            request_text=task.text,
+        )
         # One session : one workflow instance — share the id so the approval
         # continuation / reconciler can map between them trivially.
         session.workflow_instance_id = session.id
@@ -88,6 +99,11 @@ class SessionRunner:
         await self._post_progress(session)
         session.status = "running"
         await self.sessions.upsert(session)
+
+        # Replay earlier turns of this thread so the model has the conversation in
+        # context, not just semantic recall. Done before handle() so the history
+        # is baked into the workflow's persisted turn state (resume-safe).
+        await self._apply_thread_history(task, session)
 
         try:
             response = await self.runtime.handle(
@@ -215,6 +231,31 @@ class SessionRunner:
                 continue
             repaired.append(session.id)
         return repaired
+
+    async def _apply_thread_history(self, task: Task, session: SurfaceSession) -> None:
+        """Populate ``task.history`` from earlier delivered turns in this thread.
+
+        Rebuilds the conversation from the durable sessions — each prior delivered
+        exchange contributes a ``user`` (its request) + ``assistant`` (its answer)
+        pair, oldest-first — rather than re-fetching the surface's own transcript.
+        That keeps it surface-agnostic and free of delivery scaffolding (progress
+        notes, approval cards never appear). The store decides what's replayable
+        (only completed, *delivered* exchanges — never an answer the user didn't
+        see; see ``thread_history``), so this just maps them to messages. A caller
+        that already supplied history is left untouched, and a session with no
+        thread (or the thread's first turn) simply gets no history.
+        """
+        if task.history or session.target.thread is None:
+            return
+        prior = await self.sessions.thread_history(
+            session.target, exclude_id=session.id, limit=HISTORY_TURN_LIMIT
+        )
+        turns: list[dict[str, str]] = []
+        for s in prior:
+            turns.append({"role": "user", "content": s.request_text})
+            turns.append({"role": "assistant", "content": s.result_summary})
+        if turns:
+            task.history = turns
 
     async def _recover(self, session: SurfaceSession) -> tuple[bool, object]:
         """``(found, response)`` for a session's workflow — see

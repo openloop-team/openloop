@@ -352,11 +352,12 @@ the workflow.
   chat pipeline runs as a workflow (bounded: persisted turn state + idempotent
   writes; model calls are not replayed on crash)
 - [x] Claude Tag-like Slack async delivery — persisted surface sessions, progress
-  + final postbacks, approval/thread-reply continuation, startup reconciler, and
-  delivery outside the original request lifecycle
+  + final postbacks, approval/thread-reply continuation, startup reconciler,
+  conversation-history threading (a follow-up turn replays the thread's prior
+  exchanges), and delivery outside the original request lifecycle
 - [ ] Hardening for full production parity — provider idempotency keys,
-  cross-process wakeups/locks, conversation-history threading, more surface
-  adapters, and an explicit model-call replay/caching policy
+  cross-process wakeups/locks, more surface adapters, and an explicit
+  model-call replay/caching policy
 - [ ] Next.js dashboard, OTel/Langfuse tracing
 
 ## Scope

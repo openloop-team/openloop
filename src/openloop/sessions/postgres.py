@@ -39,12 +39,18 @@ class PostgresSurfaceSessionStore:
                     progress_message_id  TEXT,
                     final_message_id     TEXT,
                     approval_ids         JSONB NOT NULL DEFAULT '[]',
+                    request_text         TEXT,
                     result_summary       TEXT,
                     error                TEXT,
                     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
                 """
+            )
+            # Migration for tables created before conversation-history threading.
+            await conn.execute(
+                "ALTER TABLE surface_sessions "
+                "ADD COLUMN IF NOT EXISTS request_text TEXT"
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS surface_sessions_status_idx "
@@ -134,6 +140,51 @@ class PostgresSurfaceSessionStore:
             )
         return _row_to_session(row) if row else None
 
+    async def thread_history(
+        self,
+        target: SurfaceTarget,
+        *,
+        exclude_id: str | None = None,
+        limit: int = 20,
+    ) -> list[SurfaceSession]:
+        if not target.thread:
+            return []
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            # Most-recent `limit` *delivered* exchanges in the thread, then flipped
+            # to ascending so the caller replays them oldest-first. Scoped on the
+            # full target (the (channel, thread) index drives the inner scan).
+            # The status/final_message_id/text predicates mirror
+            # store._is_replayable_turn: only turns the user actually saw, filtered
+            # BEFORE the limit so a burst of failed/pending replies can't crowd
+            # valid older exchanges out of the window. `exclude_id` drops the
+            # in-flight session via a NULL-safe guard.
+            rows = await conn.fetch(
+                """
+                SELECT * FROM (
+                    SELECT * FROM surface_sessions
+                    WHERE surface = $1 AND workspace = $2 AND agent = $3
+                      AND channel = $4 AND thread = $5
+                      AND ($6::text IS NULL OR id <> $6)
+                      AND status = 'completed'
+                      AND final_message_id IS NOT NULL
+                      AND request_text IS NOT NULL
+                      AND result_summary IS NOT NULL
+                    ORDER BY created_at DESC
+                    LIMIT $7
+                ) recent
+                ORDER BY created_at ASC
+                """,
+                target.surface,
+                target.workspace,
+                target.agent,
+                target.channel,
+                target.thread,
+                exclude_id,
+                limit,
+            )
+        return [_row_to_session(r) for r in rows]
+
     async def upsert(self, session: SurfaceSession) -> None:
         pool = self._require_pool()
         t = session.target
@@ -144,10 +195,10 @@ class PostgresSurfaceSessionStore:
                 INSERT INTO surface_sessions (
                     id, surface, workspace, agent, channel, thread, event_id,
                     status, workflow_instance_id, progress_message_id,
-                    final_message_id, approval_ids, result_summary, error,
-                    updated_at
+                    final_message_id, approval_ids, request_text, result_summary,
+                    error, updated_at
                 )
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now())
                 ON CONFLICT (id) DO UPDATE SET
                     surface = EXCLUDED.surface,
                     workspace = EXCLUDED.workspace,
@@ -160,6 +211,7 @@ class PostgresSurfaceSessionStore:
                     progress_message_id = EXCLUDED.progress_message_id,
                     final_message_id = EXCLUDED.final_message_id,
                     approval_ids = EXCLUDED.approval_ids,
+                    request_text = EXCLUDED.request_text,
                     result_summary = EXCLUDED.result_summary,
                     error = EXCLUDED.error,
                     updated_at = now()
@@ -176,6 +228,7 @@ class PostgresSurfaceSessionStore:
                 session.progress_message_id,
                 session.final_message_id,
                 json.dumps(session.approval_ids),
+                session.request_text,
                 session.result_summary,
                 session.error,
             )
@@ -207,6 +260,7 @@ def _row_to_session(row) -> SurfaceSession:
         progress_message_id=row["progress_message_id"],
         final_message_id=row["final_message_id"],
         approval_ids=json.loads(row["approval_ids"]) if row["approval_ids"] else [],
+        request_text=row["request_text"],
         result_summary=row["result_summary"],
         error=row["error"],
         created_at=row["created_at"] or now,

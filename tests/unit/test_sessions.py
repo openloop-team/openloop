@@ -5,6 +5,8 @@ mention → progress → final / waiting / interrupted flows with idempotent del
 (a duplicate event never starts a second turn or posts a second answer).
 """
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from openloop.agents import load_agent
@@ -409,3 +411,178 @@ async def test_interrupted_turn_marks_abandoned_and_posts_error():
     assert session.error
     assert len(delivery.errors) == 1
     assert delivery.finals == []
+
+
+# --- runner: conversation-history threading ------------------------------
+
+def _completed(id_, *, request, answer, at, thread="100.1", delivered=True):
+    """A completed session in `thread`, with an explicit created_at for ordering.
+
+    `delivered` controls whether the answer actually reached the user (a recorded
+    final_message_id) — an undelivered turn must not be replayed as history.
+    """
+    return SurfaceSession(
+        id=id_,
+        target=SurfaceTarget(
+            surface="slack",
+            workspace="acme",
+            agent="dev-platform",
+            channel="C1",
+            thread=thread,
+            event_id=f"ev-{id_}",
+        ),
+        status="completed",
+        request_text=request,
+        result_summary=answer,
+        final_message_id=f"final-{id_}" if delivered else None,
+        created_at=at,
+    )
+
+
+async def test_followup_turn_threads_prior_exchange_into_history():
+    gateway = ScriptedGateway(
+        [
+            ModelResponse(text="first answer", model="m"),
+            ModelResponse(text="second answer", model="m"),
+        ]
+    )
+    runner, sessions, _ = _runner(gateway)
+
+    first = await runner.run(_task("first question"), _target("ev1"))
+    await runner.run(_task("second question"), _target("ev2"))
+
+    # The inbound text is persisted so it can be replayed later.
+    assert first.request_text == "first question"
+
+    # The first turn had no prior history; the second saw the first exchange.
+    first_roles = [m["role"] for m in gateway.calls[0]["messages"]]
+    assert "assistant" not in first_roles
+
+    second = gateway.calls[1]["messages"]
+    pairs = [(m["role"], m.get("content")) for m in second]
+    assert ("user", "first question") in pairs
+    assert ("assistant", "first answer") in pairs
+    # History is replayed before the current question, in order.
+    assert pairs.index(("user", "first question")) < pairs.index(("assistant", "first answer"))
+    assert pairs.index(("assistant", "first answer")) < pairs.index(("user", "second question"))
+
+
+async def test_history_skips_non_completed_and_orders_oldest_first():
+    runner, sessions, _ = _runner(ScriptedGateway([]))
+    base = datetime(2026, 6, 28, tzinfo=timezone.utc)
+    await sessions.upsert(_completed("a", request="q1", answer="a1", at=base))
+    # A failed turn has no trustworthy answer — skip it entirely.
+    await sessions.upsert(
+        SurfaceSession(
+            id="b",
+            target=_target("ev-b"),
+            status="failed",
+            request_text="q2",
+            error="boom",
+            created_at=base + timedelta(minutes=1),
+        )
+    )
+    await sessions.upsert(
+        _completed("c", request="q3", answer="a3", at=base + timedelta(minutes=2))
+    )
+
+    task = _task("now")
+    await runner._apply_thread_history(task, SurfaceSession(id="cur", target=_target("ev-cur")))
+
+    assert task.history == [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q3"},
+        {"role": "assistant", "content": "a3"},
+    ]
+
+
+async def test_history_is_scoped_to_the_thread():
+    runner, sessions, _ = _runner(ScriptedGateway([]))
+    base = datetime(2026, 6, 28, tzinfo=timezone.utc)
+    # A completed turn in a *different* thread must not leak in.
+    await sessions.upsert(
+        _completed("other", request="elsewhere", answer="nope", at=base, thread="999.9")
+    )
+    await sessions.upsert(_completed("mine", request="q", answer="a", at=base))
+
+    task = _task("now")
+    await runner._apply_thread_history(task, SurfaceSession(id="cur", target=_target("ev-cur")))
+
+    assert task.history == [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "a"},
+    ]
+
+
+async def test_history_left_untouched_without_thread_or_when_preset():
+    runner, sessions, _ = _runner(ScriptedGateway([]))
+    base = datetime(2026, 6, 28, tzinfo=timezone.utc)
+    await sessions.upsert(_completed("a", request="q", answer="a", at=base))
+
+    # No thread on the target → nothing to replay.
+    no_thread = SurfaceTarget(
+        surface="slack", workspace="acme", agent="dev-platform", channel="C1",
+        thread=None, event_id="z",
+    )
+    task = _task("x")
+    await runner._apply_thread_history(task, SurfaceSession(id="c1", target=no_thread))
+    assert task.history == []
+
+    # A caller that already supplied history is never clobbered.
+    preset = _task("x")
+    preset.history = [{"role": "user", "content": "preset"}]
+    await runner._apply_thread_history(preset, SurfaceSession(id="c2", target=_target("ev-c2")))
+    assert preset.history == [{"role": "user", "content": "preset"}]
+
+
+async def test_history_excludes_completed_but_undelivered_turn():
+    # A turn whose answer was persisted (status=completed, result_summary set) but
+    # never reached the user (final_message_id is None — the transient-failure /
+    # crash-before-delivery window) must NOT be replayed: the user never saw it.
+    store = InMemorySurfaceSessionStore()
+    base = datetime(2026, 6, 28, tzinfo=timezone.utc)
+    await store.upsert(_completed("d", request="q1", answer="a1", at=base))
+    await store.upsert(
+        _completed(
+            "nd", request="q2", answer="a2",
+            at=base + timedelta(minutes=1), delivered=False,
+        )
+    )
+
+    prior = await store.thread_history(_target("ev-cur"))
+    assert [s.id for s in prior] == ["d"]
+
+
+async def test_history_limit_counts_only_delivered_turns():
+    # The limit is applied AFTER filtering to replayable turns, so a burst of
+    # recent unusable turns can't crowd a valid older exchange out of the window.
+    store = InMemorySurfaceSessionStore()
+    base = datetime(2026, 6, 28, tzinfo=timezone.utc)
+    # Oldest: one genuinely delivered exchange.
+    await store.upsert(_completed("old", request="q", answer="a", at=base))
+    # Newer noise that would fill a naive most-recent-N window: a failed turn, an
+    # undelivered completed turn, and one still waiting on approval.
+    await store.upsert(
+        SurfaceSession(
+            id="f", target=_target("ev-f"), status="failed",
+            request_text="qf", error="boom", created_at=base + timedelta(minutes=1),
+        )
+    )
+    await store.upsert(
+        _completed(
+            "u", request="qu", answer="au",
+            at=base + timedelta(minutes=2), delivered=False,
+        )
+    )
+    await store.upsert(
+        SurfaceSession(
+            id="w", target=_target("ev-w"), status="waiting",
+            request_text="qw", created_at=base + timedelta(minutes=3),
+        )
+    )
+
+    # Even with a tight limit (smaller than the noise count), the delivered
+    # exchange survives — a pre-filter limit would have returned nothing.
+    prior = await store.thread_history(_target("ev-cur"), limit=2)
+    assert [s.id for s in prior] == ["old"]

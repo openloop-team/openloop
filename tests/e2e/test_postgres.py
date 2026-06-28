@@ -292,6 +292,7 @@ async def test_surface_session_roundtrip_across_real_postgres():
             workflow_instance_id=session_id,
             progress_message_id="ts-1",
             approval_ids=[approval_id],
+            request_text="please do the thing",
         ))
 
         # A fresh store (a restart) reads it back by all three keys.
@@ -302,6 +303,7 @@ async def test_surface_session_roundtrip_across_real_postgres():
             assert by_id is not None and by_id.status == "waiting"
             assert by_id.target.thread == "100.1"
             assert by_id.approval_ids == [approval_id]
+            assert by_id.request_text == "please do the thing"
             assert (await store2.get_by_event(event_id)).id == session_id
             # The `@>` containment lookup (button → session) resolves the owner.
             assert (await store2.get_by_approval(approval_id)).id == session_id
@@ -327,6 +329,83 @@ async def test_surface_session_roundtrip_across_real_postgres():
             async with pool.acquire() as conn:
                 await conn.execute(
                     "DELETE FROM surface_sessions WHERE id = $1", session_id
+                )
+        except Exception:
+            pass
+        await store.close()
+
+
+async def test_thread_history_across_real_postgres():
+    """Rebuild conversation history from prior thread sessions (oldest-first)."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    from openloop.sessions.postgres import PostgresSurfaceSessionStore
+    from openloop.sessions.store import SurfaceSession, SurfaceTarget
+
+    thread = f"th-{uuid.uuid4().hex[:8]}"
+    ids = [f"sess-{uuid.uuid4().hex[:8]}" for _ in range(3)]
+
+    def _target(tid, *, agent="dev-platform", thr=thread):
+        return SurfaceTarget(
+            surface="slack", workspace="acme", agent=agent,
+            channel="C1", thread=thr, event_id=f"ev-{tid}",
+        )
+
+    store = PostgresSurfaceSessionStore(DSN)
+    await store.setup()
+    try:
+        # Two delivered turns + one still-running, plus an undelivered completed
+        # turn (answer never reached the user) and a same-thread session for a
+        # *different* agent — both must be excluded from history.
+        await store.upsert(SurfaceSession(
+            id=ids[0], target=_target(ids[0]), status="completed",
+            request_text="q1", result_summary="a1", final_message_id="ts-0",
+        ))
+        await store.upsert(SurfaceSession(
+            id=ids[1], target=_target(ids[1]), status="completed",
+            request_text="q2", result_summary="a2", final_message_id="ts-1",
+        ))
+        await store.upsert(SurfaceSession(
+            id=ids[2], target=_target(ids[2]), status="running",
+            request_text="q3",
+        ))
+        undelivered_id = f"sess-{uuid.uuid4().hex[:8]}"
+        await store.upsert(SurfaceSession(
+            id=undelivered_id, target=_target(undelivered_id), status="completed",
+            request_text="never-seen", result_summary="undelivered",
+            final_message_id=None,
+        ))
+        other_agent_id = f"sess-{uuid.uuid4().hex[:8]}"
+        await store.upsert(SurfaceSession(
+            id=other_agent_id, target=_target(other_agent_id, agent="other"),
+            status="completed", request_text="nope", result_summary="leak",
+            final_message_id="ts-x",
+        ))
+
+        store2 = PostgresSurfaceSessionStore(DSN)
+        await store2.setup()
+        try:
+            # Oldest-first, scoped to this agent's thread, excluding the in-flight
+            # turn — exactly the two *delivered* exchanges in order (the running,
+            # undelivered, and other-agent sessions are all filtered out).
+            prior = await store2.thread_history(
+                _target("x"), exclude_id=ids[2], limit=20
+            )
+            assert [s.id for s in prior] == [ids[0], ids[1]]
+            assert [(s.request_text, s.result_summary) for s in prior] == [
+                ("q1", "a1"), ("q2", "a2"),
+            ]
+            # A different thread sees nothing of this one.
+            assert await store2.thread_history(_target("x", thr="elsewhere")) == []
+        finally:
+            await store2.close()
+    finally:
+        try:
+            pool = store._require_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM surface_sessions WHERE thread = $1", thread
                 )
         except Exception:
             pass

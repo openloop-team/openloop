@@ -53,6 +53,23 @@ def _same_thread_scope(a: "SurfaceTarget", b: "SurfaceTarget") -> bool:
     )
 
 
+def _is_replayable_turn(s: "SurfaceSession") -> bool:
+    """Whether a session is a delivered request→answer exchange worth replaying.
+
+    A turn only belongs in conversation history if the user actually saw it: it
+    ``completed``, its answer was delivered (``final_message_id`` recorded), and
+    both halves are present. This deliberately drops the persisted-but-undelivered
+    window (a transient post failure or a crash before delivery) so a follow-up
+    never references an answer that never reached the thread.
+    """
+    return (
+        s.status == "completed"
+        and s.final_message_id is not None
+        and bool(s.request_text)
+        and bool(s.result_summary)
+    )
+
+
 @dataclass(slots=True)
 class SurfaceTarget:
     """Where a session's output is delivered — the surface-addressing tuple.
@@ -84,6 +101,10 @@ class SurfaceSession:
     final_message_id: str | None = None
     # Approvals the turn is parked on (Slice 4 maps a button click back here).
     approval_ids: list[str] = field(default_factory=list)
+    # The inbound user text that started this turn. Persisted so a later turn in
+    # the same thread can rebuild the conversation history (request → answer) from
+    # the durable sessions, without re-fetching the surface's own transcript.
+    request_text: str | None = None
     result_summary: str | None = None
     error: str | None = None
     created_at: datetime = field(default_factory=_now)
@@ -101,6 +122,14 @@ class SurfaceSessionStore(Protocol):
     async def get_by_thread(
         self, target: "SurfaceTarget"
     ) -> SurfaceSession | None: ...
+
+    async def thread_history(
+        self,
+        target: "SurfaceTarget",
+        *,
+        exclude_id: str | None = None,
+        limit: int = 20,
+    ) -> list[SurfaceSession]: ...
 
     async def upsert(self, session: SurfaceSession) -> None: ...
 
@@ -146,6 +175,38 @@ class InMemorySurfaceSessionStore:
             if _same_thread_scope(session.target, target):
                 return session
         return None
+
+    async def thread_history(
+        self,
+        target: SurfaceTarget,
+        *,
+        exclude_id: str | None = None,
+        limit: int = 20,
+    ) -> list[SurfaceSession]:
+        """Prior **delivered** exchanges in the same thread scope, oldest-first.
+
+        Returns the most recent ``limit`` *replayable* turns addressing this
+        thread (full scope — see :func:`_same_thread_scope`), ascending by
+        creation time. A turn is replayable only if it actually reached the user:
+        ``completed`` with a recorded ``final_message_id`` and both a request and
+        an answer. That excludes waiting/failed/abandoned turns **and** the
+        crash/transient-failure window where an answer was persisted but never
+        delivered (``final_message_id`` still ``None``) — replaying an answer the
+        user never saw would desync the conversation. Filtering before the
+        ``limit`` means the cap counts usable turns, so a burst of failed/pending
+        replies can't crowd valid older exchanges out of the window.
+        """
+        if not target.thread:
+            return []
+        matches = [
+            s
+            for s in self._by_id.values()
+            if s.id != exclude_id
+            and _same_thread_scope(s.target, target)
+            and _is_replayable_turn(s)
+        ]
+        matches.sort(key=lambda s: s.created_at)  # oldest-first
+        return matches[-limit:] if limit else matches
 
     async def upsert(self, session: SurfaceSession) -> None:
         existing = self._by_id.get(session.id)
