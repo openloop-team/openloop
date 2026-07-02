@@ -1,11 +1,10 @@
 """Native coding-worker connector — opens *draft* PRs from an instruction.
 
-Exposes a single write action, ``coding_worker.pr:write``. On execution it runs a
-pluggable :class:`CodingWorker` (clone → model-edit → commit → push) and then
-opens a **draft** pull request from the pushed branch.
+Exposes a single write action, ``coding_worker.pr:write``. On execution it runs
+one **worker attempt** (provision a workspace → credential-free worker edit →
+commit → push) and then opens a **draft** pull request from the pushed branch.
 
-Phase A runs the whole pipeline inside :meth:`execute`, **after** approval. Two
-distinct gates, never conflated:
+Two distinct gates, never conflated:
 
 1. the human **approval** lets the worker **start**;
 2. the **draft PR itself** is the review gate before **merge**.
@@ -23,14 +22,28 @@ final PR metadata — giving one identity through the whole system.
 persists a checkpoint after each named step and resumes from it on a mid-flight
 crash. The two durable side effects (branch push, PR open) are made idempotent so
 a replay never duplicates them: a pushed branch is detected via ``completed_steps``
-(the local sandbox is ephemeral, so only the push survives a crash), and an
+(the local workspace is ephemeral, so only the push survives a crash), and an
 already-open PR is reused via :meth:`GitHubClient.find_pull`. Without a store the
-connector behaves exactly as in Phase A (outcome-only, no resume).
+connector behaves outcome-only (no resume).
+
+**Hardening Phase 2 — credentials out of the worker.** The
+:class:`CodingWorker` only edits a *prepared* workspace and holds no
+credentials; every credential-bearing git operation (clone, branch, commit,
+push) lives in :class:`GitWorkspaceOrchestrator` — the single orchestration
+helper both durable paths (this connector's checkpoint fallback and the
+workflow in :mod:`openloop.workflows.coding_worker`) call. Git auth rides an
+ephemeral ``http.extraHeader`` on each command, so no token is ever written
+into the workspace (no token-in-URL clone, nothing in ``.git/config``): the
+worker sandbox is credential-free by construction. The whole attempt is one
+**opaque replay unit** — interrupted before the push boundary, a resume runs a
+fresh attempt (re-provision, re-run; a regenerated diff is acceptable); after
+it, the branch/PR are reconciled idempotently (force-push + ``find_pull``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import shutil
 import tempfile
@@ -45,15 +58,17 @@ from openloop.credentials import CredentialResolver, CredentialScope
 from openloop.tools.base import ActionSpec, ToolResult
 from openloop.tools.github import GitHubClient
 
-# Persist-after-each-step callback the worker invokes so a crash leaves an
-# accurate mid-phase record (completed_steps + state_json), not just a status.
+# Persist-after-each-step callback invoked after each completed step so a crash
+# leaves an accurate mid-phase record (completed_steps + state_json), not just a
+# status. The orchestrator owns the git-side steps; the worker reports its own.
 StepCallback = Callable[["WorkerState"], Awaitable[None]]
 
 logger = logging.getLogger(__name__)
 
 _REPO = {"type": "string", "description": "owner/repo, e.g. acme/ingestion"}
 
-# Named steps the worker walks through. In code now; checkpointed in Phase B.
+# Named steps one attempt walks through. The orchestrator owns the git-side
+# steps (clone, branch, commit, push); the worker reports its own ("edit").
 STEPS = ("clone", "branch", "edit", "commit", "push")
 
 
@@ -97,14 +112,14 @@ class WorkerState:
 
 @dataclass(slots=True)
 class WorkerOutcome:
-    """What the worker produced: a pushed branch ready for a draft PR.
+    """What one worker attempt produced: a pushed branch ready for a draft PR.
 
     Carries the model spend so it is at least *observable* in the tool result.
     NOTE: this runs inside ``ToolGateway.resolve()``, which is outside
     ``Runtime.handle``'s usage accounting — so this spend is not yet recorded in
     ``/usage`` nor checked against per-task/monthly budgets. Enforcing that means
-    threading a UsageStore + agent scope through the approval-resolution path,
-    which lands with Phase B/C (where approval becomes an event on the workflow).
+    threading a UsageStore + agent scope through the approval-resolution path
+    (hardening roadmap Phases 4–5).
     """
 
     branch: str
@@ -115,17 +130,46 @@ class WorkerOutcome:
     completion_tokens: int = 0
 
 
+@dataclass(slots=True)
+class WorkerEdit:
+    """What a credential-free worker produced in the prepared workspace."""
+
+    title: str
+    body: str
+    cost_usd: float = 0.0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
 @runtime_checkable
 class CodingWorker(Protocol):
-    """Clones a repo, applies model-generated edits, commits and pushes.
+    """Edits a *prepared* workspace; holds no credentials, touches no remote.
 
-    Implementations must push ``state.branch`` and return a :class:`WorkerOutcome`
-    describing the PR to open. They own the ``state.push_key()`` idempotency key,
-    set ``state.title`` / ``state.body`` once generated, and call ``on_step`` (if
-    given) after appending each completed step so progress is checkpointed.
+    Implementations mutate files under ``workspace`` (already cloned and on the
+    job branch) and return a :class:`WorkerEdit` describing the change. They
+    never clone, commit, or push — the orchestrator owns every credential-
+    bearing git operation. Call ``on_step`` (if given) after appending each
+    completed step to ``state.completed_steps`` so progress is checkpointed.
     """
 
     async def run(
+        self,
+        workspace: Path,
+        state: WorkerState,
+        on_step: StepCallback | None = None,
+    ) -> WorkerEdit: ...
+
+
+@runtime_checkable
+class AttemptRunner(Protocol):
+    """What the durable paths depend on: one attempt → pushed branch + outcome.
+
+    :class:`GitWorkspaceOrchestrator` is the real implementation; tests use
+    in-memory fakes. The attempt is an opaque replay unit — safe to re-run from
+    clean (force-push to the job-exclusive branch keeps the retry idempotent).
+    """
+
+    async def run_attempt(
         self, state: WorkerState, on_step: StepCallback | None = None
     ) -> WorkerOutcome: ...
 
@@ -178,7 +222,7 @@ def _pr_body(body: str, job_id: str) -> str:
 
 
 class CodingWorkerConnector:
-    """Maps ``coding_worker.pr:write`` onto a worker + a :class:`GitHubClient`."""
+    """Maps ``coding_worker.pr:write`` onto an attempt runner + :class:`GitHubClient`."""
 
     name = "coding_worker"
     # When the gateway has a WorkflowEngine, this action runs as a durable
@@ -189,11 +233,13 @@ class CodingWorkerConnector:
 
     def __init__(
         self,
-        worker: CodingWorker,
+        orchestrator: AttemptRunner,
         github: GitHubClient,
         checkpoints: "CheckpointStore | None" = None,
     ) -> None:
-        self.worker = worker
+        # The orchestrator owns provision → worker → commit → push (and the git
+        # credential); this connector never sees a worker that could push.
+        self.orchestrator = orchestrator
         self.github = github
         # Optional: when set, jobs are checkpointed per step and resume on crash.
         self.checkpoints = checkpoints
@@ -263,12 +309,14 @@ class CodingWorkerConnector:
         # a generic error with no failed ToolResult. Record the failure instead.
         cost = (0.0, 0, 0)
         if "push" not in state.completed_steps:
-            # The sandbox is ephemeral, so local steps (clone…commit) can't resume
-            # from a crash — only the push survives. Re-run the worker from clean.
+            # The workspace is ephemeral, so local steps (clone…commit) can't
+            # resume from a crash — only the push survives. Run a fresh attempt.
             state.completed_steps = []
             await self._save(state, "running")
             try:
-                outcome = await self.worker.run(state, on_step=self._checkpointer())
+                outcome = await self.orchestrator.run_attempt(
+                    state, on_step=self._checkpointer()
+                )
             except Exception as exc:  # noqa: BLE001
                 await self._save(state, "failed", error=str(exc))
                 return _failed(job_id, state, "failed", exc)
@@ -419,34 +467,143 @@ class _Completer(Protocol):
     async def complete(self, model: str, messages: list[dict], **kwargs): ...
 
 
-class GitCodingWorker:
-    """Real worker: clone → model-edit → commit → push, in a temp sandbox.
+class GitWorkspaceOrchestrator:
+    """The single credential-bearing boundary around a worker attempt.
 
-    SECURITY: this runs model-generated edits, so it needs a least-privilege
-    ``contents:write`` credential and an isolated checkout. The token is
-    resolved through the :class:`CredentialResolver` seam at the start of each
-    run and kept run-local — never stored on the worker — so a minting backend
-    (GitHub App installation tokens) caps its lifetime. The clone happens in a
-    throwaway temp dir that is removed after each run. Edits are applied as a
-    unified diff via ``git apply`` — anything that doesn't apply cleanly fails
-    the job rather than being force-written.
+    Owns provision (clone + branch) → worker edit → commit → push for **both**
+    durable paths — the connector's checkpoint fallback and the workflow in
+    :mod:`openloop.workflows.coding_worker` — so credential-bearing git lives in
+    exactly one place (a Phase 2 exit criterion).
 
-    Phase 2 of the hardening roadmap removes the credential from this class
-    entirely (the orchestrating boundary owns clone/push); until then the
-    ``redact`` guard below keeps the resolved token out of error output.
+    SECURITY: the credential is resolved through the :class:`CredentialResolver`
+    seam at attempt time, kept attempt-local, and handed to git as an ephemeral
+    ``http.extraHeader`` on each command — never in a remote URL — so nothing
+    credential-shaped is ever written into the workspace (``.git/config`` keeps
+    the plain URL). The worker only sees the prepared workspace: it is
+    credential-free by construction, not by discipline.
+
+    The attempt is one opaque replay unit: the workspace is a throwaway temp
+    dir removed after each run, so a resumed job re-provisions from clean, and
+    force-push to the job-exclusive branch keeps the retry idempotent.
     """
 
     def __init__(
         self,
+        worker: CodingWorker,
         credentials: CredentialResolver,
+        *,
+        scope: CredentialScope | None = None,
+        remote_base: str = "https://github.com",
+    ) -> None:
+        self.worker = worker
+        self._credentials = credentials
+        self._scope = scope or CredentialScope(integration="github")
+        # Overridable for GitHub Enterprise — and for local file:// test remotes.
+        self._remote_base = remote_base.rstrip("/")
+
+    async def run_attempt(
+        self, state: WorkerState, on_step: StepCallback | None = None
+    ) -> WorkerOutcome:
+        async def step(name: str) -> None:
+            state.completed_steps.append(name)
+            if on_step is not None:
+                await on_step(state)
+
+        # Resolved fresh per attempt and kept local — never stored, never in a
+        # URL. The auth header value still surfaces in a failed command line,
+        # so git failures redact both the token and its basic-auth encoding.
+        token = await self._credentials.resolve(self._scope)
+        workspace = Path(tempfile.mkdtemp(prefix=f"openloop-{state.job_id}-"))
+        try:
+            await self._git(
+                *_auth_config(token),
+                "clone", "--depth", "1", "--branch", state.base,
+                f"{self._remote_base}/{state.repo}.git", str(workspace),
+                redact=_auth_secrets(token),
+            )
+            await step("clone")
+
+            await self._git("checkout", "-b", state.branch, cwd=workspace)
+            await step("branch")
+
+            # The worker edits the prepared workspace. No credential in scope:
+            # not in its arguments, not anywhere under the workspace.
+            edit = await self.worker.run(workspace, state, on_step)
+            # Persist title/body so a post-push crash can still open the PR.
+            state.title, state.body = edit.title, edit.body
+
+            await self._git("add", "-A", cwd=workspace)
+            await self._git(
+                "-c", "user.email=worker@openloop.ai",
+                "-c", "user.name=OpenLoop coding worker",
+                "commit", "-m", edit.title, cwd=workspace,
+            )
+            await step("commit")
+
+            # Re-resolve right before the push: a long edit step can outlive the
+            # token minted at clone time (App installation tokens expire). The
+            # resolver's cache makes this free while the original is still fresh.
+            push_token = await self._credentials.resolve(self._scope)
+            # Force-push to the job-exclusive branch so the push is idempotent.
+            # The "push" checkpoint is only written by the step() below, so a crash
+            # in the window between this push succeeding and that write leaves the
+            # checkpoint saying "not pushed". Resume then runs a fresh attempt and
+            # pushes again — without --force that second push is rejected as a
+            # non-fast-forward (the branch already exists). The branch is owned
+            # solely by this job_id, so overwriting it is safe; the trade-off is
+            # that a resumed run may carry a freshly regenerated diff.
+            await self._git(
+                *_auth_config(push_token),
+                "push", "--force", "origin", state.branch, cwd=workspace,
+                redact=_auth_secrets(push_token),
+            )
+            await step("push")
+
+            return WorkerOutcome(
+                branch=state.branch,
+                title=edit.title,
+                body=edit.body,
+                cost_usd=edit.cost_usd,
+                prompt_tokens=edit.prompt_tokens,
+                completion_tokens=edit.completion_tokens,
+            )
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    async def _git(
+        self,
+        *args: str,
+        cwd: Path | None = None,
+        redact: "str | tuple[str, ...] | None" = None,
+    ) -> str:
+        return await self._run("git", *args, cwd=cwd, redact=redact)
+
+    async def _run(
+        self,
+        *cmd: str,
+        cwd: Path | None = None,
+        stdin: str | None = None,
+        redact: "str | tuple[str, ...] | None" = None,
+    ) -> str:
+        return await _run_process(*cmd, cwd=cwd, stdin=stdin, redact=redact)
+
+
+class GitCodingWorker:
+    """Default light worker: ask the model for a unified diff and apply it.
+
+    Credential-free (hardening Phase 2): it receives a *prepared* workspace
+    from :class:`GitWorkspaceOrchestrator` and only generates + ``git apply``s
+    a diff — it holds no token, never sees a remote, and cannot push. Anything
+    that doesn't apply cleanly fails the job rather than being force-written.
+    """
+
+    def __init__(
+        self,
         model: str,
         gateway: _Completer | None = None,
         *,
-        scope: CredentialScope | None = None,
         max_context_bytes: int = 60_000,
     ) -> None:
-        self._credentials = credentials
-        self._scope = scope or CredentialScope(integration="github")
         self.model = model
         self._gateway = gateway
         self.max_context_bytes = max_context_bytes
@@ -459,86 +616,39 @@ class GitCodingWorker:
         return self._gateway
 
     async def run(
-        self, state: WorkerState, on_step: StepCallback | None = None
-    ) -> WorkerOutcome:
-        async def step(name: str) -> None:
-            state.completed_steps.append(name)
-            if on_step is not None:
-                await on_step(state)
+        self,
+        workspace: Path,
+        state: WorkerState,
+        on_step: StepCallback | None = None,
+    ) -> WorkerEdit:
+        diff, title, body, resp = await self._generate(state, workspace)
+        await self._run(
+            "git", "apply", "--whitespace=nowarn", stdin=diff, cwd=workspace
+        )
+        state.completed_steps.append("edit")
+        if on_step is not None:
+            await on_step(state)
+        return WorkerEdit(
+            title=title,
+            body=body,
+            cost_usd=resp.cost_usd,
+            prompt_tokens=resp.prompt_tokens,
+            completion_tokens=resp.completion_tokens,
+        )
 
-        # Resolved fresh per run and kept local — never stored on the worker.
-        # It still lands in the clone URL (and thus .git/config), so every git
-        # command below redacts it from failure output.
-        token = await self._credentials.resolve(self._scope)
-        sandbox = Path(tempfile.mkdtemp(prefix=f"openloop-{state.job_id}-"))
-        try:
-            await self._git(
-                "clone", "--depth", "1", "--branch", state.base,
-                _remote_url(token, state.repo), str(sandbox),
-                redact=token,
-            )
-            await step("clone")
+    async def _run(
+        self, *cmd: str, cwd: Path | None = None, stdin: str | None = None
+    ) -> str:
+        # No redact: nothing credential-shaped is in this class's scope.
+        return await _run_process(*cmd, cwd=cwd, stdin=stdin)
 
-            await self._git("checkout", "-b", state.branch, cwd=sandbox, redact=token)
-            await step("branch")
-
-            diff, title, body, resp = await self._generate(state, sandbox)
-            # Persist title/body so a post-push crash can still open the PR.
-            state.title, state.body = title, body
-            await self._git_input(
-                "apply", "--whitespace=nowarn", stdin=diff, cwd=sandbox, redact=token
-            )
-            await step("edit")
-
-            await self._git("add", "-A", cwd=sandbox, redact=token)
-            await self._git(
-                "-c", "user.email=worker@openloop.ai",
-                "-c", "user.name=OpenLoop coding worker",
-                "commit", "-m", title, cwd=sandbox, redact=token,
-            )
-            await step("commit")
-
-            # Re-resolve right before the push: a long generate step can outlive
-            # the token minted at clone time (App installation tokens expire),
-            # and the clone baked that possibly-stale token into origin's URL.
-            # Pushing to an explicit URL bypasses origin; the resolver's cache
-            # makes this free while the original token is still fresh.
-            push_token = await self._credentials.resolve(self._scope)
-            # Force-push to the job-exclusive branch so the push is idempotent.
-            # The "push" checkpoint is only written by the step() below, so a crash
-            # in the window between this push succeeding and that write leaves the
-            # checkpoint saying "not pushed". Resume then re-runs the worker from
-            # clean and pushes again — without --force that second push is rejected
-            # as a non-fast-forward (the branch already exists). The branch is
-            # owned solely by this job_id, so overwriting it is safe; the trade-off
-            # is that a resumed run may carry a freshly regenerated diff.
-            await self._git(
-                "push", "--force", _remote_url(push_token, state.repo),
-                state.branch, cwd=sandbox,
-                # Both tokens can surface in failure output: the fresh one is in
-                # the command, the clone-time one is still in .git/config.
-                redact=(token, push_token),
-            )
-            await step("push")
-
-            return WorkerOutcome(
-                branch=state.branch,
-                title=title,
-                body=body,
-                cost_usd=resp.cost_usd,
-                prompt_tokens=resp.prompt_tokens,
-                completion_tokens=resp.completion_tokens,
-            )
-        finally:
-            shutil.rmtree(sandbox, ignore_errors=True)
-
-    async def _generate(self, state: WorkerState, sandbox: Path):
+    async def _generate(self, state: WorkerState, workspace: Path):
         """Ask the model for a unified diff + PR title/body for the instruction.
 
         Returns ``(diff, title, body, response)`` — the response carries token
         counts and cost so the caller can surface the worker's model spend.
         """
-        context = self._repo_context(sandbox)
+        context = self._repo_context(workspace)
         messages = [
             {
                 "role": "system",
@@ -563,18 +673,18 @@ class GitCodingWorker:
         diff, title, body = _parse_generation(resp.text)
         return diff, title, body, resp
 
-    def _repo_context(self, sandbox: Path) -> str:
+    def _repo_context(self, workspace: Path) -> str:
         """A best-effort, size-capped snapshot of tracked text files."""
         parts: list[str] = []
         budget = self.max_context_bytes
-        for path in sorted(sandbox.rglob("*")):
+        for path in sorted(workspace.rglob("*")):
             if ".git" in path.parts or not path.is_file():
                 continue
             try:
                 text = path.read_text("utf-8")
             except (UnicodeDecodeError, OSError):
                 continue
-            rel = path.relative_to(sandbox)
+            rel = path.relative_to(workspace)
             block = f"\n=== {rel} ===\n{text}"
             if len(block) > budget:
                 break
@@ -582,52 +692,50 @@ class GitCodingWorker:
             budget -= len(block)
         return "".join(parts)
 
-    async def _git(
-        self,
-        *args: str,
-        cwd: Path | None = None,
-        redact: "str | tuple[str, ...] | None" = None,
-    ) -> str:
-        return await self._run("git", *args, cwd=cwd, redact=redact)
 
-    async def _git_input(
-        self,
-        *args: str,
-        stdin: str,
-        cwd: Path | None = None,
-        redact: "str | tuple[str, ...] | None" = None,
-    ) -> str:
-        return await self._run("git", *args, cwd=cwd, stdin=stdin, redact=redact)
-
-    async def _run(
-        self,
-        *cmd: str,
-        cwd: Path | None = None,
-        stdin: str | None = None,
-        redact: "str | tuple[str, ...] | None" = None,
-    ) -> str:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=str(cwd) if cwd else None,
-            stdin=asyncio.subprocess.PIPE if stdin is not None else None,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await proc.communicate(
-            stdin.encode() if stdin is not None else None
-        )
-        if proc.returncode != 0:
-            # Redact the token from BOTH the command and git's stderr — git prints
-            # the full https://x-access-token:<token>@github.com/... URL on many
-            # failures, and this text is returned in the failed ToolResult.
-            cmd_str = _redact(" ".join(cmd), redact)
-            stderr = _redact(err.decode().strip(), redact)
-            raise RuntimeError(f"`{cmd_str}` failed ({proc.returncode}): {stderr}")
-        return out.decode()
+async def _run_process(
+    *cmd: str,
+    cwd: Path | None = None,
+    stdin: str | None = None,
+    redact: "str | tuple[str, ...] | None" = None,
+) -> str:
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=str(cwd) if cwd else None,
+        stdin=asyncio.subprocess.PIPE if stdin is not None else None,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out, err = await proc.communicate(
+        stdin.encode() if stdin is not None else None
+    )
+    if proc.returncode != 0:
+        # Redact secrets from BOTH the command and git's stderr — the failing
+        # command line carries the auth header, and this text is returned in
+        # the failed ToolResult.
+        cmd_str = _redact(" ".join(cmd), redact)
+        stderr = _redact(err.decode().strip(), redact)
+        raise RuntimeError(f"`{cmd_str}` failed ({proc.returncode}): {stderr}")
+    return out.decode()
 
 
-def _remote_url(token: str, repo: str) -> str:
-    return f"https://x-access-token:{token}@github.com/{repo}.git"
+def _basic_auth(token: str) -> str:
+    return base64.b64encode(f"x-access-token:{token}".encode()).decode()
+
+
+def _auth_config(token: str) -> tuple[str, str]:
+    """Git ``-c`` flags carrying auth for ONE command, persisted nowhere.
+
+    ``http.extraHeader`` applies only to the invocation it is passed to — unlike
+    a token-in-URL clone it never lands in ``.git/config``, so the workspace
+    handed to the worker contains no credential.
+    """
+    return ("-c", f"http.extraHeader=AUTHORIZATION: basic {_basic_auth(token)}")
+
+
+def _auth_secrets(token: str) -> tuple[str, str]:
+    """Every form of the credential that could surface in git output."""
+    return (token, _basic_auth(token))
 
 
 def _redact(text: str, secrets: "str | tuple[str, ...] | None") -> str:

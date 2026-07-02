@@ -14,13 +14,13 @@ from openloop.tools.coding_worker import (
 from openloop.testing import FakeGitHub
 
 
-class CountingWorker:
-    """Pushes all steps and records how many times it actually ran."""
+class CountingRunner:
+    """Walks all attempt steps and records how many times it actually ran."""
 
     def __init__(self) -> None:
         self.runs = 0
 
-    async def run(self, state, on_step=None):
+    async def run_attempt(self, state, on_step=None):
         self.runs += 1
         for step in STEPS:
             state.completed_steps.append(step)
@@ -48,7 +48,7 @@ def _args(job_id="j1"):
 
 async def test_checkpoint_persisted_after_each_step():
     store = RecordingStore()
-    conn = CodingWorkerConnector(CountingWorker(), FakeGitHub(), checkpoints=store)
+    conn = CodingWorkerConnector(CountingRunner(), FakeGitHub(), checkpoints=store)
 
     result = await conn.execute("pr:write", _args())
     assert result.ok
@@ -67,9 +67,9 @@ async def test_checkpoint_persisted_after_each_step():
 
 async def test_reinvoke_after_open_is_idempotent_noop():
     store = InMemoryCheckpointStore()
-    worker = CountingWorker()
+    runner = CountingRunner()
     github = FakeGitHub()
-    conn = CodingWorkerConnector(worker, github, checkpoints=store)
+    conn = CodingWorkerConnector(runner, github, checkpoints=store)
 
     first = await conn.execute("pr:write", _args())
     second = await conn.execute("pr:write", _args())
@@ -78,7 +78,7 @@ async def test_reinvoke_after_open_is_idempotent_noop():
     assert second.data.get("resumed") is True
     assert second.data["pr_number"] == first.data["pr_number"]
     # The worker ran once and exactly one PR exists.
-    assert worker.runs == 1
+    assert runner.runs == 1
     assert len(github.pulls) == 1
 
 
@@ -95,9 +95,9 @@ async def test_resume_after_crash_between_push_and_pr_open():
             return await super().create_pull(*a, **k)
 
     store = InMemoryCheckpointStore()
-    worker = CountingWorker()
+    runner = CountingRunner()
     github = FlakyGitHub()
-    conn = CodingWorkerConnector(worker, github, checkpoints=store)
+    conn = CodingWorkerConnector(runner, github, checkpoints=store)
 
     # First attempt: worker pushes, but opening the PR fails.
     first = await conn.execute("pr:write", _args())
@@ -111,7 +111,7 @@ async def test_resume_after_crash_between_push_and_pr_open():
     # Resume: worker is NOT re-run (branch already pushed); the PR opens once.
     second = await conn.execute("pr:write", _args())
     assert second.ok
-    assert worker.runs == 1  # not re-run
+    assert runner.runs == 1  # not re-run
     assert len(github.pulls) == 1
     assert (await store.get("j1")).status == "opened"
 
@@ -137,9 +137,9 @@ def _seed_checkpoint(job_id, status, steps, *, base="main", branch=None):
 async def test_resume_uses_checkpoint_base_not_args():
     # A job opened against a non-default base; resume passes only job_id.
     store = InMemoryCheckpointStore()
-    worker = CountingWorker()
+    runner = CountingRunner()
     github = FakeGitHub()
-    conn = CodingWorkerConnector(worker, github, checkpoints=store)
+    conn = CodingWorkerConnector(runner, github, checkpoints=store)
 
     await store.upsert(
         _seed_checkpoint("j1", "open_pr_failed", STEPS, base="develop")
@@ -148,7 +148,7 @@ async def test_resume_uses_checkpoint_base_not_args():
     result = await conn.execute("pr:write", {"job_id": "j1"})
 
     assert result.ok
-    assert worker.runs == 0  # branch already pushed
+    assert runner.runs == 0  # branch already pushed
     assert github.pulls[0]["base"] == "develop"
 
 
@@ -157,9 +157,9 @@ async def test_resume_before_push_reruns_worker_and_completes():
     # checkpoint at "commit". Resume re-runs the worker (force-push makes the second
     # push safe) and completes the PR.
     store = InMemoryCheckpointStore()
-    worker = CountingWorker()
+    runner = CountingRunner()
     github = FakeGitHub()
-    conn = CodingWorkerConnector(worker, github, checkpoints=store)
+    conn = CodingWorkerConnector(runner, github, checkpoints=store)
 
     await store.upsert(
         _seed_checkpoint("j1", "running", ["clone", "branch", "edit", "commit"])
@@ -168,7 +168,7 @@ async def test_resume_before_push_reruns_worker_and_completes():
                                              "instruction": "add retries"})
 
     assert result.ok
-    assert worker.runs == 1  # re-ran the local pipeline
+    assert runner.runs == 1  # re-ran the local pipeline
     assert len(github.pulls) == 1
     assert (await store.get("j1")).status == "opened"
 
@@ -177,9 +177,9 @@ async def test_reconciler_resumes_only_non_terminal_jobs():
     # P1: resolve() won't re-invoke execute() after a crash, so the startup
     # reconciler is what actually triggers resume.
     store = InMemoryCheckpointStore()
-    worker = CountingWorker()
+    runner = CountingRunner()
     github = FakeGitHub()
-    conn = CodingWorkerConnector(worker, github, checkpoints=store)
+    conn = CodingWorkerConnector(runner, github, checkpoints=store)
 
     await store.upsert(_seed_checkpoint("run1", "running", ["clone", "branch"]))
     await store.upsert(_seed_checkpoint("push1", "pushed", STEPS))
@@ -191,7 +191,7 @@ async def test_reconciler_resumes_only_non_terminal_jobs():
 
     assert set(resumed) == {"run1", "push1", "fail1"}  # terminal ones skipped
     # The two already-pushed jobs just open PRs; only the running one re-runs.
-    assert worker.runs == 1
+    assert runner.runs == 1
     assert {p["head"] for p in github.pulls} == {
         "openloop/job-run1", "openloop/job-push1", "openloop/job-fail1"
     }
@@ -204,9 +204,9 @@ async def test_existing_pr_is_reused_not_duplicated():
     # Checkpoint says branch pushed but the "opened" record was lost; a PR already
     # exists on GitHub. Resume must reuse it via find_pull, not open a second.
     store = InMemoryCheckpointStore()
-    worker = CountingWorker()
+    runner = CountingRunner()
     github = FakeGitHub()
-    conn = CodingWorkerConnector(worker, github, checkpoints=store)
+    conn = CodingWorkerConnector(runner, github, checkpoints=store)
 
     # Seed a pushed-but-not-opened checkpoint and a pre-existing PR for the head.
     branch = "openloop/job-j1"
@@ -229,5 +229,5 @@ async def test_existing_pr_is_reused_not_duplicated():
 
     result = await conn.execute("pr:write", _args())
     assert result.ok
-    assert worker.runs == 0  # branch already pushed
+    assert runner.runs == 0  # branch already pushed
     assert len(github.pulls) == 1  # reused, not duplicated

@@ -4,20 +4,27 @@ The whole approve → run-worker → open-draft-PR flow becomes three steps:
 
 1. ``await_approval`` — a **wait node**. The instance is started (parked here)
    when the action is held for approval; the approval event wakes it.
-2. ``run_worker`` — clone → model-edit → commit → push (idempotent: force-push to
-   the job-exclusive branch makes a resumed re-run safe).
+2. ``run_worker`` — one **opaque replay unit** run by the shared
+   :class:`~openloop.tools.coding_worker.GitWorkspaceOrchestrator`: provision an
+   ephemeral workspace → credential-free worker edit → commit → force-push to
+   the job-exclusive branch. Provision lives *inside* the unit, never as its own
+   durable step — the engine skips completed steps on re-drive, and a workspace
+   provisioned before a crash no longer exists. The step stays ``resumable``
+   (the engine's ``resumable=False`` means *abandon before replay*): a resume
+   runs a fresh attempt; the force-push keeps the retry idempotent.
 3. ``open_pr`` — open the draft PR, reusing an existing one for the head branch.
 
-This is the same logic as the Phase B connector, but its durability now comes from
-the generic :class:`WorkflowEngine` (checkpoint per step, park/resume on the
-approval event) instead of a worker-specific checkpoint + reconciler. ``job_id``
-is the workflow instance id, so the one identity threads approval → workflow → PR.
+This is the same logic as the connector's checkpoint fallback, but its durability
+comes from the generic :class:`WorkflowEngine` (checkpoint per step, park/resume
+on the approval event) instead of a worker-specific checkpoint + reconciler.
+``job_id`` is the workflow instance id, so the one identity threads
+approval → workflow → PR.
 """
 
 from __future__ import annotations
 
 from openloop.tools.coding_worker import (
-    CodingWorker,
+    AttemptRunner,
     WorkerState,
     _branch_for,
     _pr_body,
@@ -32,9 +39,13 @@ APPROVAL_EVENT = "await_approval"
 
 
 def build_coding_worker_workflow(
-    worker: CodingWorker, github: GitHubClient
+    orchestrator: AttemptRunner, github: GitHubClient
 ) -> Workflow:
-    """Build the coding-worker workflow bound to a worker + GitHub client."""
+    """Build the coding-worker workflow bound to the shared orchestrator.
+
+    Both durable paths call the same :class:`AttemptRunner` — no path invokes a
+    worker that could hold git credentials (hardening Phase 2 invariant).
+    """
 
     async def run_worker(ctx: WorkflowContext) -> None:
         s = ctx.state
@@ -45,7 +56,7 @@ def build_coding_worker_workflow(
             base=s.get("base", "main"),
             branch=_branch_for(s["job_id"]),
         )
-        outcome = await worker.run(state)
+        outcome = await orchestrator.run_attempt(state)
         s["branch"] = outcome.branch
         s["title"] = outcome.title
         s["body"] = outcome.body
@@ -85,7 +96,9 @@ def build_coding_worker_workflow(
         WORKFLOW_NAME,
         [
             Step(APPROVAL_EVENT, wait=True),
-            Step("run_worker", run_worker),
+            # The opaque replay unit MUST stay resumable: resumable=False means
+            # "abandon before replay" in this engine — the opposite of intent.
+            Step("run_worker", run_worker, resumable=True),
             Step("open_pr", open_pr),
         ],
     )

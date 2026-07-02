@@ -1,9 +1,9 @@
 """Live end-to-end test for the coding worker — gated on credentials.
 
-Exercises the REAL chain: GitCodingWorker clones the repo, applies a diff,
-commits and pushes a branch, then the connector opens a REAL *draft* PR. The PR
-is closed and the branch deleted afterward, so the test is safe to re-run / use
-in CI.
+Exercises the REAL chain: GitWorkspaceOrchestrator clones the repo, the
+credential-free GitCodingWorker applies a diff, the orchestrator commits and
+pushes the branch, then the connector opens a REAL *draft* PR. The PR is closed
+and the branch deleted afterward, so the test is safe to re-run / use in CI.
 
 To keep the run deterministic (no flaky model output) the model call is stubbed
 with a fixed new-file diff; everything else — git, push, the GitHub PR API — is
@@ -20,7 +20,11 @@ import uuid
 import pytest
 
 from openloop.models.gateway import ModelResponse
-from openloop.tools.coding_worker import CodingWorkerConnector, GitCodingWorker
+from openloop.tools.coding_worker import (
+    CodingWorkerConnector,
+    GitCodingWorker,
+    GitWorkspaceOrchestrator,
+)
 from openloop.credentials import EnvCredentialResolver
 from openloop.tools.github import HttpGitHubClient
 
@@ -73,10 +77,9 @@ async def test_coding_worker_live_draft_pr():
 
     credentials = EnvCredentialResolver({"github": token})
     client = HttpGitHubClient(credentials)
-    worker = GitCodingWorker(
-        credentials, model="stub", gateway=_StubCompleter(marker)
-    )
-    connector = CodingWorkerConnector(worker, client)
+    worker = GitCodingWorker(model="stub", gateway=_StubCompleter(marker))
+    orchestrator = GitWorkspaceOrchestrator(worker, credentials)
+    connector = CodingWorkerConnector(orchestrator, client)
 
     args = connector.prepare_args(
         "pr:write",

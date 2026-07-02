@@ -1,4 +1,6 @@
-"""Unit tests for the coding-worker connector (network-free, with fakes)."""
+"""Unit tests for the coding-worker connector + orchestrator (network-free)."""
+
+from pathlib import Path
 
 import pytest
 
@@ -7,17 +9,28 @@ from openloop.tools.coding_worker import (
     STEPS,
     CodingWorkerConnector,
     GitCodingWorker,
+    GitWorkspaceOrchestrator,
     WorkerOutcome,
     WorkerState,
+    _basic_auth,
     _parse_generation,
     _pr_body,
     _redact,
 )
-from openloop.testing import FakeCodingWorker, FakeGitHub
+from openloop.testing import FakeCodingWorker, FakeGitHub, FakeWorkerOrchestrator
 
 
-def _connector(worker=None, github=None):
-    return CodingWorkerConnector(worker or FakeCodingWorker(), github or FakeGitHub())
+def _connector(runner=None, github=None):
+    return CodingWorkerConnector(
+        runner or FakeWorkerOrchestrator(), github or FakeGitHub()
+    )
+
+
+def _state(job_id="j1"):
+    return WorkerState(
+        job_id=job_id, repo="a/b", instruction="x", base="main",
+        branch=f"openloop/job-{job_id}",
+    )
 
 
 def test_supported_permission():
@@ -33,10 +46,10 @@ def test_prepare_args_mints_job_id_once():
     assert again["job_id"] == args["job_id"]
 
 
-async def test_execute_runs_worker_then_opens_draft_pr():
-    worker = FakeCodingWorker(title="Add retries", body="Adds retry logic.")
+async def test_execute_runs_attempt_then_opens_draft_pr():
+    runner = FakeWorkerOrchestrator(title="Add retries", body="Adds retry logic.")
     github = FakeGitHub()
-    conn = _connector(worker, github)
+    conn = _connector(runner, github)
 
     result = await conn.execute(
         "pr:write",
@@ -44,8 +57,8 @@ async def test_execute_runs_worker_then_opens_draft_pr():
     )
 
     assert result.ok
-    # Worker walked every named step.
-    assert worker.runs[0].completed_steps == list(STEPS)
+    # The attempt walked every named step.
+    assert runner.runs[0].completed_steps == list(STEPS)
     # A draft PR was opened from the job branch.
     assert github.pulls == [
         {
@@ -74,14 +87,14 @@ async def test_pr_body_stamps_job_id():
     assert "job `abc123`" in body
 
 
-async def test_worker_failure_records_outcome_without_opening_pr():
-    class BoomWorker:
-        async def run(self, state, on_step=None):
+async def test_attempt_failure_records_outcome_without_opening_pr():
+    class BoomRunner:
+        async def run_attempt(self, state, on_step=None):
             state.completed_steps.append("clone")
             raise RuntimeError("clone failed")
 
     github = FakeGitHub()
-    conn = _connector(BoomWorker(), github)
+    conn = _connector(BoomRunner(), github)
     result = await conn.execute(
         "pr:write", {"repo": "a/b", "instruction": "x", "job_id": "j1"}
     )
@@ -100,9 +113,9 @@ async def test_open_pr_failure_records_outcome_without_crashing():
         async def create_pull(self, *a, **k):
             raise RuntimeError("422 pull request already exists")
 
-    worker = FakeCodingWorker()
+    runner = FakeWorkerOrchestrator()
     github = BoomGitHub()
-    conn = _connector(worker, github)
+    conn = _connector(runner, github)
     result = await conn.execute(
         "pr:write", {"repo": "a/b", "instruction": "x", "job_id": "j1"}
     )
@@ -110,21 +123,16 @@ async def test_open_pr_failure_records_outcome_without_crashing():
     assert not result.ok
     assert result.data["status"] == "open_pr_failed"
     assert "422" in result.data["error"]
-    # The worker still ran (branch pushed) — Phase A has no resume, so it's left.
+    # The attempt still ran (branch pushed); resume can reopen the PR later.
     assert result.data["branch"] == "openloop/job-j1"
     assert list(STEPS) == result.data["completed_steps"]
 
 
 async def test_result_surfaces_worker_model_spend():
-    class CostingWorker:
-        async def run(self, state, on_step=None):
-            state.completed_steps.extend(STEPS)
-            return WorkerOutcome(
-                branch=state.branch, title="t", body="b",
-                cost_usd=0.12, prompt_tokens=100, completion_tokens=50,
-            )
-
-    conn = _connector(CostingWorker(), FakeGitHub())
+    runner = FakeWorkerOrchestrator(
+        cost_usd=0.12, prompt_tokens=100, completion_tokens=50
+    )
+    conn = _connector(runner, FakeGitHub())
     result = await conn.execute(
         "pr:write", {"repo": "a/b", "instruction": "x", "job_id": "j2"}
     )
@@ -133,12 +141,18 @@ async def test_result_surfaces_worker_model_spend():
     assert result.data["completion_tokens"] == 50
 
 
-async def test_git_run_redacts_token_from_command_and_stderr():
-    worker = GitCodingWorker(EnvCredentialResolver({"github": "s"}), model="m")
+def _orchestrator(worker=None, resolver=None):
+    return GitWorkspaceOrchestrator(
+        worker or FakeCodingWorker(),
+        resolver or EnvCredentialResolver({"github": "secrettoken"}),
+    )
+
+
+async def test_orchestrator_run_redacts_secrets_from_command_and_stderr():
+    orch = _orchestrator()
     with pytest.raises(RuntimeError) as excinfo:
-        # stderr echoes the token (as git does in remote URLs); the failing
-        # command also carries it as an argument.
-        await worker._run(
+        # stderr echoes the secret; the failing command also carries it.
+        await orch._run(
             "python",
             "-c",
             "import sys; sys.stderr.write('fatal: url secrettoken'); sys.exit(1)",
@@ -150,10 +164,10 @@ async def test_git_run_redacts_token_from_command_and_stderr():
     assert "***" in message
 
 
-async def test_push_re_resolves_token_and_bypasses_stale_origin(monkeypatch):
-    """A long run can outlive the clone-time token (App tokens expire): the
-    push must carry a freshly resolved token in an explicit URL, not rely on
-    the stale one baked into origin, and redact both."""
+async def test_attempt_provisions_edits_commits_and_pushes(monkeypatch):
+    """The orchestrator owns every git op; the worker only edits the prepared
+    workspace. Auth rides an ephemeral header — never a token-in-URL — and the
+    push re-resolves the credential (App tokens can expire mid-attempt)."""
 
     class RotatingResolver:
         def __init__(self):
@@ -163,43 +177,86 @@ async def test_push_re_resolves_token_and_bypasses_stale_origin(monkeypatch):
             self.calls += 1
             return f"tok{self.calls}"
 
-    class _StubCompleter:
-        async def complete(self, model, messages, **kwargs):
-            class R:
-                text = (
-                    "TITLE: t\nBODY: b\nDIFF:\n"
-                    "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
-                )
-                cost_usd = 0.0
-                prompt_tokens = 1
-                completion_tokens = 1
-
-            return R()
-
-    worker = GitCodingWorker(
-        RotatingResolver(), model="m", gateway=_StubCompleter()
-    )
+    worker = FakeCodingWorker(title="t", body="b")
+    orch = GitWorkspaceOrchestrator(worker, RotatingResolver())
     commands = []
 
     async def fake_run(*cmd, cwd=None, stdin=None, redact=None):
         commands.append((cmd, redact))
         return ""
 
-    monkeypatch.setattr(worker, "_run", fake_run)
-    state = WorkerState(
-        job_id="j1", repo="a/b", instruction="x", base="main",
-        branch="openloop/job-j1",
-    )
-    await worker.run(state)
+    monkeypatch.setattr(orch, "_run", fake_run)
+    state = _state()
+    outcome = await orch.run_attempt(state)
 
-    clone_cmd, clone_redact = commands[0]
-    assert "tok1" in clone_cmd[6]  # clone URL carries the first token
-    push_cmd, push_redact = next(
-        (cmd, redact) for cmd, redact in commands if cmd[1] == "push"
+    assert outcome.branch == "openloop/job-j1"
+    assert outcome.title == "t"
+    assert state.completed_steps == list(STEPS)
+
+    clone_cmd, clone_redact = next(
+        (cmd, r) for cmd, r in commands if "clone" in cmd
     )
-    assert "origin" not in push_cmd
-    assert "tok2" in push_cmd[3]  # explicit URL with the fresh token
-    assert push_redact == ("tok1", "tok2")  # both tokens scrubbed on failure
+    push_cmd, push_redact = next(
+        (cmd, r) for cmd, r in commands if "push" in cmd
+    )
+    # No token-in-URL anywhere: the raw token appears in no command argument
+    # except inside the one-shot auth header.
+    for cmd, _ in commands:
+        for arg in cmd:
+            if arg.startswith("http.extraHeader="):
+                continue
+            assert "tok1" not in arg and "tok2" not in arg
+    # Clone authenticates with the first mint, push with a fresh one.
+    assert any(_basic_auth("tok1") in arg for arg in clone_cmd)
+    assert any(_basic_auth("tok2") in arg for arg in push_cmd)
+    assert "--force" in push_cmd  # idempotent retry to the job branch
+    # Failure output scrubs both the raw token and its basic-auth encoding.
+    assert clone_redact == ("tok1", _basic_auth("tok1"))
+    assert push_redact == ("tok2", _basic_auth("tok2"))
+    # Commit message comes from the worker's edit.
+    commit_cmd = next(cmd for cmd, _ in commands if "commit" in cmd)
+    assert "t" in commit_cmd
+
+
+async def test_worker_sees_no_credential(monkeypatch):
+    """Phase 2 exit criterion: nothing credential-shaped reaches the worker —
+    not in its arguments and not via a token-in-URL clone."""
+
+    class SpyWorker(FakeCodingWorker):
+        def __init__(self):
+            super().__init__()
+            self.seen = None
+
+        async def run(self, workspace, state, on_step=None):
+            self.seen = (workspace, state, on_step)
+            return await super().run(workspace, state, on_step)
+
+    worker = SpyWorker()
+    orch = GitWorkspaceOrchestrator(
+        worker, EnvCredentialResolver({"github": "secrettoken"})
+    )
+
+    async def fake_run(*cmd, cwd=None, stdin=None, redact=None):
+        return ""
+
+    monkeypatch.setattr(orch, "_run", fake_run)
+    await orch.run_attempt(_state())
+
+    assert worker.seen is not None
+    assert "secrettoken" not in repr(worker.seen)
+    assert _basic_auth("secrettoken") not in repr(worker.seen)
+
+
+def test_worker_holds_no_credential_attribute():
+    """Phase 2 contract: the worker class has no credential to leak — the
+    resolver lives only on the orchestrating boundary."""
+    worker = GitCodingWorker(model="m")
+    assert "credential" not in repr(vars(worker)).lower()
+    assert not hasattr(worker, "_credentials")
+
+    orch = _orchestrator(worker)
+    # The orchestrator stores the resolver seam, never a raw token.
+    assert "secrettoken" not in repr(vars(orch))
 
 
 def test_redact_scrubs_every_secret_in_a_tuple():
@@ -210,21 +267,44 @@ def test_redact_scrubs_every_secret_in_a_tuple():
     assert _redact(text, None) == text
 
 
-def test_worker_stores_no_raw_token_attribute():
-    """Phase 1 contract: the credential lives behind the resolver, never on
-    the worker."""
-    worker = GitCodingWorker(
-        EnvCredentialResolver({"github": "secrettoken"}), model="m"
-    )
-    assert "secrettoken" not in repr(vars(worker))
-
-
 def test_worker_state_idempotency_keys_are_per_side_effect():
-    state = WorkerState(
-        job_id="j1", repo="a/b", instruction="x", base="main", branch="openloop/job-j1"
-    )
+    state = _state()
     assert state.push_key() == "j1:push:openloop/job-j1"
     assert state.open_pr_key() == "j1:open_pr:a/b:openloop/job-j1"
+
+
+async def test_git_worker_applies_diff_and_reports_edit_step(monkeypatch):
+    class _StubCompleter:
+        async def complete(self, model, messages, **kwargs):
+            class R:
+                text = (
+                    "TITLE: t\nBODY: b\nDIFF:\n"
+                    "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+                )
+                cost_usd = 0.3
+                prompt_tokens = 10
+                completion_tokens = 5
+
+            return R()
+
+    worker = GitCodingWorker(model="m", gateway=_StubCompleter())
+    commands = []
+
+    async def fake_run(*cmd, cwd=None, stdin=None):
+        commands.append((cmd, stdin, cwd))
+        return ""
+
+    monkeypatch.setattr(worker, "_run", fake_run)
+    state = _state()
+    edit = await worker.run(Path("/tmp/ws"), state)
+
+    assert edit.title == "t" and edit.body == "b"
+    assert edit.cost_usd == 0.3
+    assert state.completed_steps == ["edit"]
+    (cmd, stdin, cwd) = commands[0]
+    assert cmd[:2] == ("git", "apply")
+    assert stdin.startswith("--- a/x")
+    assert str(cwd) == "/tmp/ws"
 
 
 def test_parse_generation_splits_title_body_diff():

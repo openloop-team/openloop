@@ -208,7 +208,7 @@ spec:
 | Queue | Redis | — |
 | Surfaces | Slack | Discord / Zoom / GitHub / Linear |
 | Delivery | persisted Slack sessions, background progress/final postbacks, approval + thread-reply continuation, startup reconciler | provider idempotency keys, cross-process delivery locks, more surface adapters |
-| Coding worker | draft PRs (clone → edit → push) | OpenHands-style |
+| Coding worker | draft PRs (credential-free worker edits a prepared workspace; the orchestrating boundary owns clone/commit/push) | OpenHands-style |
 | Dashboard | — | Next.js |
 | Observability | — | OpenTelemetry / Langfuse traces |
 
@@ -364,7 +364,11 @@ the workflow.
 - [x] Human approval flow + token/cost tracking
 - [x] Docker Compose + config-as-code
 - [ ] Discord / Zoom / GitHub / Linear surfaces
-- [x] Coding worker (draft PRs) — connector + approval gate + crash-resumable
+- [x] Coding worker (draft PRs) — connector + approval gate + crash-resumable;
+  hardened (Phase 2): the worker is credential-free (edits a prepared workspace),
+  all credential-bearing git ops live in one orchestrating boundary shared by
+  both durable paths, and git auth rides a per-command header (never a
+  token-in-URL clone, nothing in the workspace)
 - [x] Durable workflows — engine + approval-as-wait-node; worker resumes on crash;
   chat pipeline runs as a workflow (bounded: persisted turn state + idempotent
   writes; model calls are not replayed on crash)

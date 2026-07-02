@@ -50,7 +50,11 @@ from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 
 from openloop.surfaces.slack import build_slack_app
 from openloop.tools import Invocation, ToolGateway
-from openloop.tools.coding_worker import CodingWorkerConnector, GitCodingWorker
+from openloop.tools.coding_worker import (
+    CodingWorkerConnector,
+    GitCodingWorker,
+    GitWorkspaceOrchestrator,
+)
 from openloop.tools.github import GitHubConnector, HttpGitHubClient
 from openloop.tools.mcp import HttpMCPClient, MCPConnector
 from openloop.usage import InMemoryUsageStore, UsageStore, budget_scope_key
@@ -259,14 +263,20 @@ def build_tool_gateway(
         # The coding worker runs model-generated edits, so it stays off unless
         # explicitly enabled (it needs a contents:write credential + a sandbox).
         if settings.coding_worker_enabled:
-            worker = GitCodingWorker(
-                github_credentials, model=settings.coding_worker_model
-            )
+            # Phase 2 split: the worker is credential-free (edits a prepared
+            # workspace); the orchestrator alone holds the git credential and
+            # is the ONE helper both durable paths run attempts through.
+            worker = GitCodingWorker(model=settings.coding_worker_model)
+            orchestrator = GitWorkspaceOrchestrator(worker, github_credentials)
             gateway.register(
-                CodingWorkerConnector(worker, github_client, checkpoints=checkpoints)
+                CodingWorkerConnector(
+                    orchestrator, github_client, checkpoints=checkpoints
+                )
             )
             # Register the worker as a durable workflow (approval = wait node).
-            engine.register(build_coding_worker_workflow(worker, github_client))
+            engine.register(
+                build_coding_worker_workflow(orchestrator, github_client)
+            )
             log.info(
                 "registered native tool: coding_worker (model=%s)",
                 settings.coding_worker_model,

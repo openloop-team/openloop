@@ -11,7 +11,7 @@ from openloop.tools.coding_worker import CodingWorkerConnector
 from openloop.tools.github import GitHubConnector
 from openloop.testing import (
     EXAMPLE_AGENT,
-    FakeCodingWorker,
+    FakeWorkerOrchestrator,
     FakeGitHub,
     ScriptedGateway,
     tool_call_response,
@@ -22,12 +22,12 @@ def _agent():
     return load_agent(EXAMPLE_AGENT)
 
 
-def _gateway(worker=None, github=None):
+def _gateway(runner=None, github=None):
     github = github or FakeGitHub()
     return ToolGateway(
         tools=[
             GitHubConnector(github),
-            CodingWorkerConnector(worker or FakeCodingWorker(), github),
+            CodingWorkerConnector(runner or FakeWorkerOrchestrator(), github),
         ]
     )
 
@@ -60,9 +60,9 @@ async def test_coding_worker_is_held_for_approval():
 
 async def test_approve_runs_worker_and_opens_draft_pr():
     agent = _agent()
-    worker = FakeCodingWorker(title="Add retries")
+    runner = FakeWorkerOrchestrator(title="Add retries")
     github = FakeGitHub()
-    gw = _gateway(worker, github)
+    gw = _gateway(runner, github)
 
     pending = await gw.invoke(
         agent, "coding_worker.pr:write", {"repo": "acme/x", "instruction": "add retries"}
@@ -77,14 +77,14 @@ async def test_approve_runs_worker_and_opens_draft_pr():
     assert resolved.result.data["job_id"] == job_id
     assert github.pulls[0]["draft"] is True
     assert github.pulls[0]["head"] == f"openloop/job-{job_id}"
-    assert worker.runs[0].job_id == job_id
+    assert runner.runs[0].job_id == job_id
 
 
 async def test_denied_approval_never_runs_worker():
     agent = _agent()
-    worker = FakeCodingWorker()
+    runner = FakeWorkerOrchestrator()
     github = FakeGitHub()
-    gw = _gateway(worker, github)
+    gw = _gateway(runner, github)
 
     pending = await gw.invoke(
         agent, "coding_worker.pr:write", {"repo": "acme/x", "instruction": "x"}
@@ -92,7 +92,7 @@ async def test_denied_approval_never_runs_worker():
     inv = await gw.resolve(pending.approval.id, "@maciag.artur", approve=False)
 
     assert inv.status == "denied"
-    assert worker.runs == []
+    assert runner.runs == []
     assert github.pulls == []
 
 

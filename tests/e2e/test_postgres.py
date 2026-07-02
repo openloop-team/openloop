@@ -157,11 +157,11 @@ async def test_worker_checkpoint_resume_across_real_postgres():
 
     job_id = f"e2e-{uuid.uuid4().hex[:8]}"
 
-    class _Worker:
+    class _Runner:
         def __init__(self):
             self.runs = 0
 
-        async def run(self, state, on_step=None):
+        async def run_attempt(self, state, on_step=None):
             self.runs += 1
             for step in STEPS:
                 state.completed_steps.append(step)
@@ -187,8 +187,8 @@ async def test_worker_checkpoint_resume_across_real_postgres():
         args = {"repo": "acme/x", "instruction": "do x", "job_id": job_id}
 
         # First store/worker: pushes, but the PR open fails — persisted to PG.
-        worker1, github1 = _Worker(), _FlakyGitHub()
-        conn1 = CodingWorkerConnector(worker1, github1, checkpoints=store)
+        runner1, github1 = _Runner(), _FlakyGitHub()
+        conn1 = CodingWorkerConnector(runner1, github1, checkpoints=store)
         first = await conn1.execute("pr:write", args)
         assert not first.ok
         cp = await store.get(job_id)
@@ -199,11 +199,11 @@ async def test_worker_checkpoint_resume_across_real_postgres():
         store2 = PostgresCheckpointStore(DSN)
         await store2.setup()
         try:
-            worker2, github2 = _Worker(), FakeGitHub()
-            conn2 = CodingWorkerConnector(worker2, github2, checkpoints=store2)
+            runner2, github2 = _Runner(), FakeGitHub()
+            conn2 = CodingWorkerConnector(runner2, github2, checkpoints=store2)
             second = await conn2.execute("pr:write", args)
             assert second.ok
-            assert worker2.runs == 0  # resumed past the push
+            assert runner2.runs == 0  # resumed past the push
             assert len(github2.pulls) == 1
             assert (await store2.get(job_id)).status == "opened"
         finally:
