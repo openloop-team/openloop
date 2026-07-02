@@ -14,6 +14,7 @@ import contextlib
 import dataclasses
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
@@ -25,6 +26,11 @@ from openloop.approvals.postgres import PostgresApprovalStore
 from openloop.checkpoints import CheckpointStore, InMemoryCheckpointStore
 from openloop.checkpoints.postgres import PostgresCheckpointStore
 from openloop.config import Settings, get_settings
+from openloop.credentials import (
+    CredentialResolver,
+    EnvCredentialResolver,
+    GitHubAppResolver,
+)
 from openloop.coordination import (
     DistributedLock,
     InProcessLock,
@@ -187,6 +193,51 @@ async def _setup_coordination(
         return InProcessLock()
 
 
+def build_github_credentials(settings: Settings) -> CredentialResolver | None:
+    """Pick the GitHub auth backend behind the Phase 1 resolver seam.
+
+    Prefers GitHub App installation tokens (short-lived, minted on demand) when
+    all three ``GITHUB_APP_*`` values are set; a static ``GITHUB_TOKEN`` is the
+    fallback. An App that is configured but can't start (unreadable key file,
+    missing ``githubapp`` extra) was an *explicit* request for short-lived auth,
+    so it fails loudly, then degrades to the token if one is set — mirroring
+    the lock backend's explicit-vs-auto policy.
+    """
+    if settings.github_app_configured:
+        try:
+            import jwt
+
+            private_key = Path(settings.github_app_private_key_path).read_text()
+            # Prove the WHOLE signing path at boot, not just importability:
+            # PyJWT without its crypto backend, or a malformed key, would
+            # otherwise pass this gate and fail on the first tool call — after
+            # the App resolver was already selected over the token fallback.
+            jwt.encode({"iss": "boot-check"}, private_key, algorithm="RS256")
+        except Exception:
+            log.error(
+                "GITHUB APP AUTH DISABLED: could not sign with the App private "
+                "key (is the `githubapp` extra installed, and the key a valid "
+                "RSA PEM?)%s",
+                " — falling back to GITHUB_TOKEN" if settings.github_token else "",
+                exc_info=True,
+            )
+        else:
+            log.info(
+                "github auth: App installation tokens (app %s)",
+                settings.github_app_id,
+            )
+            return GitHubAppResolver(
+                settings.github_app_id,
+                private_key,
+                settings.github_app_installation_id,
+                repositories=settings.github_app_repository_list or None,
+            )
+    if settings.github_token:
+        log.info("github auth: static token from env")
+        return EnvCredentialResolver({"github": settings.github_token})
+    return None
+
+
 def build_tool_gateway(
     settings: Settings,
     agents: dict[str, Agent],
@@ -200,15 +251,16 @@ def build_tool_gateway(
     set up in the app lifespan.
     """
     gateway = ToolGateway(approvals=approvals, engine=engine)
-    if settings.github_token:
-        github_client = HttpGitHubClient(settings.github_token)
+    github_credentials = build_github_credentials(settings)
+    if github_credentials is not None:
+        github_client = HttpGitHubClient(github_credentials)
         gateway.register(GitHubConnector(github_client))
         log.info("registered native tool: github")
         # The coding worker runs model-generated edits, so it stays off unless
-        # explicitly enabled (it needs a contents:write token + a sandbox).
+        # explicitly enabled (it needs a contents:write credential + a sandbox).
         if settings.coding_worker_enabled:
             worker = GitCodingWorker(
-                settings.github_token, model=settings.coding_worker_model
+                github_credentials, model=settings.coding_worker_model
             )
             gateway.register(
                 CodingWorkerConnector(worker, github_client, checkpoints=checkpoints)
@@ -224,7 +276,9 @@ def build_tool_gateway(
                 "coding_worker tool not registered: set CODING_WORKER_ENABLED=1"
             )
     else:
-        log.warning("github tool not registered: GITHUB_TOKEN unset")
+        log.warning(
+            "github tool not registered: set GITHUB_TOKEN or GITHUB_APP_*"
+        )
 
     mcp_connectors: list[MCPConnector] = []
     seen: set[str] = set()

@@ -16,8 +16,11 @@ COPY src ./src
 
 # Install with the `redis` extra so the documented multi-replica deploy path
 # (LOCK_BACKEND=redis) can actually coordinate — without it the runtime silently
-# falls back to in-process locks.
-RUN pip install --upgrade pip && pip install ".[redis]"
+# falls back to in-process locks — and the `githubapp` extra so GITHUB_APP_*
+# auth (short-lived installation tokens) can sign at boot; without it the
+# runtime logs GITHUB APP AUTH DISABLED and degrades to GITHUB_TOKEN. Mount the
+# App private key read-only and point GITHUB_APP_PRIVATE_KEY_PATH at it.
+RUN pip install --upgrade pip && pip install ".[redis,githubapp]"
 
 COPY agents ./agents
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from openloop.credentials import CredentialResolver, CredentialScope
 from openloop.tools.base import ActionSpec, ToolResult
 
 _REPO = {"type": "string", "description": "owner/repo, e.g. acme/ingestion"}
@@ -38,17 +39,29 @@ class GitHubClient(Protocol):
 
 
 class HttpGitHubClient:
-    """Thin httpx-backed client against the GitHub REST API."""
+    """Thin httpx-backed client against the GitHub REST API.
+
+    Auth flows through the :class:`CredentialResolver` seam **at request time**
+    — the client never stores a raw token — so the backend (env token, GitHub
+    App installation tokens, secrets manager) is swappable without touching
+    this class.
+    """
 
     def __init__(
-        self, token: str, base_url: str = "https://api.github.com"
+        self,
+        credentials: CredentialResolver,
+        base_url: str = "https://api.github.com",
+        *,
+        scope: CredentialScope | None = None,
     ) -> None:
-        self.token = token
+        self._credentials = credentials
+        self._scope = scope or CredentialScope(integration="github")
         self.base_url = base_url.rstrip("/")
 
-    def _headers(self) -> dict[str, str]:
+    async def _headers(self) -> dict[str, str]:
+        token = await self._credentials.resolve(self._scope)
         return {
-            "Authorization": f"Bearer {self.token}",
+            "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
@@ -56,9 +69,10 @@ class HttpGitHubClient:
     async def _request(self, method: str, path: str, **kwargs) -> dict:
         import httpx
 
+        headers = await self._headers()
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.request(
-                method, f"{self.base_url}{path}", headers=self._headers(), **kwargs
+                method, f"{self.base_url}{path}", headers=headers, **kwargs
             )
             resp.raise_for_status()
             return resp.json()

@@ -2,6 +2,7 @@
 
 import pytest
 
+from openloop.credentials import EnvCredentialResolver
 from openloop.tools.coding_worker import (
     STEPS,
     CodingWorkerConnector,
@@ -10,6 +11,7 @@ from openloop.tools.coding_worker import (
     WorkerState,
     _parse_generation,
     _pr_body,
+    _redact,
 )
 from openloop.testing import FakeCodingWorker, FakeGitHub
 
@@ -132,7 +134,7 @@ async def test_result_surfaces_worker_model_spend():
 
 
 async def test_git_run_redacts_token_from_command_and_stderr():
-    worker = GitCodingWorker(token="secrettoken", model="m")
+    worker = GitCodingWorker(EnvCredentialResolver({"github": "s"}), model="m")
     with pytest.raises(RuntimeError) as excinfo:
         # stderr echoes the token (as git does in remote URLs); the failing
         # command also carries it as an argument.
@@ -141,10 +143,80 @@ async def test_git_run_redacts_token_from_command_and_stderr():
             "-c",
             "import sys; sys.stderr.write('fatal: url secrettoken'); sys.exit(1)",
             "secrettoken",
+            redact="secrettoken",
         )
     message = str(excinfo.value)
     assert "secrettoken" not in message
     assert "***" in message
+
+
+async def test_push_re_resolves_token_and_bypasses_stale_origin(monkeypatch):
+    """A long run can outlive the clone-time token (App tokens expire): the
+    push must carry a freshly resolved token in an explicit URL, not rely on
+    the stale one baked into origin, and redact both."""
+
+    class RotatingResolver:
+        def __init__(self):
+            self.calls = 0
+
+        async def resolve(self, scope):
+            self.calls += 1
+            return f"tok{self.calls}"
+
+    class _StubCompleter:
+        async def complete(self, model, messages, **kwargs):
+            class R:
+                text = (
+                    "TITLE: t\nBODY: b\nDIFF:\n"
+                    "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+                )
+                cost_usd = 0.0
+                prompt_tokens = 1
+                completion_tokens = 1
+
+            return R()
+
+    worker = GitCodingWorker(
+        RotatingResolver(), model="m", gateway=_StubCompleter()
+    )
+    commands = []
+
+    async def fake_run(*cmd, cwd=None, stdin=None, redact=None):
+        commands.append((cmd, redact))
+        return ""
+
+    monkeypatch.setattr(worker, "_run", fake_run)
+    state = WorkerState(
+        job_id="j1", repo="a/b", instruction="x", base="main",
+        branch="openloop/job-j1",
+    )
+    await worker.run(state)
+
+    clone_cmd, clone_redact = commands[0]
+    assert "tok1" in clone_cmd[6]  # clone URL carries the first token
+    push_cmd, push_redact = next(
+        (cmd, redact) for cmd, redact in commands if cmd[1] == "push"
+    )
+    assert "origin" not in push_cmd
+    assert "tok2" in push_cmd[3]  # explicit URL with the fresh token
+    assert push_redact == ("tok1", "tok2")  # both tokens scrubbed on failure
+
+
+def test_redact_scrubs_every_secret_in_a_tuple():
+    text = "push to https://x:old@github.com failed; retried with new"
+    assert _redact(text, ("old", "new")) == (
+        "push to https://x:***@github.com failed; retried with ***"
+    )
+    assert _redact(text, None) == text
+
+
+def test_worker_stores_no_raw_token_attribute():
+    """Phase 1 contract: the credential lives behind the resolver, never on
+    the worker."""
+    worker = GitCodingWorker(
+        EnvCredentialResolver({"github": "secrettoken"}), model="m"
+    )
+    assert "secrettoken" not in repr(vars(worker))
 
 
 def test_worker_state_idempotency_keys_are_per_side_effect():

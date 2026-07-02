@@ -27,8 +27,18 @@ class Settings(BaseSettings):
     slack_signing_secret: str | None = None
     slack_app_token: str | None = None
 
-    # GitHub connector
+    # GitHub connector — either a static token (GITHUB_TOKEN) or, preferred, a
+    # GitHub App whose short-lived installation tokens are minted on demand
+    # (all three GITHUB_APP_* values required; needs the `githubapp` extra).
+    # When both are set the App wins; the token remains a fallback.
     github_token: str | None = None
+    github_app_id: str | None = None
+    github_app_private_key_path: str | None = None
+    github_app_installation_id: str | None = None
+    # Optional least-privilege restriction: comma-separated bare repo names
+    # (no owner). Unset = the minted token spans every repo the installation
+    # can access.
+    github_app_repositories: str | None = None
 
     # Coding worker — model the worker uses to generate edits. Matches the
     # `task: code` route in the example agent. Codegen is multi-step and
@@ -73,6 +83,26 @@ class Settings(BaseSettings):
     embeddings_enabled: bool = True
     embedding_model: str = "openai/text-embedding-3-small"
     embedding_dim: int = 1536
+
+    @property
+    def github_app_configured(self) -> bool:
+        """True when all three GitHub App values are set."""
+        return bool(
+            self.github_app_id
+            and self.github_app_private_key_path
+            and self.github_app_installation_id
+        )
+
+    @property
+    def github_app_repository_list(self) -> list[str]:
+        """``github_app_repositories`` parsed into a list (empty when unset)."""
+        if not self.github_app_repositories:
+            return []
+        return [
+            repo.strip()
+            for repo in self.github_app_repositories.split(",")
+            if repo.strip()
+        ]
 
     @property
     def embedding_provider(self) -> str:

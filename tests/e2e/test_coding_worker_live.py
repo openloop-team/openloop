@@ -21,6 +21,7 @@ import pytest
 
 from openloop.models.gateway import ModelResponse
 from openloop.tools.coding_worker import CodingWorkerConnector, GitCodingWorker
+from openloop.credentials import EnvCredentialResolver
 from openloop.tools.github import HttpGitHubClient
 
 
@@ -70,8 +71,11 @@ async def test_coding_worker_live_draft_pr():
     base = os.environ.get("E2E_GITHUB_BASE", "main")
     marker = uuid.uuid4().hex[:8]
 
-    client = HttpGitHubClient(token)
-    worker = GitCodingWorker(token, model="stub", gateway=_StubCompleter(marker))
+    credentials = EnvCredentialResolver({"github": token})
+    client = HttpGitHubClient(credentials)
+    worker = GitCodingWorker(
+        credentials, model="stub", gateway=_StubCompleter(marker)
+    )
     connector = CodingWorkerConnector(worker, client)
 
     args = connector.prepare_args(

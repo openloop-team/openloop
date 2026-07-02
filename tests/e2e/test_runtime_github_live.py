@@ -23,6 +23,7 @@ from openloop.memory import InMemoryStore
 from openloop.models.gateway import ModelGateway
 from openloop.runtime import Runtime, Task
 from openloop.tools import ToolGateway
+from openloop.credentials import EnvCredentialResolver
 from openloop.tools.github import GitHubConnector, HttpGitHubClient
 from openloop.usage import InMemoryUsageStore, budget_scope_key
 
@@ -118,7 +119,12 @@ async def test_live_end_to_end():
     )
 
     tools = ToolGateway(
-        tools=[GitHubConnector(HttpGitHubClient(token))], approvals=approvals
+        tools=[
+            GitHubConnector(
+                HttpGitHubClient(EnvCredentialResolver({"github": token}))
+            )
+        ],
+        approvals=approvals,
     )
     agent = _build_agent(model)
     runtime = Runtime(
@@ -156,7 +162,9 @@ async def test_live_end_to_end():
     finally:
         number = issue.get("number")
         if number:  # close the issue we created so runs don't accumulate junk
-            await HttpGitHubClient(token)._request(
+            await HttpGitHubClient(
+                EnvCredentialResolver({"github": token})
+            )._request(
                 "PATCH", f"/repos/{repo}/issues/{number}", json={"state": "closed"}
             )
         if stores:

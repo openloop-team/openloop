@@ -44,6 +44,9 @@ services:
     # Edit agents/*.yaml and `docker compose ... restart runtime` — no rebuild.
     volumes:
       - ./agents:/app/agents:ro
+      # GitHub App auth: mount the App private key and set
+      # GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app.pem in .env.
+      - ./secrets/github-app.pem:/run/secrets/github-app.pem:ro
 
 volumes:
   pgdata:

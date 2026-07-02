@@ -32,6 +32,9 @@ mcp = [
 redis = [
     "redis>=5.0",
 ]
+githubapp = [
+    "pyjwt[crypto]>=2.8",
+]
 
 [project.scripts]
 openloop = "openloop.cli:main"

@@ -37,6 +37,9 @@ services:
       - "8000:8000"
     volumes:
       - ./agents:/app/agents:ro
+      # GitHub App auth: mount the App private key and set
+      # GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app.pem in .env.
+      - ./secrets/github-app.pem:/run/secrets/github-app.pem:ro
     command: uvicorn openloop.app:app --host 0.0.0.0 --port 8000
 
 volumes:

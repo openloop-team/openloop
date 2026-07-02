@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from openloop.checkpoints.store import CheckpointStore, WorkerCheckpoint
+from openloop.credentials import CredentialResolver, CredentialScope
 from openloop.tools.base import ActionSpec, ToolResult
 from openloop.tools.github import GitHubClient
 
@@ -422,24 +423,30 @@ class GitCodingWorker:
     """Real worker: clone → model-edit → commit → push, in a temp sandbox.
 
     SECURITY: this runs model-generated edits, so it needs a least-privilege
-    ``contents:write`` token and an isolated checkout. The clone happens in a
+    ``contents:write`` credential and an isolated checkout. The token is
+    resolved through the :class:`CredentialResolver` seam at the start of each
+    run and kept run-local — never stored on the worker — so a minting backend
+    (GitHub App installation tokens) caps its lifetime. The clone happens in a
     throwaway temp dir that is removed after each run. Edits are applied as a
     unified diff via ``git apply`` — anything that doesn't apply cleanly fails
     the job rather than being force-written.
 
-    Phase A only: no checkpointing. A crash mid-run loses the sandbox and leaves
-    the approval stuck approved-but-incomplete — Phase B adds resume.
+    Phase 2 of the hardening roadmap removes the credential from this class
+    entirely (the orchestrating boundary owns clone/push); until then the
+    ``redact`` guard below keeps the resolved token out of error output.
     """
 
     def __init__(
         self,
-        token: str,
+        credentials: CredentialResolver,
         model: str,
         gateway: _Completer | None = None,
         *,
+        scope: CredentialScope | None = None,
         max_context_bytes: int = 60_000,
     ) -> None:
-        self.token = token
+        self._credentials = credentials
+        self._scope = scope or CredentialScope(integration="github")
         self.model = model
         self._gateway = gateway
         self.max_context_bytes = max_context_bytes
@@ -459,33 +466,44 @@ class GitCodingWorker:
             if on_step is not None:
                 await on_step(state)
 
+        # Resolved fresh per run and kept local — never stored on the worker.
+        # It still lands in the clone URL (and thus .git/config), so every git
+        # command below redacts it from failure output.
+        token = await self._credentials.resolve(self._scope)
         sandbox = Path(tempfile.mkdtemp(prefix=f"openloop-{state.job_id}-"))
         try:
-            url = (
-                f"https://x-access-token:{self.token}@github.com/{state.repo}.git"
-            )
             await self._git(
-                "clone", "--depth", "1", "--branch", state.base, url, str(sandbox)
+                "clone", "--depth", "1", "--branch", state.base,
+                _remote_url(token, state.repo), str(sandbox),
+                redact=token,
             )
             await step("clone")
 
-            await self._git("checkout", "-b", state.branch, cwd=sandbox)
+            await self._git("checkout", "-b", state.branch, cwd=sandbox, redact=token)
             await step("branch")
 
             diff, title, body, resp = await self._generate(state, sandbox)
             # Persist title/body so a post-push crash can still open the PR.
             state.title, state.body = title, body
-            await self._git_input("apply", "--whitespace=nowarn", stdin=diff, cwd=sandbox)
+            await self._git_input(
+                "apply", "--whitespace=nowarn", stdin=diff, cwd=sandbox, redact=token
+            )
             await step("edit")
 
-            await self._git("add", "-A", cwd=sandbox)
+            await self._git("add", "-A", cwd=sandbox, redact=token)
             await self._git(
                 "-c", "user.email=worker@openloop.ai",
                 "-c", "user.name=OpenLoop coding worker",
-                "commit", "-m", title, cwd=sandbox,
+                "commit", "-m", title, cwd=sandbox, redact=token,
             )
             await step("commit")
 
+            # Re-resolve right before the push: a long generate step can outlive
+            # the token minted at clone time (App installation tokens expire),
+            # and the clone baked that possibly-stale token into origin's URL.
+            # Pushing to an explicit URL bypasses origin; the resolver's cache
+            # makes this free while the original token is still fresh.
+            push_token = await self._credentials.resolve(self._scope)
             # Force-push to the job-exclusive branch so the push is idempotent.
             # The "push" checkpoint is only written by the step() below, so a crash
             # in the window between this push succeeding and that write leaves the
@@ -495,7 +513,11 @@ class GitCodingWorker:
             # owned solely by this job_id, so overwriting it is safe; the trade-off
             # is that a resumed run may carry a freshly regenerated diff.
             await self._git(
-                "push", "--force", "origin", state.branch, cwd=sandbox
+                "push", "--force", _remote_url(push_token, state.repo),
+                state.branch, cwd=sandbox,
+                # Both tokens can surface in failure output: the fresh one is in
+                # the command, the clone-time one is still in .git/config.
+                redact=(token, push_token),
             )
             await step("push")
 
@@ -560,14 +582,29 @@ class GitCodingWorker:
             budget -= len(block)
         return "".join(parts)
 
-    async def _git(self, *args: str, cwd: Path | None = None) -> str:
-        return await self._run("git", *args, cwd=cwd)
+    async def _git(
+        self,
+        *args: str,
+        cwd: Path | None = None,
+        redact: "str | tuple[str, ...] | None" = None,
+    ) -> str:
+        return await self._run("git", *args, cwd=cwd, redact=redact)
 
-    async def _git_input(self, *args: str, stdin: str, cwd: Path | None = None) -> str:
-        return await self._run("git", *args, cwd=cwd, stdin=stdin)
+    async def _git_input(
+        self,
+        *args: str,
+        stdin: str,
+        cwd: Path | None = None,
+        redact: "str | tuple[str, ...] | None" = None,
+    ) -> str:
+        return await self._run("git", *args, cwd=cwd, stdin=stdin, redact=redact)
 
     async def _run(
-        self, *cmd: str, cwd: Path | None = None, stdin: str | None = None
+        self,
+        *cmd: str,
+        cwd: Path | None = None,
+        stdin: str | None = None,
+        redact: "str | tuple[str, ...] | None" = None,
     ) -> str:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -583,13 +620,23 @@ class GitCodingWorker:
             # Redact the token from BOTH the command and git's stderr — git prints
             # the full https://x-access-token:<token>@github.com/... URL on many
             # failures, and this text is returned in the failed ToolResult.
-            cmd_str = self._redact(" ".join(cmd))
-            stderr = self._redact(err.decode().strip())
+            cmd_str = _redact(" ".join(cmd), redact)
+            stderr = _redact(err.decode().strip(), redact)
             raise RuntimeError(f"`{cmd_str}` failed ({proc.returncode}): {stderr}")
         return out.decode()
 
-    def _redact(self, text: str) -> str:
-        return text.replace(self.token, "***") if self.token else text
+
+def _remote_url(token: str, repo: str) -> str:
+    return f"https://x-access-token:{token}@github.com/{repo}.git"
+
+
+def _redact(text: str, secrets: "str | tuple[str, ...] | None") -> str:
+    if isinstance(secrets, str):
+        secrets = (secrets,)
+    for secret in secrets or ():
+        if secret:
+            text = text.replace(secret, "***")
+    return text
 
 
 def _parse_generation(text: str) -> tuple[str, str, str]:
