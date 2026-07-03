@@ -21,7 +21,7 @@ from openloop.credentials import EnvCredentialResolver
 from openloop.models.gateway import ModelResponse
 from openloop.tools.coding_worker import (
     STEPS,
-    GitCodingWorker,
+    BuiltinCodingWorker,
     GitWorkspaceOrchestrator,
     WorkerState,
 )
@@ -76,7 +76,7 @@ def _orchestrator(remote: Path, worker=None):
     # remote is <base>/acme/x.git — repo "acme/x" resolves against file://<base>.
     remote_base = f"file://{remote.parent.parent}"
     return GitWorkspaceOrchestrator(
-        worker or GitCodingWorker(model="stub", gateway=_StubCompleter()),
+        worker or BuiltinCodingWorker(model="stub", gateway=_StubCompleter()),
         EnvCredentialResolver({"github": "secrettoken"}),
         remote_base=remote_base,
     )
@@ -110,7 +110,7 @@ async def test_real_attempt_pushes_branch_with_edit(remote):
 async def test_workspace_handed_to_worker_holds_no_credential(remote):
     seen: dict = {}
 
-    class SpyWorker(GitCodingWorker):
+    class SpyWorker(BuiltinCodingWorker):
         async def run(self, workspace, state, on_step=None):
             # Capture everything credential-shaped that COULD leak: the whole
             # git config visible from the workspace, plus every file in .git

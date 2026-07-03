@@ -32,9 +32,11 @@ records this worker's metrics and fails the attempt closed — before any
 push/PR — when the per-task budget is exceeded. Wiring therefore refuses to
 register this backend without a per-task budget.
 
-The SDK import is lazy (``openhands`` extra); :meth:`probe` proves the whole
-construction path at boot so a missing extra or dead docker daemon disables
-the coding worker loudly instead of failing after a human approved a job.
+The SDK import is lazy (``openhands`` extra); :meth:`probe` checks SDK/tool
+imports and, in docker mode, daemon reachability so common missing prerequisites
+disable the coding worker loudly before approval. The real
+``DockerWorkspace`` is still constructed per attempt because starting the
+agent-server image is comparatively expensive.
 """
 
 from __future__ import annotations
@@ -116,12 +118,13 @@ class OpenHandsCodingWorker:
         self._factory = conversation_factory or self._build_conversation
 
     def probe(self) -> None:
-        """Prove the backend can start, at boot — mirrors the sandbox probe.
+        """Check cheap backend prerequisites at boot.
 
         Raises :class:`OpenHandsUnavailable` when the ``openhands`` extra is
         missing (or, in docker mode, when the workspace package or the docker
-        daemon is unusable), so wiring can fail closed instead of registering
-        a worker that only breaks after a human approved a job.
+        daemon is unusable), so wiring can fail closed for common setup
+        mistakes. Docker image pull/start and provider auth are still validated
+        by the real per-attempt conversation.
         """
         try:
             import openhands.sdk  # noqa: F401

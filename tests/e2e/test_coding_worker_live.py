@@ -1,7 +1,7 @@
 """Live end-to-end test for the coding worker — gated on credentials.
 
 Exercises the REAL chain: GitWorkspaceOrchestrator clones the repo, the
-credential-free GitCodingWorker applies a diff, the orchestrator commits and
+credential-free BuiltinCodingWorker applies a diff, the orchestrator commits and
 pushes the branch, then the connector opens a REAL *draft* PR. The PR is closed
 and the branch deleted afterward, so the test is safe to re-run / use in CI.
 
@@ -22,7 +22,7 @@ import pytest
 from openloop.models.gateway import ModelResponse
 from openloop.tools.coding_worker import (
     CodingWorkerConnector,
-    GitCodingWorker,
+    BuiltinCodingWorker,
     GitWorkspaceOrchestrator,
 )
 from openloop.credentials import EnvCredentialResolver
@@ -77,7 +77,7 @@ async def test_coding_worker_live_draft_pr():
 
     credentials = EnvCredentialResolver({"github": token})
     client = HttpGitHubClient(credentials)
-    worker = GitCodingWorker(model="stub", gateway=_StubCompleter(marker))
+    worker = BuiltinCodingWorker(model="stub", gateway=_StubCompleter(marker))
     orchestrator = GitWorkspaceOrchestrator(worker, credentials)
     connector = CodingWorkerConnector(orchestrator, client)
 

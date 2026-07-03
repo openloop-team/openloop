@@ -47,15 +47,16 @@ class Settings(BaseSettings):
     # Enable the real git-backed worker (needs a contents:write token + a
     # sandboxed checkout). Off by default — the connector stays unregistered.
     coding_worker_enabled: bool = False
-    # Which worker edits the prepared workspace:
-    #   "git"       (default) — the light worker: one model call for a unified
-    #               diff, applied through the sandbox.
+    # Which worker engine edits the prepared workspace:
+    #   "builtin"   (default) — OpenLoop's own light worker (BuiltinCodingWorker):
+    #               one model call for a unified diff, applied through the
+    #               sandbox.
     #   "openhands" — the heavy agentic worker (needs the `openhands` extra
     #               AND a per-task budget on the owning agent — the run is
     #               refused without a fail-closed spend cap).
     # FAIL-CLOSED: an unknown value disables the coding worker loudly; a typo
     # in a spend/safety setting must not select a different worker.
-    coding_worker_backend: str = "git"
+    coding_worker_backend: str = "builtin"
     # In-run iteration cap handed to the OpenHands conversation. The budget
     # cap is enforced by the worker-spend ledger (per_task_usd), not in-run.
     coding_worker_max_iterations: int = 100

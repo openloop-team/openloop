@@ -59,7 +59,7 @@ from openloop.sandbox import (
 from openloop.tools.coding_worker import (
     CodingWorker,
     CodingWorkerConnector,
-    GitCodingWorker,
+    BuiltinCodingWorker,
     GitWorkspaceOrchestrator,
 )
 from openloop.tools.github import GitHubConnector, HttpGitHubClient
@@ -321,11 +321,11 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
     weaker isolation boundary.
     """
     backend = settings.coding_worker_backend
-    if backend == "git":
+    if backend == "builtin":
         sandbox = build_worker_sandbox(settings)
         if sandbox is None:
             return None
-        return GitCodingWorker(model=settings.coding_worker_model, sandbox=sandbox)
+        return BuiltinCodingWorker(model=settings.coding_worker_model, sandbox=sandbox)
     if backend == "openhands":
         if settings.coding_worker_sandbox not in ("host", "docker"):
             log.error(
@@ -348,7 +348,7 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
             return None
         return worker
     log.error(
-        "unknown CODING_WORKER_BACKEND=%r (expected git|openhands)", backend
+        "unknown CODING_WORKER_BACKEND=%r (expected builtin|openhands)", backend
     )
     return None
 

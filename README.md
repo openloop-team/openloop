@@ -375,7 +375,7 @@ the workflow.
   wiring (an unusable sandbox disables the worker, never silently runs on the
   host). `CODING_WORKER_SANDBOX=docker`
 - [x] OpenHands worker backend + spend ledger (Phase 4) — pluggable worker
-  backends behind `CODING_WORKER_BACKEND=git|openhands`: the default stays the
+  backends behind `CODING_WORKER_BACKEND=builtin|openhands`: the default stays the
   light diff worker; `openhands` drives an agentic OpenHands run over the same
   prepared, credential-free workspace (`openhands` extra; with
   `CODING_WORKER_SANDBOX=docker` the agent server runs containerized with the

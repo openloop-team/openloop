@@ -6,12 +6,14 @@ agentic backend — no fail-closed spend cap) disables the coding worker loudly
 instead of degrading to a different worker or a weaker boundary.
 """
 
+import pytest
+
 import openloop.app as appmod
 from openloop.agents import load_agent
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.config import Settings
-from openloop.tools.coding_worker import GitCodingWorker
+from openloop.tools.coding_worker import BuiltinCodingWorker
 from openloop.tools.openhands_worker import (
     OpenHandsCodingWorker,
     OpenHandsUnavailable,
@@ -38,12 +40,12 @@ def _gateway(settings, agents=None, usage=None):
     )
 
 
-def test_default_backend_is_git_with_ledger_attached():
+def test_default_backend_is_the_builtin_diff_worker_with_ledger_attached():
     gateway = _gateway(_settings())
 
     connector = gateway._tools["coding_worker"]
     orchestrator = connector.orchestrator
-    assert isinstance(orchestrator.worker, GitCodingWorker)
+    assert isinstance(orchestrator.worker, BuiltinCodingWorker)
     # The Phase 4 ledger rides along on the default backend too: spend is
     # recorded and the example agent's per-task cap enforced.
     assert orchestrator._ledger is not None
@@ -51,11 +53,24 @@ def test_default_backend_is_git_with_ledger_attached():
     assert orchestrator._ledger.agent == "dev-platform"
 
 
+@pytest.mark.parametrize("retired", ["git", "diff"])
+def test_retired_backend_names_fail_closed(retired, caplog):
+    # Both pre-release names of the builtin backend are dead values now: a
+    # stale config must disable the worker loudly, never guess a mapping.
+    with caplog.at_level("ERROR"):
+        gateway = _gateway(_settings(coding_worker_backend=retired))
+
+    assert "coding_worker" not in gateway._tools
+    assert "unknown CODING_WORKER_BACKEND" in caplog.text
+    assert "expected builtin|openhands" in caplog.text
+
+
 def test_unknown_backend_fails_closed(caplog):
     with caplog.at_level("ERROR"):
         gateway = _gateway(_settings(coding_worker_backend="opnhands"))
     assert "coding_worker" not in gateway._tools
     assert "unknown CODING_WORKER_BACKEND" in caplog.text
+    assert "expected builtin|openhands" in caplog.text
     assert "CODING WORKER DISABLED" in caplog.text
 
 

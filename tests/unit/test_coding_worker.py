@@ -8,7 +8,7 @@ from openloop.credentials import EnvCredentialResolver
 from openloop.tools.coding_worker import (
     STEPS,
     CodingWorkerConnector,
-    GitCodingWorker,
+    BuiltinCodingWorker,
     GitWorkspaceOrchestrator,
     WorkerOutcome,
     WorkerState,
@@ -272,7 +272,7 @@ async def test_workspace_root_is_honored(monkeypatch, tmp_path):
 def test_worker_holds_no_credential_attribute():
     """Phase 2 contract: the worker class has no credential to leak — the
     resolver lives only on the orchestrating boundary."""
-    worker = GitCodingWorker(model="m")
+    worker = BuiltinCodingWorker(model="m")
     assert "credential" not in repr(vars(worker)).lower()
     assert not hasattr(worker, "_credentials")
 
@@ -318,7 +318,7 @@ async def test_git_worker_applies_diff_through_sandbox():
             return ""
 
     sandbox = RecordingSandbox()
-    worker = GitCodingWorker(model="m", gateway=_StubCompleter(), sandbox=sandbox)
+    worker = BuiltinCodingWorker(model="m", gateway=_StubCompleter(), sandbox=sandbox)
     state = _state()
     edit = await worker.run(Path("/tmp/ws"), state)
 

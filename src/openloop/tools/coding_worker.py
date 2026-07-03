@@ -627,8 +627,13 @@ class GitWorkspaceOrchestrator:
         return await _run_process(*cmd, cwd=cwd, stdin=stdin, redact=redact)
 
 
-class GitCodingWorker:
-    """Default light worker: ask the model for a unified diff and apply it.
+class BuiltinCodingWorker:
+    """OpenLoop's own light worker (``CODING_WORKER_BACKEND=builtin``).
+
+    Its one strategy today is *diff*: ask the model for a unified diff in a
+    single completion and apply it. Future strategies live inside this class
+    (behind a ``CODING_WORKER_BUILTIN_STRATEGY`` setting when a second one
+    exists), not as sibling classes.
 
     Credential-free (hardening Phase 2): it receives a *prepared* workspace
     from :class:`GitWorkspaceOrchestrator` and only generates + ``git apply``s
