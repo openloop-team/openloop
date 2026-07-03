@@ -47,6 +47,14 @@ services:
       # GitHub App auth: mount the App private key and set
       # GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app.pem in .env.
       - ./secrets/github-app.pem:/run/secrets/github-app.pem:ro
+      # CODING_WORKER_SANDBOX=docker needs the host docker daemon (the sandbox
+      # containers run as siblings). Uncomment BOTH lines and set
+      # CODING_WORKER_WORKSPACE_DIR=/var/lib/openloop/workspaces in .env —
+      # sibling containers resolve bind mounts on the host, so the workspace
+      # path must exist at the same location on host and runtime. Without the
+      # socket the coding worker fails closed (disabled, never unsandboxed).
+      # - /var/run/docker.sock:/var/run/docker.sock
+      # - /var/lib/openloop/workspaces:/var/lib/openloop/workspaces
 
 volumes:
   pgdata:

@@ -51,12 +51,15 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from openloop.checkpoints.store import CheckpointStore, WorkerCheckpoint
 from openloop.credentials import CredentialResolver, CredentialScope
 from openloop.tools.base import ActionSpec, ToolResult
 from openloop.tools.github import GitHubClient
+
+if TYPE_CHECKING:
+    from openloop.sandbox import Sandbox
 
 # Persist-after-each-step callback invoked after each completed step so a crash
 # leaves an accurate mid-phase record (completed_steps + state_json), not just a
@@ -494,12 +497,18 @@ class GitWorkspaceOrchestrator:
         *,
         scope: CredentialScope | None = None,
         remote_base: str = "https://github.com",
+        workspace_root: Path | None = None,
     ) -> None:
         self.worker = worker
         self._credentials = credentials
         self._scope = scope or CredentialScope(integration="github")
         # Overridable for GitHub Enterprise — and for local file:// test remotes.
         self._remote_base = remote_base.rstrip("/")
+        # Where workspaces are created (default: the system tempdir). A
+        # containerized deploy using the docker sandbox must point this at a
+        # path bind-mounted from the host at the SAME location — sibling
+        # sandbox containers resolve `-v` paths on the host, not in here.
+        self._workspace_root = workspace_root
 
     async def run_attempt(
         self, state: WorkerState, on_step: StepCallback | None = None
@@ -513,7 +522,14 @@ class GitWorkspaceOrchestrator:
         # URL. The auth header value still surfaces in a failed command line,
         # so git failures redact both the token and its basic-auth encoding.
         token = await self._credentials.resolve(self._scope)
-        workspace = Path(tempfile.mkdtemp(prefix=f"openloop-{state.job_id}-"))
+        if self._workspace_root is not None:
+            self._workspace_root.mkdir(parents=True, exist_ok=True)
+        workspace = Path(
+            tempfile.mkdtemp(
+                prefix=f"openloop-{state.job_id}-",
+                dir=self._workspace_root,
+            )
+        )
         try:
             await self._git(
                 *_auth_config(token),
@@ -595,6 +611,12 @@ class GitCodingWorker:
     from :class:`GitWorkspaceOrchestrator` and only generates + ``git apply``s
     a diff — it holds no token, never sees a remote, and cannot push. Anything
     that doesn't apply cleanly fails the job rather than being force-written.
+
+    Isolation (hardening Phase 3): the model-influenced execution — applying
+    the generated diff — runs through a :class:`~openloop.sandbox.Sandbox`.
+    The model *call* stays in this (controller) process, so the LLM key is
+    never in the sandbox's reach; with :class:`~openloop.sandbox.DockerSandbox`
+    the apply runs in a throwaway container with no network and no env.
     """
 
     def __init__(
@@ -602,10 +624,14 @@ class GitCodingWorker:
         model: str,
         gateway: _Completer | None = None,
         *,
+        sandbox: "Sandbox | None" = None,
         max_context_bytes: int = 60_000,
     ) -> None:
+        from openloop.sandbox import HostSandbox
+
         self.model = model
         self._gateway = gateway
+        self.sandbox = sandbox or HostSandbox()
         self.max_context_bytes = max_context_bytes
 
     def _completer(self) -> _Completer:
@@ -622,8 +648,9 @@ class GitCodingWorker:
         on_step: StepCallback | None = None,
     ) -> WorkerEdit:
         diff, title, body, resp = await self._generate(state, workspace)
-        await self._run(
-            "git", "apply", "--whitespace=nowarn", stdin=diff, cwd=workspace
+        # The one place model-generated content executes — through the sandbox.
+        await self.sandbox.exec(
+            workspace, "git", "apply", "--whitespace=nowarn", stdin=diff
         )
         state.completed_steps.append("edit")
         if on_step is not None:
@@ -635,12 +662,6 @@ class GitCodingWorker:
             prompt_tokens=resp.prompt_tokens,
             completion_tokens=resp.completion_tokens,
         )
-
-    async def _run(
-        self, *cmd: str, cwd: Path | None = None, stdin: str | None = None
-    ) -> str:
-        # No redact: nothing credential-shaped is in this class's scope.
-        return await _run_process(*cmd, cwd=cwd, stdin=stdin)
 
     async def _generate(self, state: WorkerState, workspace: Path):
         """Ask the model for a unified diff + PR title/body for the instruction.

@@ -11,6 +11,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Static docker CLI so CODING_WORKER_SANDBOX=docker works from inside this
+# container (sibling containers over the mounted /var/run/docker.sock — see
+# docker-compose.deploy.yml). CLI only, no daemon; major version pinned so a
+# breaking CLI change can't ride in on a rebuild. Without this binary the
+# sandbox probe fails at boot and the coding worker is disabled (fail-closed).
+COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
+
 COPY pyproject.toml README.md ./
 COPY src ./src
 

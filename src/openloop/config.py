@@ -47,6 +47,25 @@ class Settings(BaseSettings):
     # Enable the real git-backed worker (needs a contents:write token + a
     # sandboxed checkout). Off by default — the connector stays unregistered.
     coding_worker_enabled: bool = False
+    # Where the worker's model-influenced execution (applying generated edits)
+    # runs:
+    #   "host"   (default) — a plain subprocess in this process's environment.
+    #   "docker" — a throwaway container per command: default-deny egress
+    #              (network none), no env forwarded, capabilities dropped.
+    # FAIL-CLOSED: if "docker" is requested but docker can't run, the coding
+    # worker is DISABLED (loudly) — it never silently falls back to the host.
+    coding_worker_sandbox: str = "host"
+    # Image for the docker sandbox; needs a `git` binary on PATH.
+    coding_worker_sandbox_image: str = "alpine/git"
+    # Container network. "none" = default-deny (the worker needs no egress —
+    # the model call happens in the controller). Point at a user-defined
+    # docker network fronted by an egress proxy for an allowlist model.
+    coding_worker_sandbox_network: str = "none"
+    # Where attempt workspaces are created (default: system tempdir). Required
+    # when the runtime itself runs in a container with the docker sandbox:
+    # sibling sandbox containers resolve bind-mount paths on the HOST, so this
+    # must be a host path mounted into the runtime at the same location.
+    coding_worker_workspace_dir: str | None = None
 
     # Storage / queue
     database_url: str = (

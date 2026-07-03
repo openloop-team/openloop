@@ -247,6 +247,28 @@ async def test_worker_sees_no_credential(monkeypatch):
     assert _basic_auth("secrettoken") not in repr(worker.seen)
 
 
+async def test_workspace_root_is_honored(monkeypatch, tmp_path):
+    """A containerized deploy pins workspaces to a host-shared dir so sibling
+    sandbox containers can bind-mount them."""
+    worker = FakeCodingWorker()
+    root = tmp_path / "workspaces"
+    orch = GitWorkspaceOrchestrator(
+        worker,
+        EnvCredentialResolver({"github": "t"}),
+        workspace_root=root,
+    )
+
+    async def fake_run(*cmd, cwd=None, stdin=None, redact=None):
+        return ""
+
+    monkeypatch.setattr(orch, "_run", fake_run)
+    await orch.run_attempt(_state())
+
+    workspace, _ = worker.runs[0]
+    assert workspace.parent == root
+    assert not workspace.exists()  # removed after the attempt
+
+
 def test_worker_holds_no_credential_attribute():
     """Phase 2 contract: the worker class has no credential to leak — the
     resolver lives only on the orchestrating boundary."""
@@ -273,7 +295,7 @@ def test_worker_state_idempotency_keys_are_per_side_effect():
     assert state.open_pr_key() == "j1:open_pr:a/b:openloop/job-j1"
 
 
-async def test_git_worker_applies_diff_and_reports_edit_step(monkeypatch):
+async def test_git_worker_applies_diff_through_sandbox():
     class _StubCompleter:
         async def complete(self, model, messages, **kwargs):
             class R:
@@ -287,24 +309,27 @@ async def test_git_worker_applies_diff_and_reports_edit_step(monkeypatch):
 
             return R()
 
-    worker = GitCodingWorker(model="m", gateway=_StubCompleter())
-    commands = []
+    class RecordingSandbox:
+        def __init__(self):
+            self.calls = []
 
-    async def fake_run(*cmd, cwd=None, stdin=None):
-        commands.append((cmd, stdin, cwd))
-        return ""
+        async def exec(self, workspace, *cmd, stdin=None):
+            self.calls.append((workspace, cmd, stdin))
+            return ""
 
-    monkeypatch.setattr(worker, "_run", fake_run)
+    sandbox = RecordingSandbox()
+    worker = GitCodingWorker(model="m", gateway=_StubCompleter(), sandbox=sandbox)
     state = _state()
     edit = await worker.run(Path("/tmp/ws"), state)
 
     assert edit.title == "t" and edit.body == "b"
     assert edit.cost_usd == 0.3
     assert state.completed_steps == ["edit"]
-    (cmd, stdin, cwd) = commands[0]
+    # The model-generated diff executed through the sandbox seam, nowhere else.
+    (workspace, cmd, stdin) = sandbox.calls[0]
+    assert str(workspace) == "/tmp/ws"
     assert cmd[:2] == ("git", "apply")
     assert stdin.startswith("--- a/x")
-    assert str(cwd) == "/tmp/ws"
 
 
 def test_parse_generation_splits_title_body_diff():

@@ -50,6 +50,12 @@ from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 
 from openloop.surfaces.slack import build_slack_app
 from openloop.tools import Invocation, ToolGateway
+from openloop.sandbox import (
+    DockerSandbox,
+    HostSandbox,
+    Sandbox,
+    SandboxUnavailable,
+)
 from openloop.tools.coding_worker import (
     CodingWorkerConnector,
     GitCodingWorker,
@@ -242,6 +248,49 @@ def build_github_credentials(settings: Settings) -> CredentialResolver | None:
     return None
 
 
+def _worker_workspace_root(settings: Settings) -> Path | None:
+    """The one place the attempt-workspace root is derived from settings.
+
+    Shared by the sandbox probe and the orchestrator so what boot verifies is
+    exactly what attempts later use.
+    """
+    if settings.coding_worker_workspace_dir:
+        return Path(settings.coding_worker_workspace_dir)
+    return None
+
+
+def build_worker_sandbox(settings: Settings) -> "Sandbox | None":
+    """Pick where the coding worker's model-influenced execution runs.
+
+    ``host`` returns the no-isolation default. ``docker`` runs a full-fidelity
+    probe at boot — a real container run with the configured image, network,
+    and a bind mount under the configured workspace root — and returns
+    ``None`` when any of it can't work; the caller then disables the coding
+    worker entirely (fail-closed) rather than silently running model-generated
+    edits on the host, or registering a worker that would only fail after a
+    human approved a job. An unknown value also returns ``None``: a typo in a
+    security setting must not select a weaker boundary.
+    """
+    if settings.coding_worker_sandbox == "host":
+        return HostSandbox()
+    if settings.coding_worker_sandbox == "docker":
+        sandbox = DockerSandbox(
+            settings.coding_worker_sandbox_image,
+            network=settings.coding_worker_sandbox_network,
+        )
+        try:
+            sandbox.probe(workspace_root=_worker_workspace_root(settings))
+        except SandboxUnavailable:
+            log.error("docker sandbox probe failed", exc_info=True)
+            return None
+        return sandbox
+    log.error(
+        "unknown CODING_WORKER_SANDBOX=%r (expected host|docker)",
+        settings.coding_worker_sandbox,
+    )
+    return None
+
+
 def build_tool_gateway(
     settings: Settings,
     agents: dict[str, Agent],
@@ -263,24 +312,45 @@ def build_tool_gateway(
         # The coding worker runs model-generated edits, so it stays off unless
         # explicitly enabled (it needs a contents:write credential + a sandbox).
         if settings.coding_worker_enabled:
-            # Phase 2 split: the worker is credential-free (edits a prepared
-            # workspace); the orchestrator alone holds the git credential and
-            # is the ONE helper both durable paths run attempts through.
-            worker = GitCodingWorker(model=settings.coding_worker_model)
-            orchestrator = GitWorkspaceOrchestrator(worker, github_credentials)
-            gateway.register(
-                CodingWorkerConnector(
-                    orchestrator, github_client, checkpoints=checkpoints
+            sandbox = build_worker_sandbox(settings)
+            if sandbox is None:
+                # Fail-closed (Phase 3): an explicitly requested isolation
+                # boundary that can't start must NOT degrade to running
+                # model-generated edits on the host.
+                log.error(
+                    "CODING WORKER DISABLED: CODING_WORKER_SANDBOX=%s is not "
+                    "usable on this host and the worker will not run "
+                    "unsandboxed. Fix docker or set CODING_WORKER_SANDBOX=host.",
+                    settings.coding_worker_sandbox,
                 )
-            )
-            # Register the worker as a durable workflow (approval = wait node).
-            engine.register(
-                build_coding_worker_workflow(orchestrator, github_client)
-            )
-            log.info(
-                "registered native tool: coding_worker (model=%s)",
-                settings.coding_worker_model,
-            )
+            else:
+                # Phase 2 split: the worker is credential-free (edits a
+                # prepared workspace); the orchestrator alone holds the git
+                # credential and is the ONE helper both durable paths run
+                # attempts through.
+                worker = GitCodingWorker(
+                    model=settings.coding_worker_model, sandbox=sandbox
+                )
+                orchestrator = GitWorkspaceOrchestrator(
+                    worker,
+                    github_credentials,
+                    workspace_root=_worker_workspace_root(settings),
+                )
+                gateway.register(
+                    CodingWorkerConnector(
+                        orchestrator, github_client, checkpoints=checkpoints
+                    )
+                )
+                # Register the worker as a durable workflow (approval = wait
+                # node).
+                engine.register(
+                    build_coding_worker_workflow(orchestrator, github_client)
+                )
+                log.info(
+                    "registered native tool: coding_worker (model=%s, sandbox=%s)",
+                    settings.coding_worker_model,
+                    settings.coding_worker_sandbox,
+                )
         else:
             log.info(
                 "coding_worker tool not registered: set CODING_WORKER_ENABLED=1"

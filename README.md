@@ -369,6 +369,11 @@ the workflow.
   all credential-bearing git ops live in one orchestrating boundary shared by
   both durable paths, and git auth rides a per-command header (never a
   token-in-URL clone, nothing in the workspace)
+- [x] Worker sandbox (Phase 3) — model-generated edits can run in a throwaway
+  docker container: default-deny egress (network none), no env forwarded (LLM
+  key stays in the controller), capabilities dropped, auto-reaped; fail-closed
+  wiring (an unusable sandbox disables the worker, never silently runs on the
+  host). `CODING_WORKER_SANDBOX=docker`
 - [x] Durable workflows — engine + approval-as-wait-node; worker resumes on crash;
   chat pipeline runs as a workflow (bounded: persisted turn state + idempotent
   writes; model calls are not replayed on crash)
