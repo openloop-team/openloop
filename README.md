@@ -374,6 +374,16 @@ the workflow.
   key stays in the controller), capabilities dropped, auto-reaped; fail-closed
   wiring (an unusable sandbox disables the worker, never silently runs on the
   host). `CODING_WORKER_SANDBOX=docker`
+- [x] OpenHands worker backend + spend ledger (Phase 4) — pluggable worker
+  backends behind `CODING_WORKER_BACKEND=git|openhands`: the default stays the
+  light diff worker; `openhands` drives an agentic OpenHands run over the same
+  prepared, credential-free workspace (`openhands` extra; with
+  `CODING_WORKER_SANDBOX=docker` the agent server runs containerized with the
+  workspace bind-mounted — the container never holds a git credential, the
+  host pushes). Every attempt's model spend is recorded to the usage store and
+  capped **fail-closed** by the owning agent's `per_task_usd` before anything
+  is pushed — on both durable paths — and the agentic backend refuses to
+  register without that cap
 - [x] Durable workflows — engine + approval-as-wait-node; worker resumes on crash;
   chat pipeline runs as a workflow (bounded: persisted turn state + idempotent
   writes; model calls are not replayed on crash)

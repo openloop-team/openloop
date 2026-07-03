@@ -47,6 +47,28 @@ class Settings(BaseSettings):
     # Enable the real git-backed worker (needs a contents:write token + a
     # sandboxed checkout). Off by default — the connector stays unregistered.
     coding_worker_enabled: bool = False
+    # Which worker edits the prepared workspace:
+    #   "git"       (default) — the light worker: one model call for a unified
+    #               diff, applied through the sandbox.
+    #   "openhands" — the heavy agentic worker (needs the `openhands` extra
+    #               AND a per-task budget on the owning agent — the run is
+    #               refused without a fail-closed spend cap).
+    # FAIL-CLOSED: an unknown value disables the coding worker loudly; a typo
+    # in a spend/safety setting must not select a different worker.
+    coding_worker_backend: str = "git"
+    # In-run iteration cap handed to the OpenHands conversation. The budget
+    # cap is enforced by the worker-spend ledger (per_task_usd), not in-run.
+    coding_worker_max_iterations: int = 100
+    # Agent-server image for the OpenHands docker runtime
+    # (CODING_WORKER_SANDBOX=docker + backend=openhands).
+    coding_worker_openhands_image: str = (
+        "ghcr.io/openhands/agent-server:latest-python"
+    )
+    # Docker network for the OpenHands agent-server container. Unset = the
+    # default bridge (the agent loop runs in-container and needs egress to
+    # the model provider — "none" would break it). Point at an egress-proxy
+    # network to move to an allowlist model.
+    coding_worker_openhands_network: str | None = None
     # Where the worker's model-influenced execution (applying generated edits)
     # runs:
     #   "host"   (default) — a plain subprocess in this process's environment.

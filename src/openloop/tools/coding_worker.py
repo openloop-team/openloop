@@ -60,6 +60,7 @@ from openloop.tools.github import GitHubClient
 
 if TYPE_CHECKING:
     from openloop.sandbox import Sandbox
+    from openloop.usage.ledger import WorkerSpendLedger
 
 # Persist-after-each-step callback invoked after each completed step so a crash
 # leaves an accurate mid-phase record (completed_steps + state_json), not just a
@@ -117,12 +118,11 @@ class WorkerState:
 class WorkerOutcome:
     """What one worker attempt produced: a pushed branch ready for a draft PR.
 
-    Carries the model spend so it is at least *observable* in the tool result.
-    NOTE: this runs inside ``ToolGateway.resolve()``, which is outside
-    ``Runtime.handle``'s usage accounting — so this spend is not yet recorded in
-    ``/usage`` nor checked against per-task/monthly budgets. Enforcing that means
-    threading a UsageStore + agent scope through the approval-resolution path
-    (hardening roadmap Phases 4–5).
+    Carries the model spend so it is observable in the tool result. With a
+    :class:`~openloop.usage.ledger.WorkerSpendLedger` wired into the
+    orchestrator (Phase 4), the spend is also recorded to the usage store and
+    fail-closed capped per task before the push/PR boundary; monthly budget
+    enforcement and full ``/usage`` unification remain Phase 5.
     """
 
     branch: str
@@ -488,6 +488,13 @@ class GitWorkspaceOrchestrator:
     The attempt is one opaque replay unit: the workspace is a throwaway temp
     dir removed after each run, so a resumed job re-provisions from clean, and
     force-push to the job-exclusive branch keeps the retry idempotent.
+
+    SPEND (hardening Phase 4): when a
+    :class:`~openloop.usage.ledger.WorkerSpendLedger` is wired, every
+    attempt's model spend is recorded to the usage store and checked against
+    the per-task budget *here* — after the worker's edit, before commit/push —
+    so an over-budget attempt fails closed (no push, no PR) on **both**
+    durable paths at once. Full budget unification is Phase 5.
     """
 
     def __init__(
@@ -498,6 +505,7 @@ class GitWorkspaceOrchestrator:
         scope: CredentialScope | None = None,
         remote_base: str = "https://github.com",
         workspace_root: Path | None = None,
+        ledger: "WorkerSpendLedger | None" = None,
     ) -> None:
         self.worker = worker
         self._credentials = credentials
@@ -509,6 +517,8 @@ class GitWorkspaceOrchestrator:
         # path bind-mounted from the host at the SAME location — sibling
         # sandbox containers resolve `-v` paths on the host, not in here.
         self._workspace_root = workspace_root
+        # Optional Phase 4 spend ledger: record + fail-closed per-task cap.
+        self._ledger = ledger
 
     async def run_attempt(
         self, state: WorkerState, on_step: StepCallback | None = None
@@ -547,6 +557,19 @@ class GitWorkspaceOrchestrator:
             edit = await self.worker.run(workspace, state, on_step)
             # Persist title/body so a post-push crash can still open the PR.
             state.title, state.body = edit.title, edit.body
+
+            # Phase 4 gate: record the attempt's spend and fail closed on the
+            # per-task cap BEFORE the push/PR boundary. Raises out of the
+            # attempt (both durable paths mark the job failed — terminal, so
+            # no resume loop re-spends), and the workspace teardown in
+            # `finally` discards the over-budget edit.
+            if self._ledger is not None:
+                await self._ledger.settle(
+                    job_id=state.job_id,
+                    cost_usd=edit.cost_usd,
+                    prompt_tokens=edit.prompt_tokens,
+                    completion_tokens=edit.completion_tokens,
+                )
 
             await self._git("add", "-A", cwd=workspace)
             await self._git(

@@ -35,6 +35,15 @@ redis = [
 githubapp = [
     "pyjwt[crypto]>=2.8",
 ]
+# The heavy agentic worker backend (CODING_WORKER_BACKEND=openhands).
+# openhands-workspace is only needed for the docker-mounted runtime.
+# The SDK needs Python >=3.12 (the project floor stays 3.11; on 3.11 the
+# extra resolves empty and the backend probe fails closed at boot).
+openhands = [
+    "openhands-sdk>=1.0; python_version >= '3.12'",
+    "openhands-tools>=1.0; python_version >= '3.12'",
+    "openhands-workspace>=1.0; python_version >= '3.12'",
+]
 
 [project.scripts]
 openloop = "openloop.cli:main"

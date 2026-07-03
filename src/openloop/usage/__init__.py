@@ -6,6 +6,7 @@ monthly spend per agent — so the runtime can enforce spend guardrails.
 """
 
 from openloop.usage.budget import BudgetDecision, budget_scope_key, check_budget
+from openloop.usage.ledger import WorkerBudgetExceeded, WorkerSpendLedger
 from openloop.usage.store import (
     InMemoryUsageStore,
     UsageRecord,
@@ -19,4 +20,6 @@ __all__ = [
     "InMemoryUsageStore",
     "UsageRecord",
     "UsageStore",
+    "WorkerBudgetExceeded",
+    "WorkerSpendLedger",
 ]

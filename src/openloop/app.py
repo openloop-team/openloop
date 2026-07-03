@@ -57,13 +57,23 @@ from openloop.sandbox import (
     SandboxUnavailable,
 )
 from openloop.tools.coding_worker import (
+    CodingWorker,
     CodingWorkerConnector,
     GitCodingWorker,
     GitWorkspaceOrchestrator,
 )
 from openloop.tools.github import GitHubConnector, HttpGitHubClient
 from openloop.tools.mcp import HttpMCPClient, MCPConnector
-from openloop.usage import InMemoryUsageStore, UsageStore, budget_scope_key
+from openloop.tools.openhands_worker import (
+    OpenHandsCodingWorker,
+    OpenHandsUnavailable,
+)
+from openloop.usage import (
+    InMemoryUsageStore,
+    UsageStore,
+    WorkerSpendLedger,
+    budget_scope_key,
+)
 from openloop.usage.postgres import PostgresUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowStore
 from openloop.workflows.coding_worker import build_coding_worker_workflow
@@ -291,12 +301,93 @@ def build_worker_sandbox(settings: Settings) -> "Sandbox | None":
     return None
 
 
+def _provider_key(settings: Settings, model: str) -> str | None:
+    """The configured API key for a LiteLLM-style model's provider prefix."""
+    provider = model.split("/", 1)[0]
+    return {
+        "openai": settings.openai_api_key,
+        "anthropic": settings.anthropic_api_key,
+        "gemini": settings.gemini_api_key,
+        "openrouter": settings.openrouter_api_key,
+    }.get(provider)
+
+
+def build_coding_worker(settings: Settings) -> "CodingWorker | None":
+    """Pick the worker backend behind ``CODING_WORKER_BACKEND`` — fail-closed.
+
+    Returns ``None`` when the requested backend can't run safely (missing
+    extra, unusable docker, or a typo'd value); the caller then disables the
+    coding worker loudly rather than degrading to a different worker or a
+    weaker isolation boundary.
+    """
+    backend = settings.coding_worker_backend
+    if backend == "git":
+        sandbox = build_worker_sandbox(settings)
+        if sandbox is None:
+            return None
+        return GitCodingWorker(model=settings.coding_worker_model, sandbox=sandbox)
+    if backend == "openhands":
+        if settings.coding_worker_sandbox not in ("host", "docker"):
+            log.error(
+                "unknown CODING_WORKER_SANDBOX=%r (expected host|docker)",
+                settings.coding_worker_sandbox,
+            )
+            return None
+        worker = OpenHandsCodingWorker(
+            settings.coding_worker_model,
+            api_key=_provider_key(settings, settings.coding_worker_model),
+            max_iterations=settings.coding_worker_max_iterations,
+            docker=settings.coding_worker_sandbox == "docker",
+            server_image=settings.coding_worker_openhands_image,
+            network=settings.coding_worker_openhands_network,
+        )
+        try:
+            worker.probe()
+        except OpenHandsUnavailable:
+            log.error("openhands backend probe failed", exc_info=True)
+            return None
+        return worker
+    log.error(
+        "unknown CODING_WORKER_BACKEND=%r (expected git|openhands)", backend
+    )
+    return None
+
+
+def _build_worker_ledger(
+    settings: Settings, agents: dict[str, Agent], usage: UsageStore
+) -> WorkerSpendLedger | None:
+    """The Phase 4 spend ledger, scoped to the agent that owns the worker tool.
+
+    Worker spend is recorded against that agent's budget scope key, so it
+    shows up in ``/usage`` month-to-date next to chat spend, and the agent's
+    ``per_task_usd`` becomes the fail-closed per-attempt cap.
+    """
+    owner = next(
+        (
+            a for a in agents.values()
+            if any(t.name == "coding_worker" for t in a.spec.tools)
+        ),
+        next(iter(agents.values()), None),
+    )
+    if owner is None:
+        return None
+    return WorkerSpendLedger(
+        usage=usage,
+        scope_key=budget_scope_key(owner),
+        workspace=owner.metadata.workspace,
+        agent=owner.metadata.name,
+        model=settings.coding_worker_model,
+        per_task_usd=owner.spec.budget.per_task_usd,
+    )
+
+
 def build_tool_gateway(
     settings: Settings,
     agents: dict[str, Agent],
     approvals: ApprovalStore,
     checkpoints: CheckpointStore,
     engine: WorkflowEngine,
+    usage: UsageStore | None = None,
 ) -> ToolGateway:
     """Register native connectors plus an MCP connector per configured server.
 
@@ -312,29 +403,47 @@ def build_tool_gateway(
         # The coding worker runs model-generated edits, so it stays off unless
         # explicitly enabled (it needs a contents:write credential + a sandbox).
         if settings.coding_worker_enabled:
-            sandbox = build_worker_sandbox(settings)
-            if sandbox is None:
-                # Fail-closed (Phase 3): an explicitly requested isolation
-                # boundary that can't start must NOT degrade to running
-                # model-generated edits on the host.
+            worker = build_coding_worker(settings)
+            ledger = (
+                _build_worker_ledger(settings, agents, usage)
+                if usage is not None
+                else None
+            )
+            if worker is None:
+                # Fail-closed (Phase 3): a requested backend/isolation
+                # boundary that can't start must NOT degrade to a different
+                # worker or to running model-generated edits on the host.
                 log.error(
-                    "CODING WORKER DISABLED: CODING_WORKER_SANDBOX=%s is not "
-                    "usable on this host and the worker will not run "
-                    "unsandboxed. Fix docker or set CODING_WORKER_SANDBOX=host.",
+                    "CODING WORKER DISABLED: CODING_WORKER_BACKEND=%s with "
+                    "CODING_WORKER_SANDBOX=%s is not usable on this host and "
+                    "the worker will not run with a weaker boundary. Fix the "
+                    "configuration named in the error above.",
+                    settings.coding_worker_backend,
                     settings.coding_worker_sandbox,
+                )
+            elif settings.coding_worker_backend == "openhands" and (
+                ledger is None or ledger.per_task_usd is None
+            ):
+                # Fail-closed (Phase 4 gate): an agentic worker with no
+                # fail-closed spend cap must not run — on either durable
+                # path, with or without a workflow engine.
+                log.error(
+                    "CODING WORKER DISABLED: CODING_WORKER_BACKEND=openhands "
+                    "requires a fail-closed per-task spend cap. Set "
+                    "spec.budget.per_task_usd on the agent that owns the "
+                    "coding_worker tool."
                 )
             else:
                 # Phase 2 split: the worker is credential-free (edits a
                 # prepared workspace); the orchestrator alone holds the git
                 # credential and is the ONE helper both durable paths run
-                # attempts through.
-                worker = GitCodingWorker(
-                    model=settings.coding_worker_model, sandbox=sandbox
-                )
+                # attempts through — which is also what lets the Phase 4
+                # ledger cover both paths at once.
                 orchestrator = GitWorkspaceOrchestrator(
                     worker,
                     github_credentials,
                     workspace_root=_worker_workspace_root(settings),
+                    ledger=ledger,
                 )
                 gateway.register(
                     CodingWorkerConnector(
@@ -347,9 +456,12 @@ def build_tool_gateway(
                     build_coding_worker_workflow(orchestrator, github_client)
                 )
                 log.info(
-                    "registered native tool: coding_worker (model=%s, sandbox=%s)",
+                    "registered native tool: coding_worker "
+                    "(backend=%s, model=%s, sandbox=%s, per_task_cap=%s)",
+                    settings.coding_worker_backend,
                     settings.coding_worker_model,
                     settings.coding_worker_sandbox,
+                    ledger.per_task_usd if ledger is not None else None,
                 )
         else:
             log.info(
@@ -416,7 +528,9 @@ def create_app() -> FastAPI:
     # needs a handle to it to repoint after a Postgres fallback. Set in the Slack
     # block below (stays None when no Slack surface is bound).
     session_runner = None
-    tools = build_tool_gateway(settings, agents, approvals, checkpoints, engine)
+    tools = build_tool_gateway(
+        settings, agents, approvals, checkpoints, engine, usage=usage
+    )
     # The agent that tool/approval endpoints act on (first configured).
     primary_agent: Agent | None = next(iter(agents.values()), None)
 
@@ -447,6 +561,11 @@ def create_app() -> FastAPI:
                 )
                 app.state.usage = InMemoryUsageStore()
                 _rebind(app, "usage", app.state.usage)
+                # The worker-spend ledger captured the Postgres store by
+                # reference; repoint it so attempts don't hit an un-setup
+                # pool. The per-task cap still enforces (it lives on the
+                # ledger); only durable spend recording degrades.
+                _repoint_worker_ledger(tools, app.state.usage)
         else:
             log.info("usage backend: in-memory (process-local)")
 
@@ -709,6 +828,15 @@ def _rebind(app: FastAPI, attr: str, value) -> None:
     runtime = getattr(app.state, "runtime", None)
     if runtime is not None:
         setattr(runtime, attr, value)
+
+
+def _repoint_worker_ledger(tools: ToolGateway, usage: UsageStore) -> None:
+    """Point the worker-spend ledger at a fallback usage store."""
+    worker = tools._tools.get("coding_worker")
+    orchestrator = getattr(worker, "orchestrator", None)
+    ledger = getattr(orchestrator, "_ledger", None)
+    if ledger is not None:
+        ledger.usage = usage
 
 
 def _disable_checkpoints(tools: ToolGateway) -> None:
