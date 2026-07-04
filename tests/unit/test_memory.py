@@ -1,11 +1,13 @@
 """Tests for the in-memory store, scope isolation, and recall ranking."""
 
+from pathlib import Path
 import pytest
 
 from openloop.agents import load_agent
 from openloop.memory import InMemoryStore, MemoryRecord, scope_key_for
 from openloop.memory.store import cosine_similarity
-from openloop.testing import EXAMPLE_AGENT
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 
 async def test_remember_and_recall_recency():
@@ -45,7 +47,7 @@ def test_cosine_similarity_edge_cases():
 
 
 def test_scope_key_respects_declared_scope():
-    agent = load_agent(EXAMPLE_AGENT)  # memory.scope == "channel"
+    agent = load_agent(AGENT_YAML)  # memory.scope == "channel"
     k1 = scope_key_for(agent, "#dev-platform")
     k2 = scope_key_for(agent, "#other")
     assert k1 != k2

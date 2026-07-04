@@ -35,6 +35,7 @@ bot token still owns the socket and the reply.
   E2E_SLACK_CHANNEL=C…         (a channel both the bot and that user are in)
 """
 
+from pathlib import Path
 import asyncio
 import os
 import uuid
@@ -46,7 +47,8 @@ from openloop.models.gateway import ModelResponse
 from openloop.runtime import Runtime
 from openloop.sessions import InMemorySurfaceSessionStore
 from openloop.surfaces.slack import build_slack_app
-from openloop.testing import EXAMPLE_AGENT
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 REPLY_TIMEOUT_S = 30.0
 POLL_INTERVAL_S = 1.0
@@ -136,7 +138,7 @@ async def test_live_slack_mention_round_trip():
 
     nonce = uuid.uuid4().hex[:12]
     runtime = Runtime(
-        load_agent(EXAMPLE_AGENT), gateway=_FixedGateway(f"e2e-ack {nonce}")
+        load_agent(AGENT_YAML), gateway=_FixedGateway(f"e2e-ack {nonce}")
     )
     slack_app = build_slack_app(
         runtime, InMemorySurfaceSessionStore(), bot_token=bot_token

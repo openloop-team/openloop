@@ -5,6 +5,7 @@ engine (prepare → run → persist), persisting turn state and writing usage/me
 idempotently, while never replaying non-idempotent model calls on crash.
 """
 
+from pathlib import Path
 from openloop.agents import load_agent
 from openloop.memory import InMemoryStore, scope_key_for
 from openloop.models.gateway import ModelResponse
@@ -14,11 +15,12 @@ from openloop.tools.github import GitHubConnector
 from openloop.usage import InMemoryUsageStore, UsageRecord, budget_scope_key
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowInstance
 from openloop.testing import (
-    EXAMPLE_AGENT,
     FakeGitHub,
     ScriptedGateway,
     tool_call_response,
 )
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 
 class CountingGateway:
@@ -33,7 +35,7 @@ class CountingGateway:
 
 
 def _agent():
-    return load_agent(EXAMPLE_AGENT)
+    return load_agent(AGENT_YAML)
 
 
 def _task(text="hi"):

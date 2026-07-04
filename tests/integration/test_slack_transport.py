@@ -1,5 +1,6 @@
 """Tests for the Slack app build (HTTP vs Socket Mode) and the socket runner."""
 
+from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from slack_bolt.async_app import AsyncApp
@@ -10,11 +11,12 @@ from openloop.sessions import InMemorySurfaceSessionStore
 from openloop.sessions.postgres import PostgresSurfaceSessionStore
 from openloop.surfaces.slack import build_slack_app
 from openloop.surfaces.slack_socket import run_socket
-from openloop.testing import EXAMPLE_AGENT
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 
 def _runtime():
-    return Runtime(load_agent(EXAMPLE_AGENT))
+    return Runtime(load_agent(AGENT_YAML))
 
 
 def test_build_slack_app_socket_mode_without_signing_secret():

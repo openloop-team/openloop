@@ -10,6 +10,7 @@ push or a PR — and (Phase 5) that spend follows the *invoking* agent through
 the gateway's approval hop on both paths.
 """
 
+from pathlib import Path
 import pytest
 
 from openloop.agents import load_agent
@@ -27,11 +28,13 @@ from openloop.usage import (
 )
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from openloop.workflows.coding_worker import build_coding_worker_workflow
-from openloop.testing import EXAMPLE_AGENT, FakeCodingWorker, FakeGitHub
+from openloop.testing import FakeCodingWorker, FakeGitHub
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 
 def _agent(per_task_usd=0.50, monthly_usd=None):
-    agent = load_agent(EXAMPLE_AGENT)  # name=dev-platform, workspace=acme
+    agent = load_agent(AGENT_YAML)  # name=dev-platform, workspace=acme
     agent.spec.budget.per_task_usd = per_task_usd
     agent.spec.budget.monthly_usd = monthly_usd
     return agent

@@ -5,6 +5,7 @@ mention → progress → final / waiting / interrupted flows with idempotent del
 (a duplicate event never starts a second turn or posts a second answer).
 """
 
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -24,12 +25,13 @@ from openloop.tools.github import GitHubConnector
 from openloop.usage import InMemoryUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowInstance
 from openloop.testing import (
-    EXAMPLE_AGENT,
     FakeGitHub,
     FakeSurfaceDelivery,
     ScriptedGateway,
     tool_call_response,
 )
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 pytestmark = pytest.mark.unit
 
@@ -54,7 +56,7 @@ def _runner(model_gateway, *, tools=None, delivery=None):
     delivery = delivery or FakeSurfaceDelivery()
     engine = WorkflowEngine(InMemoryWorkflowStore())
     runtime = Runtime(
-        load_agent(EXAMPLE_AGENT),
+        load_agent(AGENT_YAML),
         gateway=model_gateway,
         tools=tools,
         usage=InMemoryUsageStore(),

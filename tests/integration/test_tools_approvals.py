@@ -1,17 +1,20 @@
 """Tests for tool-policy enforcement, the approval gate, and the GitHub tool."""
 
+from pathlib import Path
 import pytest
 
 from openloop.agents import load_agent
 from openloop.tools import ToolGateway, allowed_actions, is_allowed, split_action
 from openloop.tools.github import GitHubConnector
-from openloop.testing import EXAMPLE_AGENT, FakeGitHub
+from openloop.testing import FakeGitHub
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 
 def _agent():
     # tools: github [issues:read, issues:write, pulls:read]; ci-logs [read]
     # approvals.require_for: github.issues:write, github.pulls:write
-    return load_agent(EXAMPLE_AGENT)
+    return load_agent(AGENT_YAML)
 
 
 def _gateway():

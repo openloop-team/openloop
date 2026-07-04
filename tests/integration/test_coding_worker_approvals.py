@@ -4,22 +4,24 @@ Mirrors test_tools_approvals.py / test_tool_loop.py but for the multi-step
 ``coding_worker.pr:write`` action: approve-before-work, then a draft PR appears.
 """
 
+from pathlib import Path
 from openloop.agents import load_agent
 from openloop.runtime import Runtime, Task
 from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import CodingWorkerConnector
 from openloop.tools.github import GitHubConnector
 from openloop.testing import (
-    EXAMPLE_AGENT,
     FakeWorkerOrchestrator,
     FakeGitHub,
     ScriptedGateway,
     tool_call_response,
 )
 
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
+
 
 def _agent():
-    return load_agent(EXAMPLE_AGENT)
+    return load_agent(AGENT_YAML)
 
 
 def _gateway(runner=None, github=None):

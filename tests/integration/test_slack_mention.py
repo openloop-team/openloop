@@ -7,6 +7,7 @@ with a synthetic event and a :class:`FakeSurfaceDelivery` — the full glue from
 event → Task → target → delivery, without a live Slack connection.
 """
 
+from pathlib import Path
 import types
 
 import pytest
@@ -18,9 +19,11 @@ from openloop.sessions import InMemorySurfaceSessionStore, SessionRunner
 from openloop.surfaces.approvals import APPROVE_ACTION, approval_blocks
 from openloop.sessions.store import SurfaceSession, SurfaceTarget
 from openloop.surfaces.slack import _run_mention, handle_message, handle_mention
-from openloop.testing import EXAMPLE_AGENT, FakeGitHub, FakeSurfaceDelivery
+from openloop.testing import FakeGitHub, FakeSurfaceDelivery
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 pytestmark = pytest.mark.integration
 
@@ -49,7 +52,7 @@ class RecordingRuntime:
 
     def __init__(self, response, *, tools=None) -> None:
         self._response = response
-        self.agent = load_agent(EXAMPLE_AGENT)
+        self.agent = load_agent(AGENT_YAML)
         self.tools = tools
         self.tasks: list[Task] = []
 
@@ -144,7 +147,7 @@ async def test_handoff_failure_before_delivery_posts_error_in_thread():
     # instead of failing silently.
     class BoomRunner:
         def __init__(self):
-            self.runtime = types.SimpleNamespace(agent=load_agent(EXAMPLE_AGENT))
+            self.runtime = types.SimpleNamespace(agent=load_agent(AGENT_YAML))
 
         async def run(self, task, target):
             raise RuntimeError("session store down")
@@ -256,7 +259,7 @@ async def test_top_level_message_is_ignored():
 
 
 async def test_approval_reply_renders_blocks_in_thread():
-    agent = load_agent(EXAMPLE_AGENT)
+    agent = load_agent(AGENT_YAML)
     tools = ToolGateway(tools=[GitHubConnector(FakeGitHub())])
     inv = await tools.invoke(
         agent, "github.issues:write", {"repo": "acme/x", "title": "T"}

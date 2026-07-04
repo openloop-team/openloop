@@ -9,6 +9,7 @@ falls back to the docker-compose default. Skips cleanly otherwise so the normal
 suite stays green without Docker.
 """
 
+from pathlib import Path
 import asyncio
 import contextlib
 import os
@@ -27,12 +28,13 @@ from openloop.tools.github import GitHubConnector
 from openloop.usage import budget_scope_key
 from openloop.usage.postgres import PostgresUsageStore
 from openloop.testing import (
-    EXAMPLE_AGENT,
     FakeEmbedder,
     FakeGitHub,
     ScriptedGateway,
     tool_call_response,
 )
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 DSN = os.environ.get(
     "OPENLOOP_TEST_DATABASE_URL",
@@ -78,7 +80,7 @@ async def stores():
 
 async def test_happy_path_end_to_end(stores):
     memory, usage, approvals = stores
-    agent = load_agent(EXAMPLE_AGENT)
+    agent = load_agent(AGENT_YAML)
     run_id = uuid.uuid4().hex[:8]
     channel = f"#e2e-{run_id}"  # unique scope so the run is isolated
     scope = scope_key_for(agent, channel)
@@ -492,7 +494,7 @@ async def test_session_reconcile_across_real_postgres():
     from openloop.workflows.postgres import PostgresWorkflowStore
 
     sid = f"sess-{uuid.uuid4().hex[:8]}"
-    agent = load_agent(EXAMPLE_AGENT)
+    agent = load_agent(AGENT_YAML)
     workflow_name = f"agent_task:{agent.metadata.name}"
 
     sessions = PostgresSurfaceSessionStore(DSN)

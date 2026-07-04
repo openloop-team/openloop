@@ -6,6 +6,7 @@ agentic backend — no fail-closed spend cap) disables the coding worker loudly
 instead of degrading to a different worker or a weaker boundary.
 """
 
+from pathlib import Path
 import pytest
 
 import openloop.app as appmod
@@ -20,7 +21,8 @@ from openloop.tools.openhands_worker import (
 )
 from openloop.usage import InMemoryUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
-from openloop.testing import EXAMPLE_AGENT
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 
 def _settings(**kwargs):
@@ -32,7 +34,7 @@ def _settings(**kwargs):
 def _gateway(settings, agents=None, usage=None):
     return appmod.build_tool_gateway(
         settings,
-        agents if agents is not None else {"dev-platform": load_agent(EXAMPLE_AGENT)},
+        agents if agents is not None else {"dev-platform": load_agent(AGENT_YAML)},
         InMemoryApprovalStore(),
         InMemoryCheckpointStore(),
         WorkflowEngine(InMemoryWorkflowStore()),
@@ -97,7 +99,7 @@ def test_openhands_registers_with_cap_and_probe(monkeypatch):
 
 def test_openhands_without_per_task_cap_fails_closed(monkeypatch, caplog):
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
-    agent = load_agent(EXAMPLE_AGENT)
+    agent = load_agent(AGENT_YAML)
     agent.spec.budget.per_task_usd = None
 
     with caplog.at_level("ERROR"):
@@ -116,8 +118,8 @@ def test_openhands_requires_a_cap_on_every_worker_agent(monkeypatch, caplog):
     # must hold for every agent exposing the tool — one capped owner is no
     # longer enough.
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
-    capped = load_agent(EXAMPLE_AGENT)
-    uncapped = load_agent(EXAMPLE_AGENT)
+    capped = load_agent(AGENT_YAML)
+    uncapped = load_agent(AGENT_YAML)
     uncapped.metadata.name = "docs-bot"
     uncapped.spec.budget.per_task_usd = None
 
@@ -136,8 +138,8 @@ def test_openhands_ignores_uncapped_agent_without_worker_action(monkeypatch):
     # Tool name alone is not enough: only agents that can invoke
     # coding_worker.pr:write need a cap and can become the fallback owner.
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
-    capped = load_agent(EXAMPLE_AGENT)
-    observer = load_agent(EXAMPLE_AGENT)
+    capped = load_agent(AGENT_YAML)
+    observer = load_agent(AGENT_YAML)
     observer.metadata.name = "docs-bot"
     observer.spec.budget.per_task_usd = None
     for tool in observer.spec.tools:
@@ -160,7 +162,7 @@ def test_openhands_without_usage_store_fails_closed(monkeypatch, caplog):
     with caplog.at_level("ERROR"):
         gateway = appmod.build_tool_gateway(
             _settings(coding_worker_backend="openhands"),
-            {"dev-platform": load_agent(EXAMPLE_AGENT)},
+            {"dev-platform": load_agent(AGENT_YAML)},
             InMemoryApprovalStore(),
             InMemoryCheckpointStore(),
             WorkflowEngine(InMemoryWorkflowStore()),

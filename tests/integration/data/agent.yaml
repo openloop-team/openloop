@@ -1,0 +1,62 @@
+# Shared test-fixture agent. Deliberately mirrors agents/dev-platform.yaml's
+# shape but is decoupled from it, so the shipped example can evolve without
+# breaking tests. Tests rely on:
+#   - metadata: name "dev-platform", workspace "acme"
+#   - github issues:read / pulls:read as the approval-free read actions
+#   - approvals gating github writes + coding_worker.pr:write
+#   - budget: monthly 50 / per-task 0.50, on_exceeded block
+apiVersion: openloop.ai/v1alpha1
+kind: Agent
+metadata:
+  name: dev-platform
+  workspace: acme
+
+spec:
+  surfaces:
+    - type: slack
+      channel: "#dev-platform"
+    - type: discord
+      channel: "eng"
+
+  memory:
+    scope: channel
+    backend: postgres
+    retention_days: 90
+
+  model_policy:
+    default: openai/gpt-4o-mini
+    routes:
+      - match: { task: summarize }
+        model: groq/llama-3.1-8b-instant
+      - match: { task: code }
+        model: anthropic/claude-opus-4-8
+      - match: { task: investigate }
+        model: anthropic/claude-sonnet-4-6
+
+  tools:
+    - name: github
+      type: native
+      permissions: ["issues:read", "issues:write", "pulls:read", "pulls:write"]
+    - name: coding_worker
+      type: native
+      permissions: ["pr:write"]
+    - name: ci-logs
+      type: mcp
+      server: http://localhost:8931
+      permissions: [get_run_logs, list_runs]
+
+  approvals:
+    require_for:
+      - github.issues:write
+      - github.pulls:write
+      - coding_worker.pr:write
+    approvers: ["@maciag.artur"]
+
+  budget:
+    monthly_usd: 50
+    per_task_usd: 0.50
+    on_exceeded: block
+
+  limits:
+    max_concurrent_tasks: 4
+    tasks_per_minute: 30

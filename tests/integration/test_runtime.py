@@ -7,6 +7,7 @@ It should run in the normal suite and catch broken orchestration contracts
 without network, provider credentials, or Docker.
 """
 
+from pathlib import Path
 import pytest
 
 from openloop.agents import load_agent
@@ -16,14 +17,16 @@ from openloop.runtime import Runtime, Task
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
 from openloop.usage import InMemoryUsageStore, budget_scope_key
-from openloop.testing import EXAMPLE_AGENT, FakeEmbedder, FakeGitHub, ScriptedGateway
+from openloop.testing import FakeEmbedder, FakeGitHub, ScriptedGateway
 from openloop.testing import tool_call_response
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 pytestmark = pytest.mark.integration
 
 
 async def test_runtime_memory_tool_approval_usage_flow():
-    agent = load_agent(EXAMPLE_AGENT)
+    agent = load_agent(AGENT_YAML)
     memory = InMemoryStore()
     usage = InMemoryUsageStore()
     approvals = InMemoryApprovalStore()
@@ -152,7 +155,7 @@ def test_surface_hint_shapes_system_prompt():
     # The Slack hint shapes content (no tables, no heading-heavy replies) for
     # what Slack's server-side Markdown rendering can't express. It must never
     # ask for mrkdwn syntax — the delivery layer owns rendering.
-    agent = load_agent(EXAMPLE_AGENT)
+    agent = load_agent(AGENT_YAML)
     runtime = Runtime(agent, gateway=ScriptedGateway([]))
 
     slack = runtime._build_messages(Task(text="hi", surface="slack"), [])

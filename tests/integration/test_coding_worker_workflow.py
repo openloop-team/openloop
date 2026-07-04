@@ -4,17 +4,20 @@ Phase C — approval is a wait node, and ToolGateway.resolve is a thin adapter t
 emits the approval event to wake the parked workflow.
 """
 
+from pathlib import Path
 from openloop.agents import load_agent
 from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import CodingWorkerConnector
 from openloop.tools.github import GitHubConnector
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from openloop.workflows.coding_worker import build_coding_worker_workflow
-from openloop.testing import EXAMPLE_AGENT, FakeGitHub, FakeWorkerOrchestrator
+from openloop.testing import FakeGitHub, FakeWorkerOrchestrator
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 
 def _agent():
-    return load_agent(EXAMPLE_AGENT)
+    return load_agent(AGENT_YAML)
 
 
 def _setup(runner=None, github=None):

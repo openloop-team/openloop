@@ -4,13 +4,8 @@ These helpers are intentionally network-free and database-free. They are used
 by OpenLoop's own tests and can also support downstream integration tests.
 """
 
-from pathlib import Path
-
 from openloop.memory.embeddings import Embedder
 from openloop.models.gateway import ModelResponse, ToolCall
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-EXAMPLE_AGENT = REPO_ROOT / "agents" / "dev-platform.yaml"
 
 
 def tool_call_response(model: str, calls: list[tuple[str, str, dict]]) -> ModelResponse:

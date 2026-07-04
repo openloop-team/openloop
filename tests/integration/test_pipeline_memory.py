@@ -1,13 +1,16 @@
 """Integration: the runtime recalls memory into context and remembers tasks."""
 
+from pathlib import Path
 from openloop.agents import load_agent
 from openloop.memory import InMemoryStore, MemoryRecord, scope_key_for
 from openloop.runtime import Runtime, Task
-from openloop.testing import EXAMPLE_AGENT, FakeEmbedder, FakeGateway
+from openloop.testing import FakeEmbedder, FakeGateway
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 
 def _agent():
-    return load_agent(EXAMPLE_AGENT)
+    return load_agent(AGENT_YAML)
 
 
 async def test_recalled_memory_is_injected_into_context():

@@ -34,11 +34,33 @@ spec:
       - match: { task: investigate }
         model: anthropic/claude-sonnet-4-6
 
-  # Explicit tool allowlist (least privilege)
+  # Explicit tool allowlist (least privilege).
+  #
+  # GitHub is split across two tools: broad *read* coverage comes from GitHub's
+  # official MCP server (provider-maintained tools, added via config not code),
+  # while *writes* stay on the native connector — that's where approval gating,
+  # tailored approval summaries, and the credential seam live.
   tools:
     - name: github
       type: native
+      # issues:read / pulls:read are transitional: remove them once github-mcp
+      # auth is wired, so the model sees exactly one way to read.
       permissions: ["issues:read", "issues:write", "pulls:read", "pulls:write"]
+    # Uncomment once HttpMCPClient can send a bearer token (wire it through the
+    # CredentialResolver seam). Left disabled until then because a configured
+    # server is dialed at every startup — including each test-suite app boot —
+    # and without auth the discovery call can only fail. After enabling,
+    # confirm the tool names against the startup discovery log, and drop the
+    # native read permissions above.
+    - name: github-mcp
+      type: mcp
+      server: https://api.githubcopilot.com/mcp/
+      permissions:
+        - list_issues
+        - get_issue
+        - search_issues
+        - list_pull_requests
+        - get_pull_request
     - name: coding_worker
       type: native
       # Runs the worker (clone → model-edit → commit → push) and opens a draft PR.

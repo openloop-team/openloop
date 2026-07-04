@@ -1,5 +1,6 @@
 """Tests for the usage audit trail, budget enforcement, and throughput limits."""
 
+from pathlib import Path
 import asyncio
 from datetime import datetime, timedelta, timezone
 
@@ -12,11 +13,13 @@ from openloop.usage import (
     budget_scope_key,
     check_budget,
 )
-from openloop.testing import EXAMPLE_AGENT, FakeGateway
+from openloop.testing import FakeGateway
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 
 def _agent() -> Agent:
-    return load_agent(EXAMPLE_AGENT)  # budget: monthly_usd=50, per_task=0.5, block
+    return load_agent(AGENT_YAML)  # budget: monthly_usd=50, per_task=0.5, block
 
 
 async def test_monthly_total_sums_current_month_only():

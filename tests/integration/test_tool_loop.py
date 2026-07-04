@@ -1,5 +1,6 @@
 """Integration: the runtime's model<->tool calling loop."""
 
+from pathlib import Path
 import json
 
 from openloop.agents import load_agent
@@ -9,11 +10,13 @@ from openloop.runtime.pipeline import TOOL_RESULT_MAX_CHARS
 from openloop.tools import ActionSpec, ToolGateway, ToolResult
 from openloop.tools.github import GitHubConnector
 from openloop.usage import InMemoryUsageStore
-from openloop.testing import EXAMPLE_AGENT, FakeGitHub, ScriptedGateway, tool_call_response
+from openloop.testing import FakeGitHub, ScriptedGateway, tool_call_response
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 
 def _agent():
-    return load_agent(EXAMPLE_AGENT)
+    return load_agent(AGENT_YAML)
 
 
 def _task(text="do it"):

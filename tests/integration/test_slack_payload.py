@@ -10,6 +10,7 @@ assumptions (where the user identity and button value live) are locked in, and
 the approver-matching behavior — including its failure mode — is explicit.
 """
 
+from pathlib import Path
 import copy
 
 from openloop.agents import load_agent
@@ -18,7 +19,9 @@ from openloop.surfaces.slack import _approver_handle
 from openloop.surfaces.approvals import resolve_from_action
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
-from openloop.testing import EXAMPLE_AGENT, FakeGitHub
+from openloop.testing import FakeGitHub
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 # A realistic Slack interactive payload for an Approve button click.
 BLOCK_ACTIONS = {
@@ -43,7 +46,7 @@ BLOCK_ACTIONS = {
 
 
 async def _gateway_with_pending():
-    agent = load_agent(EXAMPLE_AGENT)
+    agent = load_agent(AGENT_YAML)
     github = FakeGitHub()
     gw = ToolGateway(tools=[GitHubConnector(github)])
     inv = await gw.invoke(

@@ -6,13 +6,16 @@ get(), so the decision is only persisted if the gateway calls update(). This
 double mimics that to lock in the fix.
 """
 
+from pathlib import Path
 import copy
 
 from openloop.agents import load_agent
 from openloop.approvals import InMemoryApprovalStore
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
-from openloop.testing import EXAMPLE_AGENT, FakeGitHub
+from openloop.testing import FakeGitHub
+
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 
 class CopyingApprovalStore(InMemoryApprovalStore):
@@ -24,7 +27,7 @@ class CopyingApprovalStore(InMemoryApprovalStore):
 
 
 async def test_resolution_persists_through_get_copies():
-    agent = load_agent(EXAMPLE_AGENT)
+    agent = load_agent(AGENT_YAML)
     github = FakeGitHub()
     store = CopyingApprovalStore()
     gw = ToolGateway(tools=[GitHubConnector(github)], approvals=store)
@@ -43,7 +46,7 @@ async def test_resolution_persists_through_get_copies():
 
 
 async def test_denied_resolution_persists():
-    agent = load_agent(EXAMPLE_AGENT)
+    agent = load_agent(AGENT_YAML)
     store = CopyingApprovalStore()
     gw = ToolGateway(tools=[GitHubConnector(FakeGitHub())], approvals=store)
 

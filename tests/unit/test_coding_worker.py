@@ -19,6 +19,8 @@ from openloop.tools.coding_worker import (
 )
 from openloop.testing import FakeCodingWorker, FakeGitHub, FakeWorkerOrchestrator
 
+AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
+
 
 def _connector(runner=None, github=None):
     return CodingWorkerConnector(
@@ -48,10 +50,9 @@ def test_prepare_args_mints_job_id_once():
 
 def test_prepare_args_stamps_the_invoking_agent():
     from openloop.agents import load_agent
-    from openloop.testing import EXAMPLE_AGENT
 
     conn = _connector()
-    agent = load_agent(EXAMPLE_AGENT)
+    agent = load_agent(AGENT_YAML)
     # A model-supplied "agent" arg must never redirect spend attribution —
     # the gateway-passed identity wins unconditionally.
     args = conn.prepare_args(
