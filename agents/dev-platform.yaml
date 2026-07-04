@@ -43,9 +43,7 @@ spec:
   tools:
     - name: github
       type: native
-      # issues:read / pulls:read are transitional: remove them once github-mcp
-      # auth is wired, so the model sees exactly one way to read.
-      permissions: ["issues:read", "issues:write", "pulls:read", "pulls:write"]
+      permissions: ["issues:write", "pulls:write"]
     - name: github-mcp
       type: mcp
       server: https://api.githubcopilot.com/mcp/
@@ -53,28 +51,22 @@ spec:
       # credential integration (GITHUB_TOKEN or GitHub App installation
       # tokens). X-MCP-Readonly asks GitHub's server to expose only read
       # tools — defense in depth on top of the permissions allowlist, which
-      # names the exact server tools the agent may call. Confirm the names
-      # against the startup discovery log ("mcp connector 'github-mcp'
-      # discovered N tool(s): ...").
+      # names the exact server tools the agent may call (verified against the
+      # startup discovery log; e.g. single-issue/PR reads are the consolidated
+      # issue_read / pull_request_read tools, not get_issue / get_pull_request).
       credentials: github
       headers:
         X-MCP-Readonly: "true"
       permissions:
         - list_issues
-        - get_issue
+        - issue_read
         - search_issues
         - list_pull_requests
-        - get_pull_request
+        - pull_request_read
     - name: coding_worker
       type: native
       # Runs the worker (clone → model-edit → commit → push) and opens a draft PR.
       permissions: ["pr:write"]
-    - name: ci-logs
-      type: mcp
-      server: http://localhost:8931
-      # For MCP tools, permissions are the exact server tool names the agent
-      # may call (least privilege); discovered from the server at startup.
-      permissions: [get_run_logs, list_runs]
 
   # Risky / write actions require a human
   approvals:
