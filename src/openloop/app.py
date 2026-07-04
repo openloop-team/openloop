@@ -59,6 +59,7 @@ from openloop.sandbox import (
 from openloop.tools.coding_worker import (
     CodingWorker,
     CodingWorkerConnector,
+    CODING_WORKER_PR_WRITE,
     BuiltinCodingWorker,
     GitWorkspaceOrchestrator,
 )
@@ -69,6 +70,7 @@ from openloop.tools.openhands_worker import (
     OpenHandsUnavailable,
 )
 from openloop.usage import (
+    InMemoryTaskLimiter,
     InMemoryUsageStore,
     UsageStore,
     WorkerSpendLedger,
@@ -353,31 +355,59 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
     return None
 
 
+def _exposes_coding_worker(agent: Agent) -> bool:
+    return any(
+        t.name == CodingWorkerConnector.name
+        and CODING_WORKER_PR_WRITE in t.permissions
+        for t in agent.spec.tools
+    )
+
+
 def _build_worker_ledger(
     settings: Settings, agents: dict[str, Agent], usage: UsageStore
 ) -> WorkerSpendLedger | None:
-    """The Phase 4 spend ledger, scoped to the agent that owns the worker tool.
+    """The worker spend ledger (Phases 4+5), attributing per invoking agent.
 
-    Worker spend is recorded against that agent's budget scope key, so it
-    shows up in ``/usage`` month-to-date next to chat spend, and the agent's
-    ``per_task_usd`` becomes the fail-closed per-attempt cap.
+    Each attempt's spend is recorded against the *invoking* agent's budget
+    scope key — threaded through the approval args — so it shows up in
+    ``/usage`` month-to-date next to that agent's chat spend, its
+    ``per_task_usd`` is the fail-closed per-attempt cap, and its monthly
+    budget gates the attempt before any work. The first agent exposing the
+    tool stays the attribution fallback for attempts that carry no agent
+    identity (pre-Phase 5 approvals/checkpoints).
     """
     owner = next(
-        (
-            a for a in agents.values()
-            if any(t.name == "coding_worker" for t in a.spec.tools)
-        ),
+        (a for a in agents.values() if _exposes_coding_worker(a)),
         next(iter(agents.values()), None),
     )
     if owner is None:
         return None
     return WorkerSpendLedger(
         usage=usage,
-        scope_key=budget_scope_key(owner),
-        workspace=owner.metadata.workspace,
-        agent=owner.metadata.name,
         model=settings.coding_worker_model,
-        per_task_usd=owner.spec.budget.per_task_usd,
+        agents=agents,
+        default_agent=owner.metadata.name,
+        require_per_task_cap=settings.coding_worker_backend == "openhands",
+    )
+
+
+def _uncapped_worker_agents(
+    agents: dict[str, Agent], ledger: WorkerSpendLedger
+) -> list[str]:
+    """Agents whose worker attempts would run without a per-task cap.
+
+    With per-invoker attribution the cap enforced is the invoking agent's, so
+    the Phase 4 fail-closed gate for the agentic backend must hold for every
+    agent that can start the worker — plus the ledger's fallback attribution
+    target, which covers attempts with no agent identity.
+    """
+    exposed = {
+        a.metadata.name: a for a in agents.values() if _exposes_coding_worker(a)
+    }
+    exposed.setdefault(ledger.default_agent, agents[ledger.default_agent])
+    return sorted(
+        name for name, a in exposed.items()
+        if a.spec.budget.per_task_usd is None
     )
 
 
@@ -422,16 +452,24 @@ def build_tool_gateway(
                     settings.coding_worker_sandbox,
                 )
             elif settings.coding_worker_backend == "openhands" and (
-                ledger is None or ledger.per_task_usd is None
+                ledger is None or _uncapped_worker_agents(agents, ledger)
             ):
                 # Fail-closed (Phase 4 gate): an agentic worker with no
                 # fail-closed spend cap must not run — on either durable
-                # path, with or without a workflow engine.
+                # path, with or without a workflow engine. Phase 5's
+                # per-invoker attribution means EVERY agent that can start
+                # the worker needs its own cap.
                 log.error(
                     "CODING WORKER DISABLED: CODING_WORKER_BACKEND=openhands "
                     "requires a fail-closed per-task spend cap. Set "
-                    "spec.budget.per_task_usd on the agent that owns the "
-                    "coding_worker tool."
+                    "spec.budget.per_task_usd on every agent exposing the "
+                    "coding_worker tool%s.",
+                    (
+                        f" (missing on: "
+                        f"{', '.join(_uncapped_worker_agents(agents, ledger))})"
+                        if ledger is not None
+                        else ""
+                    ),
                 )
             else:
                 # Phase 2 split: the worker is credential-free (edits a
@@ -457,11 +495,11 @@ def build_tool_gateway(
                 )
                 log.info(
                     "registered native tool: coding_worker "
-                    "(backend=%s, model=%s, sandbox=%s, per_task_cap=%s)",
+                    "(backend=%s, model=%s, sandbox=%s, default_per_task_cap=%s)",
                     settings.coding_worker_backend,
                     settings.coding_worker_model,
                     settings.coding_worker_sandbox,
-                    ledger.per_task_usd if ledger is not None else None,
+                    ledger.per_task_usd_for(None) if ledger is not None else None,
                 )
         else:
             log.info(
@@ -524,6 +562,9 @@ def create_app() -> FastAPI:
     # Cross-process lock: lets one replica lead startup recovery. Rebound to an
     # in-process lock in the lifespan if a configured Redis can't be reached.
     coordinator = build_lock(settings)
+    # Phase 5 throughput limits — one limiter shared by every runtime so
+    # per-(tenant, agent) counters aggregate across surfaces in this process.
+    limiter = InMemoryTaskLimiter()
     # The Slack SessionRunner captures the session store by reference; the lifespan
     # needs a handle to it to repoint after a Postgres fallback. Set in the Slack
     # block below (stays None when no Slack surface is bound).
@@ -683,6 +724,7 @@ def create_app() -> FastAPI:
     app.state.usage = usage
     app.state.tools = tools
     app.state.sessions = sessions
+    app.state.limiter = limiter
     # app.state.coordinator is set in the lifespan, after Redis connectivity is
     # checked, so it reflects the resolved lock (post any fallback).
     app.state.primary_agent = primary_agent
@@ -697,7 +739,7 @@ def create_app() -> FastAPI:
     if slack_agent and settings.slack_bot_token:
         runtime = Runtime(
             slack_agent, memory=store, embedder=embedder, usage=usage,
-            tools=tools, engine=engine,
+            tools=tools, engine=engine, limiter=limiter,
         )
         app.state.runtime = runtime
         slack_app = build_slack_app(
@@ -770,6 +812,7 @@ def create_app() -> FastAPI:
         store: UsageStore = request.app.state.usage
         spent = await store.monthly_total(budget_scope_key(agent))
         budget = agent.spec.budget
+        limits = agent.spec.limits
         return {
             "agent": agent.metadata.name,
             "workspace": agent.metadata.workspace,
@@ -777,6 +820,10 @@ def create_app() -> FastAPI:
             "monthly_budget_usd": budget.monthly_usd,
             "per_task_budget_usd": budget.per_task_usd,
             "on_exceeded": budget.on_exceeded,
+            "limits": {
+                "max_concurrent_tasks": limits.max_concurrent_tasks,
+                "tasks_per_minute": limits.tasks_per_minute,
+            },
         }
 
     @app.get("/audit")

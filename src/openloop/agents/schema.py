@@ -67,6 +67,14 @@ class Budget(BaseModel):
     on_exceeded: Literal["block", "warn"] = "block"
 
 
+class Limits(BaseModel):
+    """Throughput guardrails — how much may run, next to Budget's how much
+    may be spent. Unset means unlimited."""
+
+    max_concurrent_tasks: int | None = None
+    tasks_per_minute: int | None = None
+
+
 class AgentSpec(BaseModel):
     surfaces: list[Surface] = Field(default_factory=list)
     memory: Memory = Field(default_factory=Memory)
@@ -74,6 +82,7 @@ class AgentSpec(BaseModel):
     tools: list[Tool] = Field(default_factory=list)
     approvals: Approvals = Field(default_factory=Approvals)
     budget: Budget = Field(default_factory=Budget)
+    limits: Limits = Field(default_factory=Limits)
 
 
 class AgentMetadata(BaseModel):

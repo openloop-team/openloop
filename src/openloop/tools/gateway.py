@@ -115,10 +115,11 @@ class ToolGateway:
 
         # Let a tool finalize its args before they cross the approval boundary
         # (e.g. the coding worker mints a job_id here so it's persisted in the
-        # approval request and reused verbatim at execute time).
+        # approval request and reused verbatim at execute time, and stamps the
+        # invoking agent so spend attribution survives the approval hop).
         prepare = getattr(tool, "prepare_args", None)
         if prepare is not None:
-            args = prepare(permission, args)
+            args = prepare(permission, args, agent)
 
         if agent.spec.approvals.requires_approval(action):
             request = ApprovalRequest(

@@ -55,6 +55,9 @@ def build_coding_worker_workflow(
             instruction=s["instruction"],
             base=s.get("base", "main"),
             branch=_branch_for(s["job_id"]),
+            # The invoking agent, stamped into the approval args by the
+            # gateway (Phase 5) — the ledger attributes spend to it.
+            agent=s.get("agent"),
         )
         outcome = await orchestrator.run_attempt(state)
         s["branch"] = outcome.branch

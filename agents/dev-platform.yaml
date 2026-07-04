@@ -64,3 +64,8 @@ spec:
     monthly_usd: 50
     per_task_usd: 0.50
     on_exceeded: block        # block | warn
+
+  # Throughput guardrails (noisy-neighbor controls); unset = unlimited
+  limits:
+    max_concurrent_tasks: 4   # tasks in flight at once for this agent
+    tasks_per_minute: 30      # task starts per minute for this agent

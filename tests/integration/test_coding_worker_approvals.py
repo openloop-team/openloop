@@ -53,8 +53,10 @@ async def test_coding_worker_is_held_for_approval():
     # The summary states "run worker + open draft PR" — never implies diff review.
     assert inv.approval.summary.startswith("run coding worker + open draft PR")
     assert "diff" not in inv.approval.summary
-    # job_id is minted before approval and persisted in the request args.
+    # job_id is minted before approval and persisted in the request args,
+    # and the invoking agent is stamped for spend attribution (Phase 5).
     assert inv.approval.args.get("job_id")
+    assert inv.approval.args.get("agent") == "dev-platform"
     assert github.pulls == []
 
 

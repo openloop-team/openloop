@@ -70,6 +70,8 @@ StepCallback = Callable[["WorkerState"], Awaitable[None]]
 logger = logging.getLogger(__name__)
 
 _REPO = {"type": "string", "description": "owner/repo, e.g. acme/ingestion"}
+CODING_WORKER_TOOL_NAME = "coding_worker"
+CODING_WORKER_PR_WRITE = "pr:write"
 
 # Named steps one attempt walks through. The orchestrator owns the git-side
 # steps (clone, branch, commit, push); the worker reports its own ("edit").
@@ -83,6 +85,12 @@ class WorkerState:
     ``title`` / ``body`` are filled once the worker generates the change so they
     survive in the checkpoint; on resume after a push they let the PR be opened
     without re-running the worker.
+
+    ``agent`` is the *invoking* agent's name (Phase 5), stamped by the gateway
+    into the approval args and carried here so the spend ledger attributes the
+    attempt — and enforces the budget — of whoever asked, on fresh runs and
+    checkpoint resumes alike. ``None`` (pre-Phase 5 checkpoints) falls back to
+    the ledger's default attribution.
     """
 
     job_id: str
@@ -93,6 +101,7 @@ class WorkerState:
     completed_steps: list[str] = field(default_factory=list)
     title: str | None = None
     body: str | None = None
+    agent: str | None = None
 
     def push_key(self) -> str:
         """Idempotency key for the branch push — never a single global key."""
@@ -109,7 +118,7 @@ class WorkerState:
     def from_dict(cls, data: dict) -> "WorkerState":
         fields = {
             "job_id", "repo", "instruction", "base", "branch",
-            "completed_steps", "title", "body",
+            "completed_steps", "title", "body", "agent",
         }
         return cls(**{k: v for k, v in data.items() if k in fields})
 
@@ -120,9 +129,10 @@ class WorkerOutcome:
 
     Carries the model spend so it is observable in the tool result. With a
     :class:`~openloop.usage.ledger.WorkerSpendLedger` wired into the
-    orchestrator (Phase 4), the spend is also recorded to the usage store and
-    fail-closed capped per task before the push/PR boundary; monthly budget
-    enforcement and full ``/usage`` unification remain Phase 5.
+    orchestrator (Phases 4+5), the spend is also recorded to the usage store
+    under the invoking agent's scope, fail-closed capped per task before the
+    push/PR boundary, and gated on that agent's monthly budget before the
+    attempt starts.
     """
 
     branch: str
@@ -227,7 +237,7 @@ def _pr_body(body: str, job_id: str) -> str:
 class CodingWorkerConnector:
     """Maps ``coding_worker.pr:write`` onto an attempt runner + :class:`GitHubClient`."""
 
-    name = "coding_worker"
+    name = CODING_WORKER_TOOL_NAME
     # When the gateway has a WorkflowEngine, this action runs as a durable
     # workflow (approval = wait node). Without one, execute() below is the Phase B
     # fallback path (checkpoint-based resume). Kept in sync with WORKFLOW_NAME in
@@ -248,16 +258,26 @@ class CodingWorkerConnector:
         self.checkpoints = checkpoints
 
     def supported_permissions(self) -> set[str]:
-        return {"pr:write"}
+        return {CODING_WORKER_PR_WRITE}
 
-    def prepare_args(self, permission: str, args: dict) -> dict:
-        """Mint ``job_id`` before approval so it threads the whole system.
+    def prepare_args(self, permission: str, args: dict, agent=None) -> dict:
+        """Finalize args before they cross the approval boundary.
 
-        Called by the gateway prior to creating the approval request, so the id
-        is persisted in the approval args and reused verbatim at execute time.
+        Called by the gateway prior to creating the approval request, so the
+        values are persisted in the approval args and reused verbatim at
+        execute time (and as the workflow's initial state):
+
+        - mints ``job_id`` so one identity threads the whole system;
+        - stamps the *invoking* agent's name (Phase 5) so the spend ledger
+          attributes the attempt to whoever asked. Stamped unconditionally —
+          a model-supplied ``agent`` arg must never redirect attribution.
         """
-        if permission == "pr:write" and not args.get("job_id"):
+        if permission != CODING_WORKER_PR_WRITE:
+            return args
+        if not args.get("job_id"):
             args = {**args, "job_id": uuid.uuid4().hex[:12]}
+        if agent is not None:
+            args = {**args, "agent": agent.metadata.name}
         return args
 
     def describe(self, permission: str) -> ActionSpec:
@@ -283,7 +303,7 @@ class CodingWorkerConnector:
         )
 
     async def execute(self, permission: str, args: dict) -> ToolResult:
-        if permission != "pr:write":
+        if permission != CODING_WORKER_PR_WRITE:
             return ToolResult(ok=False, summary=f"unsupported permission {permission}")
 
         job_id = args.get("job_id") or uuid.uuid4().hex[:12]
@@ -305,6 +325,7 @@ class CodingWorkerConnector:
                 instruction=args["instruction"],
                 base=base,
                 branch=_branch_for(job_id),
+                agent=args.get("agent"),
             )
 
         # The two side effects run after resolve() already marked the approval
@@ -489,12 +510,15 @@ class GitWorkspaceOrchestrator:
     dir removed after each run, so a resumed job re-provisions from clean, and
     force-push to the job-exclusive branch keeps the retry idempotent.
 
-    SPEND (hardening Phase 4): when a
-    :class:`~openloop.usage.ledger.WorkerSpendLedger` is wired, every
-    attempt's model spend is recorded to the usage store and checked against
-    the per-task budget *here* — after the worker's edit, before commit/push —
-    so an over-budget attempt fails closed (no push, no PR) on **both**
-    durable paths at once. Full budget unification is Phase 5.
+    SPEND (hardening Phases 4+5): when a
+    :class:`~openloop.usage.ledger.WorkerSpendLedger` is wired, the invoking
+    agent's monthly budget gates the attempt *before any work* (no credential
+    resolve, no clone), and every attempt's model spend is recorded to the
+    usage store and checked against that agent's per-task budget — after the
+    worker's edit, before commit/push — so an over-budget attempt fails
+    closed (no push, no PR) on **both** durable paths at once. Attribution
+    follows ``state.agent`` (the invoking agent threaded through the approval
+    args), not a boot-time owner.
     """
 
     def __init__(
@@ -528,6 +552,12 @@ class GitWorkspaceOrchestrator:
             if on_step is not None:
                 await on_step(state)
 
+        # Phase 5 monthly gate: a spent monthly budget refuses the attempt
+        # outright, before a credential is resolved or a workspace exists.
+        # Raises out of the attempt → terminal fail on both durable paths.
+        if self._ledger is not None:
+            await self._ledger.check_monthly(state.agent, job_id=state.job_id)
+
         # Resolved fresh per attempt and kept local — never stored, never in a
         # URL. The auth header value still surfaces in a failed command line,
         # so git failures redact both the token and its basic-auth encoding.
@@ -559,12 +589,13 @@ class GitWorkspaceOrchestrator:
             state.title, state.body = edit.title, edit.body
 
             # Phase 4 gate: record the attempt's spend and fail closed on the
-            # per-task cap BEFORE the push/PR boundary. Raises out of the
-            # attempt (both durable paths mark the job failed — terminal, so
-            # no resume loop re-spends), and the workspace teardown in
-            # `finally` discards the over-budget edit.
+            # invoking agent's per-task cap BEFORE the push/PR boundary.
+            # Raises out of the attempt (both durable paths mark the job
+            # failed — terminal, so no resume loop re-spends), and the
+            # workspace teardown in `finally` discards the over-budget edit.
             if self._ledger is not None:
                 await self._ledger.settle(
+                    agent=state.agent,
                     job_id=state.job_id,
                     cost_usd=edit.cost_usd,
                     prompt_tokens=edit.prompt_tokens,

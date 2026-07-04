@@ -1,7 +1,8 @@
 """The async task pipeline.
 
-An inbound mention becomes a :class:`Task`. The runtime enforces budget,
-recalls channel memory, resolves a model, then runs a tool-calling loop: the
+An inbound mention becomes a :class:`Task`. The runtime enforces throughput
+limits and budget, recalls channel memory, resolves a model, then runs a
+tool-calling loop: the
 model may call tools the agent is allowed; the gateway enforces the allowlist
 and routes write actions through human approval; results feed back until the
 model produces a final answer. Usage is recorded and the exchange remembered.
@@ -25,11 +26,14 @@ from openloop.memory import (
 from openloop.models.gateway import ModelGateway, ModelResponse
 from openloop.tools import ToolGateway
 from openloop.usage import (
+    InMemoryTaskLimiter,
     InMemoryUsageStore,
+    TaskLimiter,
     UsageRecord,
     UsageStore,
     budget_scope_key,
     check_budget,
+    limit_scope_key,
 )
 
 if TYPE_CHECKING:
@@ -80,6 +84,7 @@ class Runtime:
         engine: "WorkflowEngine | None" = None,
         *,
         remember: bool = True,
+        limiter: TaskLimiter | None = None,
     ) -> None:
         self.agent = agent
         self.gateway = gateway or ModelGateway()
@@ -88,6 +93,9 @@ class Runtime:
         self.usage = usage or InMemoryUsageStore()
         self.tools = tools
         self.remember = remember
+        # Phase 5 throughput limits: per-(tenant, agent) rate/concurrency,
+        # enforced at handle() before any other work. Config: spec.limits.
+        self.limiter = limiter or InMemoryTaskLimiter()
         # When an engine is wired, each task runs as a durable `agent_task`
         # workflow (consumer #2). Namespaced per agent so multiple agents on one
         # engine don't collide. Without an engine, handle() runs inline.
@@ -128,9 +136,25 @@ class Runtime:
     async def handle(
         self, task: Task, *, instance_id: str | None = None
     ) -> ModelResponse:
-        if self.engine is not None:
-            return await self._handle_workflow(task, instance_id)
-        return await self._handle_inline(task)
+        # Throughput guard first — cheaper than the budget check and refused
+        # tasks must not consume a model call, a memory hit, or a usage row
+        # beyond the audit record of the refusal itself.
+        scope = limit_scope_key(self.agent)
+        decision = await self.limiter.acquire(scope, self.agent.spec.limits)
+        if not decision.allowed:
+            logger.warning("rate-limited task for %s: %s", scope, decision.reason)
+            model = self.agent.model_for(task.kind)
+            await self._record_usage(
+                task, model, ModelResponse(text="", model=model),
+                outcome="rate_limited",
+            )
+            return _limited_response(decision.reason)
+        try:
+            if self.engine is not None:
+                return await self._handle_workflow(task, instance_id)
+            return await self._handle_inline(task)
+        finally:
+            await self.limiter.release(scope)
 
     async def _handle_inline(self, task: Task) -> ModelResponse:
         """Run the pipeline directly (no durable workflow)."""
@@ -437,6 +461,13 @@ class Runtime:
 def _blocked_response(reason: str) -> ModelResponse:
     return ModelResponse(
         text=f"💸 Budget guard: {reason}. Action blocked.", model="budget-guard"
+    )
+
+
+def _limited_response(reason: str) -> ModelResponse:
+    return ModelResponse(
+        text=f"🚦 Throughput guard: {reason}. Try again shortly.",
+        model="throughput-guard",
     )
 
 

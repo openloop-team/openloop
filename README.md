@@ -194,6 +194,7 @@ spec:
     require_for: ["github.issues:write", "github.pulls:write"]
     approvers: ["@maciag.artur", "@maintainers"]
   budget: { monthly_usd: 50, per_task_usd: 0.50, on_exceeded: block }
+  limits: { max_concurrent_tasks: 4, tasks_per_minute: 30 }
 ```
 
 ## Architecture
@@ -384,6 +385,13 @@ the workflow.
   capped **fail-closed** by the owning agent's `per_task_usd` before anything
   is pushed — on both durable paths — and the agentic backend refuses to
   register without that cap
+- [x] Budget/usage unification + throughput limits (Phase 5) — worker spend is
+  attributed to the *invoking* agent (threaded through the approval args, so
+  multi-agent configs charge and cap the right budget) and gated by that
+  agent's monthly budget before an attempt does any work (`block | warn`
+  preserved); per-agent rate/concurrency limits (`spec.limits:
+  max_concurrent_tasks, tasks_per_minute`) refuse excess tasks at the runtime
+  entry with a tenant-shaped scope key, recorded in the audit trail
 - [x] Durable workflows — engine + approval-as-wait-node; worker resumes on crash;
   chat pipeline runs as a workflow (bounded: persisted turn state + idempotent
   writes; model calls are not replayed on crash)

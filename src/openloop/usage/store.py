@@ -22,7 +22,7 @@ class UsageRecord:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
-    outcome: str = "ok"  # ok | blocked | over_task_budget | error
+    outcome: str = "ok"  # ok | blocked | rate_limited | over_task_budget | error
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )

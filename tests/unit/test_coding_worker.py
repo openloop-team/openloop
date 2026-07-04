@@ -46,6 +46,31 @@ def test_prepare_args_mints_job_id_once():
     assert again["job_id"] == args["job_id"]
 
 
+def test_prepare_args_stamps_the_invoking_agent():
+    from openloop.agents import load_agent
+    from openloop.testing import EXAMPLE_AGENT
+
+    conn = _connector()
+    agent = load_agent(EXAMPLE_AGENT)
+    # A model-supplied "agent" arg must never redirect spend attribution —
+    # the gateway-passed identity wins unconditionally.
+    args = conn.prepare_args(
+        "pr:write",
+        {"repo": "a/b", "instruction": "do x", "agent": "spoofed"},
+        agent,
+    )
+    assert args["agent"] == "dev-platform"
+
+
+def test_worker_state_roundtrips_agent_and_tolerates_old_checkpoints():
+    state = _state()
+    state.agent = "docs-bot"
+    assert WorkerState.from_dict(state.to_dict()).agent == "docs-bot"
+    # A pre-Phase 5 checkpoint has no agent key: attribution falls back.
+    old = {k: v for k, v in state.to_dict().items() if k != "agent"}
+    assert WorkerState.from_dict(old).agent is None
+
+
 async def test_execute_runs_attempt_then_opens_draft_pr():
     runner = FakeWorkerOrchestrator(title="Add retries", body="Adds retry logic.")
     github = FakeGitHub()

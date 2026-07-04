@@ -1,15 +1,25 @@
-"""The minimal worker-spend ledger — the Phase 4 gate.
+"""The worker-spend ledger — Phase 4's gate, promoted to full accounting in
+Phase 5.
 
 Heavy agentic workers (OpenHands) can burn real money per run, so before one
 may be registered every worker attempt must be *recorded* and *capped*:
 
 - **Recorded:** each attempt's model spend lands in the :class:`UsageStore`
-  under the owning agent's budget scope key, so it shows up in ``/usage``
-  month-to-date and the ``/audit`` trail alongside chat spend.
-- **Fail-closed cap:** an attempt whose spend exceeds the agent's per-task
-  budget raises :class:`WorkerBudgetExceeded` *before* any push or PR — the
-  job fails loudly instead of shipping an over-budget change. This is the
-  OpenLoop-side backstop to whatever in-run limits the worker itself has.
+  under the **invoking agent's** budget scope key, so it shows up in
+  ``/usage`` month-to-date and the ``/audit`` trail alongside chat spend.
+  The invoking agent's name is threaded from the tool gateway through the
+  approval args into :class:`~openloop.tools.coding_worker.WorkerState`
+  (Phase 5) — attribution follows whoever asked, not a boot-time owner.
+- **Monthly gate (fail-closed):** before an attempt does any work, the
+  invoking agent's accumulated monthly spend is checked with the same
+  :func:`~openloop.usage.budget.check_budget` the chat runtime uses —
+  preserving ``Budget``'s ``block | warn`` semantics. A blocked attempt
+  raises :class:`WorkerBudgetExceeded` before a credential is even resolved.
+- **Per-task cap (fail-closed):** an attempt whose spend exceeds the invoking
+  agent's ``per_task_usd`` raises :class:`WorkerBudgetExceeded` *before* any
+  push or PR — the job fails loudly instead of shipping an over-budget
+  change. This is the OpenLoop-side backstop to whatever in-run limits the
+  worker itself has.
 
 The ledger lives inside :class:`~openloop.tools.coding_worker.
 GitWorkspaceOrchestrator` — the one attempt boundary **both** durable paths
@@ -19,8 +29,7 @@ invariant.
 
 A store failure while recording also fails the attempt (the exception
 propagates out of the attempt): a worker run that cannot be accounted for
-does not get to push. Full budget unification (monthly enforcement, rate
-limits) is Phase 5; this is deliberately just record + per-task cap.
+does not get to push.
 """
 
 from __future__ import annotations
@@ -28,6 +37,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from openloop.agents.schema import Agent
+from openloop.usage.budget import budget_scope_key, check_budget
 from openloop.usage.store import UsageRecord, UsageStore
 
 logger = logging.getLogger(__name__)
@@ -38,23 +49,88 @@ WORKER_TASK_KIND = "coding_worker"
 
 
 class WorkerBudgetExceeded(RuntimeError):
-    """A worker attempt spent more than the per-task budget — fail closed."""
+    """A worker attempt hit the invoking agent's budget — fail closed."""
 
 
 @dataclass(slots=True)
 class WorkerSpendLedger:
-    """Records one worker attempt's spend and enforces the per-task cap."""
+    """Records worker-attempt spend and enforces the invoking agent's budget.
+
+    ``agents`` is the live agent-config map; ``default_agent`` is the
+    attribution fallback for attempts that carry no agent identity (approvals
+    or checkpoints created before Phase 5) — the boot-time owner heuristic
+    Phase 4 used for everything.
+
+    ``require_per_task_cap`` is set for agentic worker backends whose boot gate
+    requires a cap. It keeps stale approved jobs fail-closed if config drifts
+    after approval but before recovery.
+    """
 
     usage: UsageStore
-    scope_key: str  # the owning agent's budget scope (budget_scope_key)
-    workspace: str
-    agent: str
     model: str
-    per_task_usd: float | None = None
+    agents: dict[str, Agent]
+    default_agent: str
+    require_per_task_cap: bool = False
+
+    def _agent_for(self, agent_name: str | None) -> Agent:
+        agent = self.agents.get(agent_name) if agent_name else None
+        if agent is not None:
+            return agent
+        if agent_name:
+            # An agent removed from config between approval and run: keep the
+            # attempt capped by attributing it to the default owner, loudly.
+            logger.warning(
+                "worker attempt names unknown agent %r — attributing spend "
+                "to %r instead",
+                agent_name, self.default_agent,
+            )
+        return self.agents[self.default_agent]
+
+    def per_task_usd_for(self, agent_name: str | None) -> float | None:
+        """The per-task cap the ledger would enforce for this agent."""
+        return self._agent_for(agent_name).spec.budget.per_task_usd
+
+    def _missing_cap_reason(self, agent: Agent) -> str | None:
+        if (
+            self.require_per_task_cap
+            and agent.spec.budget.per_task_usd is None
+        ):
+            return (
+                f"agent {agent.metadata.name} has no per-task spend cap, "
+                "required by this worker backend"
+            )
+        return None
+
+    async def check_monthly(self, agent_name: str | None, *, job_id: str) -> None:
+        """Refuse the attempt if the invoking agent's monthly budget is spent.
+
+        Runs *before* the attempt does any work (no credential resolve, no
+        clone, no model spend). Reuses :func:`check_budget`, so ``on_exceeded:
+        warn`` logs and proceeds — the ``block | warn`` semantics are the
+        budget's, not the ledger's. A blocked attempt is recorded (zero cost,
+        ``outcome="blocked"``) so the refusal is visible in ``/audit``.
+        """
+        agent = self._agent_for(agent_name)
+        if reason := self._missing_cap_reason(agent):
+            await self._record(agent, cost_usd=0.0, outcome="blocked")
+            raise WorkerBudgetExceeded(
+                f"worker job {job_id} refused for agent {agent.metadata.name}: "
+                f"{reason} — failing closed (no attempt, no push, no PR)"
+            )
+
+        decision = await check_budget(agent, self.usage)
+        if decision.allowed:
+            return
+        await self._record(agent, cost_usd=0.0, outcome="blocked")
+        raise WorkerBudgetExceeded(
+            f"worker job {job_id} refused for agent {agent.metadata.name}: "
+            f"{decision.reason} — failing closed (no attempt, no push, no PR)"
+        )
 
     async def settle(
         self,
         *,
+        agent: str | None = None,
         job_id: str,
         cost_usd: float,
         prompt_tokens: int = 0,
@@ -66,27 +142,59 @@ class WorkerSpendLedger:
         visible in the audit trail — then fails the attempt. Callers run this
         *before* the push/PR boundary so an over-budget change never ships.
         """
-        over = self.per_task_usd is not None and cost_usd > self.per_task_usd
+        attributed = self._agent_for(agent)
+        per_task_usd = attributed.spec.budget.per_task_usd
+        if reason := self._missing_cap_reason(attributed):
+            await self._record(
+                attributed,
+                cost_usd=cost_usd,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                outcome="blocked",
+            )
+            raise WorkerBudgetExceeded(
+                f"worker job {job_id} spent ${cost_usd:.4f}, but {reason} "
+                "— failing closed (no push, no PR)"
+            )
+
+        over = per_task_usd is not None and cost_usd > per_task_usd
+        await self._record(
+            attributed,
+            cost_usd=cost_usd,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            outcome="over_task_budget" if over else "ok",
+        )
+        if over:
+            raise WorkerBudgetExceeded(
+                f"worker job {job_id} spent ${cost_usd:.4f}, over agent "
+                f"{attributed.metadata.name}'s ${per_task_usd:.2f} per-task "
+                "budget — failing closed (no push, no PR)"
+            )
+        logger.debug(
+            "worker job %s spend recorded: $%.4f against %s",
+            job_id, cost_usd, budget_scope_key(attributed),
+        )
+
+    async def _record(
+        self,
+        agent: Agent,
+        *,
+        cost_usd: float,
+        outcome: str,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+    ) -> None:
         await self.usage.record(
             UsageRecord(
-                scope_key=self.scope_key,
-                workspace=self.workspace,
-                agent=self.agent,
+                scope_key=budget_scope_key(agent),
+                workspace=agent.metadata.workspace,
+                agent=agent.metadata.name,
                 model=self.model,
                 task_kind=WORKER_TASK_KIND,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cost_usd=cost_usd,
-                outcome="over_task_budget" if over else "ok",
+                outcome=outcome,
             )
-        )
-        if over:
-            raise WorkerBudgetExceeded(
-                f"worker job {job_id} spent ${cost_usd:.4f}, over the "
-                f"${self.per_task_usd:.2f} per-task budget — failing closed "
-                "(no push, no PR)"
-            )
-        logger.debug(
-            "worker job %s spend recorded: $%.4f against %s",
-            job_id, cost_usd, self.scope_key,
         )

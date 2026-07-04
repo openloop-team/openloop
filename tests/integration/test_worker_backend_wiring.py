@@ -46,11 +46,12 @@ def test_default_backend_is_the_builtin_diff_worker_with_ledger_attached():
     connector = gateway._tools["coding_worker"]
     orchestrator = connector.orchestrator
     assert isinstance(orchestrator.worker, BuiltinCodingWorker)
-    # The Phase 4 ledger rides along on the default backend too: spend is
-    # recorded and the example agent's per-task cap enforced.
+    # The ledger rides along on the default backend too: spend is recorded
+    # and the invoking agent's per-task cap enforced (the example agent is
+    # the attribution fallback).
     assert orchestrator._ledger is not None
-    assert orchestrator._ledger.per_task_usd == 0.50
-    assert orchestrator._ledger.agent == "dev-platform"
+    assert orchestrator._ledger.default_agent == "dev-platform"
+    assert orchestrator._ledger.per_task_usd_for(None) == 0.50
 
 
 @pytest.mark.parametrize("retired", ["git", "diff"])
@@ -108,6 +109,48 @@ def test_openhands_without_per_task_cap_fails_closed(monkeypatch, caplog):
     assert "coding_worker" not in gateway._tools
     assert "CODING WORKER DISABLED" in caplog.text
     assert "per_task_usd" in caplog.text
+
+
+def test_openhands_requires_a_cap_on_every_worker_agent(monkeypatch, caplog):
+    # Phase 5 attribution enforces the *invoking* agent's cap, so the gate
+    # must hold for every agent exposing the tool — one capped owner is no
+    # longer enough.
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    capped = load_agent(EXAMPLE_AGENT)
+    uncapped = load_agent(EXAMPLE_AGENT)
+    uncapped.metadata.name = "docs-bot"
+    uncapped.spec.budget.per_task_usd = None
+
+    with caplog.at_level("ERROR"):
+        gateway = _gateway(
+            _settings(coding_worker_backend="openhands"),
+            agents={"dev-platform": capped, "docs-bot": uncapped},
+        )
+
+    assert "coding_worker" not in gateway._tools
+    assert "CODING WORKER DISABLED" in caplog.text
+    assert "docs-bot" in caplog.text  # the gate names the offender
+
+
+def test_openhands_ignores_uncapped_agent_without_worker_action(monkeypatch):
+    # Tool name alone is not enough: only agents that can invoke
+    # coding_worker.pr:write need a cap and can become the fallback owner.
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    capped = load_agent(EXAMPLE_AGENT)
+    observer = load_agent(EXAMPLE_AGENT)
+    observer.metadata.name = "docs-bot"
+    observer.spec.budget.per_task_usd = None
+    for tool in observer.spec.tools:
+        if tool.name == "coding_worker":
+            tool.permissions = []
+
+    gateway = _gateway(
+        _settings(coding_worker_backend="openhands"),
+        agents={"docs-bot": observer, "dev-platform": capped},
+    )
+
+    connector = gateway._tools["coding_worker"]
+    assert connector.orchestrator._ledger.default_agent == "dev-platform"
 
 
 def test_openhands_without_usage_store_fails_closed(monkeypatch, caplog):
