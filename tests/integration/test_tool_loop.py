@@ -1,9 +1,12 @@
 """Integration: the runtime's model<->tool calling loop."""
 
+import json
+
 from openloop.agents import load_agent
 from openloop.models.gateway import ModelResponse
 from openloop.runtime import Runtime, Task
-from openloop.tools import ToolGateway
+from openloop.runtime.pipeline import TOOL_RESULT_MAX_CHARS
+from openloop.tools import ActionSpec, ToolGateway, ToolResult
 from openloop.tools.github import GitHubConnector
 from openloop.usage import InMemoryUsageStore
 from openloop.testing import EXAMPLE_AGENT, FakeGitHub, ScriptedGateway, tool_call_response
@@ -34,8 +37,14 @@ async def test_model_calls_read_tool_then_answers():
     # The model was offered the tool definitions, and a tool result was fed back.
     offered = {t["function"]["name"] for t in gateway.calls[0]["tools"]}
     assert "github_issues_read" in offered
-    roles = [m["role"] for m in gateway.calls[1]["messages"]]
-    assert "tool" in roles
+    tool_msgs = [m for m in gateway.calls[1]["messages"] if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+    # The result carries the actual data, not just a summary — a data-free
+    # "read issue #7" would leave the model to invent the issue's content.
+    payload = json.loads(tool_msgs[0]["content"])
+    assert payload["ok"] is True
+    assert payload["data"]["state"] == "open"
+    assert payload["data"]["number"] == 7
 
 
 async def test_write_tool_call_is_held_for_approval():
@@ -71,6 +80,37 @@ async def test_unoffered_tool_call_is_reported_to_model():
     assert result.text == "I can't do that."
     tool_msgs = [m for m in gateway.calls[1]["messages"] if m["role"] == "tool"]
     assert any("unknown tool" in m["content"] for m in tool_msgs)
+
+
+class _VerboseTool:
+    """A tool whose result data is far larger than the feedback cap."""
+
+    name = "github"
+
+    def supported_permissions(self):
+        return {"issues:read"}
+
+    def describe(self, permission):
+        return ActionSpec("read", {"type": "object", "properties": {}})
+
+    async def execute(self, permission, args):
+        return ToolResult(ok=True, summary="read", data={"blob": "x" * 50_000})
+
+
+async def test_oversized_tool_result_is_capped():
+    agent = _agent()
+    tools = ToolGateway(tools=[_VerboseTool()])
+    gateway = ScriptedGateway([
+        tool_call_response("m", [("c1", "github_issues_read", {})]),
+        ModelResponse(text="done", model="m"),
+    ])
+    runtime = Runtime(agent, gateway=gateway, tools=tools)
+
+    await runtime.handle(_task("read the big one"))
+    tool_msgs = [m for m in gateway.calls[1]["messages"] if m["role"] == "tool"]
+    content = tool_msgs[0]["content"]
+    assert content.endswith("… [truncated]")
+    assert len(content) < TOOL_RESULT_MAX_CHARS + 100
 
 
 async def test_no_tools_gateway_behaves_as_plain_chat():

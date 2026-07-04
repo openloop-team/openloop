@@ -10,6 +10,7 @@ model produces a final answer. Usage is recorded and the exchange remembered.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -24,7 +25,7 @@ from openloop.memory import (
     scope_key_for,
 )
 from openloop.models.gateway import ModelGateway, ModelResponse
-from openloop.tools import ToolGateway
+from openloop.tools import ToolGateway, ToolResult
 from openloop.usage import (
     InMemoryTaskLimiter,
     InMemoryUsageStore,
@@ -66,10 +67,31 @@ SURFACE_HINTS = {
 RECALL_LIMIT = 5
 # Safety cap on model<->tool round-trips per task.
 MAX_TOOL_ITERS = 4
+# Safety cap on a single tool result fed back to the model. Connectors are
+# expected to return already-trimmed `data`; this guards the context (and the
+# per-task budget) against any that don't.
+TOOL_RESULT_MAX_CHARS = 6000
 
 
 def _tool_message(call_id: str, content: str) -> dict:
     return {"role": "tool", "tool_call_id": call_id, "content": content}
+
+
+def _result_content(result: ToolResult | None) -> str:
+    """Serialize an executed tool's result for the model.
+
+    The model must see `data`, not just the summary — answering from a
+    data-free "read issue #7" summary is how fabricated answers happen.
+    """
+    if result is None:
+        return "done"
+    payload: dict = {"ok": result.ok, "summary": result.summary}
+    if result.data:
+        payload["data"] = result.data
+    content = json.dumps(payload, default=str)
+    if len(content) > TOOL_RESULT_MAX_CHARS:
+        content = content[:TOOL_RESULT_MAX_CHARS] + "… [truncated]"
+    return content
 
 
 @dataclass(slots=True)
@@ -410,8 +432,7 @@ class Runtime:
                     self.agent, action, call.arguments, requested_by=task.user
                 )
                 if inv.status == "executed":
-                    summary = inv.result.summary if inv.result else "done"
-                    messages.append(_tool_message(call.id, summary))
+                    messages.append(_tool_message(call.id, _result_content(inv.result)))
                 elif inv.status == "pending_approval":
                     approval_messages.append(inv.message or "approval required")
                     if inv.approval is not None:

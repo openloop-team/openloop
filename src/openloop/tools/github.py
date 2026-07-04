@@ -16,6 +16,45 @@ from openloop.tools.base import ActionSpec, ToolResult
 _REPO = {"type": "string", "description": "owner/repo, e.g. acme/ingestion"}
 _NUMBER = {"type": "integer", "description": "issue or PR number"}
 
+# ToolResult.data goes back to the model verbatim, so trim GitHub's verbose
+# payloads (nested user/reactions/_links objects) to what the model needs.
+_ISSUE_FIELDS = (
+    "number", "title", "state", "html_url", "user", "labels", "assignees",
+    "created_at", "updated_at", "comments", "body",
+)
+_PULL_FIELDS = _ISSUE_FIELDS + ("draft", "merged", "merged_at", "head", "base")
+_BODY_MAX_CHARS = 2000
+
+
+def _trim(data: dict, fields: tuple[str, ...]) -> dict:
+    out = {k: data[k] for k in fields if k in data}
+    if isinstance(out.get("user"), dict):
+        out["user"] = out["user"].get("login")
+    if isinstance(out.get("labels"), list):
+        out["labels"] = [
+            label.get("name") if isinstance(label, dict) else label
+            for label in out["labels"]
+        ]
+    if isinstance(out.get("assignees"), list):
+        out["assignees"] = [
+            a.get("login") if isinstance(a, dict) else a for a in out["assignees"]
+        ]
+    for ref in ("head", "base"):
+        if isinstance(out.get(ref), dict):
+            out[ref] = out[ref].get("ref")
+    body = out.get("body")
+    if isinstance(body, str) and len(body) > _BODY_MAX_CHARS:
+        out["body"] = body[:_BODY_MAX_CHARS] + "… [truncated]"
+    return out
+
+
+def _trim_issue(data: dict) -> dict:
+    return _trim(data, _ISSUE_FIELDS)
+
+
+def _trim_pull(data: dict) -> dict:
+    return _trim(data, _PULL_FIELDS)
+
 
 @runtime_checkable
 class GitHubClient(Protocol):
@@ -193,21 +232,21 @@ class GitHubConnector:
             return ToolResult(
                 ok=True,
                 summary=f"created issue #{issue.get('number')} in {args['repo']}",
-                data=issue,
+                data=_trim_issue(issue),
             )
         if permission == "issues:read":
             issue = await self.client.get_issue(args["repo"], int(args["number"]))
             return ToolResult(
                 ok=True,
                 summary=f"read issue #{args['number']} in {args['repo']}",
-                data=issue,
+                data=_trim_issue(issue),
             )
         if permission == "pulls:read":
             pull = await self.client.get_pull(args["repo"], int(args["number"]))
             return ToolResult(
                 ok=True,
                 summary=f"read PR #{args['number']} in {args['repo']}",
-                data=pull,
+                data=_trim_pull(pull),
             )
         if permission == "pulls:write":
             pull = await self.client.create_pull(
@@ -221,6 +260,6 @@ class GitHubConnector:
             return ToolResult(
                 ok=True,
                 summary=f"opened PR #{pull.get('number')} in {args['repo']}",
-                data=pull,
+                data=_trim_pull(pull),
             )
         return ToolResult(ok=False, summary=f"unsupported permission {permission}")
