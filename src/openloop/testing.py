@@ -239,12 +239,14 @@ class FakeSurfaceDelivery:
         )
 
     async def post_final(
-        self, target, text, *, blocks=None, key=None, recover=False
+        self, target, result, *, key=None, recover=False
     ) -> str:
+        # `result` is a surface-neutral Deliverable (or plain-string prose);
+        # recorded verbatim under "text" so assertions read naturally.
         return self._post(
             self.finals,
             "final",
-            {"target": target, "text": text, "blocks": blocks},
+            {"target": target, "text": result},
             key,
             recover,
         )

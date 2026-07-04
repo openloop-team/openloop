@@ -1,5 +1,6 @@
 """Surface sessions — async, durable delivery of agent tasks (Phase D)."""
 
+from openloop.deliverable import Artifact, Deliverable, Prose
 from openloop.sessions.delivery import (
     SlackSurfaceDelivery,
     SurfaceDelivery,
@@ -13,7 +14,10 @@ from openloop.sessions.store import (
 )
 
 __all__ = [
+    "Artifact",
+    "Deliverable",
     "InMemorySurfaceSessionStore",
+    "Prose",
     "SessionRunner",
     "SlackSurfaceDelivery",
     "SurfaceDelivery",

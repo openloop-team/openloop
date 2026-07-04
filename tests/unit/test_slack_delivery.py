@@ -8,7 +8,10 @@ a missing history scope degrades to posting fresh.
 
 import pytest
 
+from openloop.approvals.store import ApprovalRequest
+from openloop.deliverable import Artifact
 from openloop.sessions import SlackSurfaceDelivery, SurfaceTarget
+from openloop.surfaces.slack_format import MARKDOWN_TEXT_LIMIT
 
 pytestmark = pytest.mark.unit
 
@@ -16,15 +19,20 @@ pytestmark = pytest.mark.unit
 class FakeSlackClient:
     """Minimal AsyncWebClient stand-in: records posts, serves metadata back."""
 
-    def __init__(self, *, lookup_error: bool = False) -> None:
+    def __init__(
+        self, *, lookup_error: bool = False, upload_error: bool = False
+    ) -> None:
         self.posted: list[dict] = []
         self.statuses: list[dict] = []
+        self.uploads: list[dict] = []
         self.lookups = 0
         self.lookup_error = lookup_error
+        self.upload_error = upload_error
         self._seq = 0
 
     async def chat_postMessage(
-        self, *, channel, thread_ts=None, text=None, blocks=None, metadata=None
+        self, *, channel, thread_ts=None, text=None, markdown_text=None,
+        blocks=None, metadata=None,
     ):
         self._seq += 1
         ts = f"{self._seq}.0001"
@@ -33,12 +41,32 @@ class FakeSlackClient:
                 "channel": channel,
                 "thread_ts": thread_ts,
                 "text": text,
+                "markdown_text": markdown_text,
                 "blocks": blocks,
                 "metadata": metadata,
                 "ts": ts,
             }
         )
         return {"ts": ts}
+
+    async def files_upload_v2(
+        self, *, content, filename, title=None, snippet_type=None,
+        channel=None, thread_ts=None, **kwargs
+    ):
+        if self.upload_error:
+            raise RuntimeError("missing files:write scope")
+        self.uploads.append(
+            {
+                "content": content,
+                "filename": filename,
+                "title": title,
+                "snippet_type": snippet_type,
+                "channel": channel,
+                "thread_ts": thread_ts,
+            }
+        )
+        fid = f"F{len(self.uploads)}"
+        return {"ok": True, "files": [{"id": fid, "permalink": f"https://files.slack/{fid}"}]}
 
     async def assistant_threads_setStatus(
         self, *, channel_id, thread_ts, status, loading_messages=None, **kwargs
@@ -203,6 +231,177 @@ async def test_lookup_failure_degrades_to_posting():
 
     assert len(client.posted) == 1
     assert ts == client.posted[0]["ts"]
+
+
+# --- Markdown rendering: the agent writes standard Markdown; Slack's `text`
+# renders it literally, so plain posts must go out as `markdown_text` and only
+# Block Kit or oversize posts fall back to the classic fields.
+
+
+def _approval_request() -> ApprovalRequest:
+    return ApprovalRequest(
+        agent="a", action="github.issues:write", tool="github",
+        permission="write", args={}, approvers=["@maciag.artur"],
+        summary="create issue",
+    )
+
+
+async def test_final_answer_posts_as_markdown_text():
+    client = FakeSlackClient()
+    delivery = SlackSurfaceDelivery(client)
+
+    await delivery.post_final(_target(), "**bold** and a [link](https://x)")
+
+    post = client.posted[0]
+    assert post["markdown_text"] == "**bold** and a [link](https://x)"
+    assert post["text"] is None  # mutually exclusive with markdown_text
+    assert post["blocks"] is None
+
+
+async def test_error_posts_as_markdown_text():
+    client = FakeSlackClient()
+    delivery = SlackSurfaceDelivery(client)
+
+    await delivery.post_error(_target(), "⚠️ something broke")
+
+    assert client.posted[0]["markdown_text"] == "⚠️ something broke"
+    assert client.posted[0]["text"] is None
+
+
+async def test_approval_card_keeps_text_and_blocks():
+    # Block Kit is mutually exclusive with markdown_text: approval cards keep
+    # `text` as the notification fallback and render via their mrkdwn blocks.
+    client = FakeSlackClient()
+    delivery = SlackSurfaceDelivery(client)
+
+    await delivery.post_approval(_target(), "Approval required", [_approval_request()])
+
+    post = client.posted[0]
+    assert post["markdown_text"] is None
+    assert post["text"] == "Approval required"
+    assert post["blocks"]  # section + buttons
+
+
+async def test_broadcast_pings_are_neutralized_user_mentions_kept():
+    # Model-echoed `<!channel>` must never mass-ping (prompt-injection vector);
+    # user mentions are legitimate references and pass through.
+    client = FakeSlackClient()
+    delivery = SlackSurfaceDelivery(client)
+
+    await delivery.post_final(
+        _target(), "cc <@U07ABC123> — done. <!channel> <!here|@here>"
+    )
+
+    assert client.posted[0]["markdown_text"] == (
+        "cc <@U07ABC123> — done. @channel @here"
+    )
+
+
+# --- Artifact rendering: bulk content becomes a hosted snippet plus a keyed
+# summary message; the message stays the idempotency anchor.
+
+
+def _artifact() -> Artifact:
+    return Artifact(
+        content="--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new",
+        title="Proposed change",
+        filename="change.diff",
+        summary="Applied the rename in `x.py`.",
+        snippet_type="diff",
+    )
+
+
+async def test_artifact_uploads_snippet_and_posts_keyed_summary():
+    client = FakeSlackClient()
+    delivery = SlackSurfaceDelivery(client)
+
+    await delivery.post_final(_target(), _artifact(), key="s1:final")
+
+    assert client.uploads == [
+        {
+            "content": _artifact().content,
+            "filename": "change.diff",
+            "title": "Proposed change",
+            "snippet_type": "diff",
+            # Shared into the thread at upload time — permalink-unfurl sharing
+            # alone would leave the file invisible to other members if the
+            # unfurl doesn't fire.
+            "channel": "C1",
+            "thread_ts": "100.1",
+        }
+    ]
+    post = client.posted[0]
+    assert post["markdown_text"].startswith("Applied the rename in `x.py`.")
+    assert "https://files.slack/F1" in post["markdown_text"]
+    assert post["text"] is None
+    # The summary message, not the file, carries the delivery key.
+    assert post["metadata"]["event_payload"]["key"] == "s1:final"
+
+
+async def test_oversize_final_becomes_hosted_snippet():
+    client = FakeSlackClient()
+    delivery = SlackSurfaceDelivery(client)
+    huge = "Intro paragraph.\n\n" + "x" * (MARKDOWN_TEXT_LIMIT + 1)
+
+    await delivery.post_final(_target(), huge)
+
+    assert len(client.uploads) == 1
+    assert client.uploads[0]["content"] == huge  # nothing lost to truncation
+    assert client.uploads[0]["channel"] == "C1"
+    assert client.uploads[0]["thread_ts"] == "100.1"
+    post = client.posted[0]
+    assert post["markdown_text"].startswith("Intro paragraph.")
+    assert "https://files.slack/F1" in post["markdown_text"]
+
+
+async def test_upload_failure_degrades_to_inline_text():
+    # Losing the snippet host must not lose the answer: content lands inline as
+    # plain text (formatting sacrificed, delivery kept).
+    client = FakeSlackClient(upload_error=True)
+    delivery = SlackSurfaceDelivery(client)
+
+    await delivery.post_final(_target(), _artifact(), key="s1:final")
+
+    post = client.posted[0]
+    assert post["markdown_text"] is None
+    assert "Applied the rename" in post["text"]
+    assert "+new" in post["text"]
+    assert post["metadata"]["event_payload"]["key"] == "s1:final"
+
+
+async def test_upload_failure_fallback_sanitizes_content():
+    # The inline fallback renders as mrkdwn where `<!channel>` is a live
+    # broadcast — artifact *content* (logs can carry attacker-influenced text)
+    # must be neutralized on this path, not just the summary.
+    client = FakeSlackClient(upload_error=True)
+    delivery = SlackSurfaceDelivery(client)
+    artifact = Artifact(
+        content="ERROR at line 3: <!channel> deploy failed <!here>",
+        title="Log", filename="run.log", summary="Run failed — log below.",
+    )
+
+    await delivery.post_final(_target(), artifact)
+
+    body = client.posted[0]["text"]
+    assert "<!channel>" not in body
+    assert "<!here>" not in body
+    assert "@channel deploy failed @here" in body
+
+
+async def test_artifact_recovery_skips_reupload():
+    # Crash-retry: the keyed summary message is found first, so neither a second
+    # file nor a second message is created.
+    client = FakeSlackClient()
+    delivery = SlackSurfaceDelivery(client)
+
+    first = await delivery.post_final(_target(), _artifact(), key="s1:final")
+    again = await delivery.post_final(
+        _target(), _artifact(), key="s1:final", recover=True
+    )
+
+    assert again == first
+    assert len(client.uploads) == 1
+    assert len(client.posted) == 1
 
 
 async def test_unkeyed_posts_never_dedupe():

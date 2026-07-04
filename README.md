@@ -254,7 +254,8 @@ once, then run the socket:
 1. **Enable Socket Mode** and generate an app-level token with the
    `connections:write` scope → this is your `SLACK_APP_TOKEN` (`xapp-…`).
 2. **Add bot OAuth scopes** (OAuth & Permissions → Bot Token Scopes):
-   `chat:write`, `app_mentions:read`, and `channels:history`. For private
+   `chat:write`, `app_mentions:read`, `channels:history`, and `files:write`
+   (long answers, diffs, and logs are delivered as hosted snippets). For private
    channels and DMs, also add `groups:history`, `im:history`, `mpim:history`.
 3. **Subscribe to bot events** (Event Subscriptions → Subscribe to bot events) —
    Slack only delivers events you subscribe to:

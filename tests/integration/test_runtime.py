@@ -146,3 +146,21 @@ async def test_runtime_memory_tool_approval_usage_flow():
     texts = [r.text for r in recalled]
     assert "Use Redis Streams for ingestion v1." in texts
     assert any("open a follow-up" in t for t in texts)
+
+
+def test_surface_hint_shapes_system_prompt():
+    # The Slack hint shapes content (no tables, no heading-heavy replies) for
+    # what Slack's server-side Markdown rendering can't express. It must never
+    # ask for mrkdwn syntax — the delivery layer owns rendering.
+    agent = load_agent(EXAMPLE_AGENT)
+    runtime = Runtime(agent, gateway=ScriptedGateway([]))
+
+    slack = runtime._build_messages(Task(text="hi", surface="slack"), [])
+    system = slack[0]["content"]
+    assert "Slack thread" in system
+    assert "Markdown tables" in system
+    assert "mrkdwn" not in system
+
+    # Other surfaces get the base prompt untouched.
+    web = runtime._build_messages(Task(text="hi", surface="webhook"), [])
+    assert "Slack" not in web[0]["content"]

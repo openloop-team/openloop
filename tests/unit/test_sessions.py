@@ -235,13 +235,11 @@ async def test_failed_outcome_delivery_is_repaired_on_second_click():
             super().__init__()
             self.fail_finals = 1
 
-        async def post_final(self, target, text, *, blocks=None, key=None, recover=False):
+        async def post_final(self, target, result, *, key=None, recover=False):
             if self.fail_finals > 0:
                 self.fail_finals -= 1
                 raise RuntimeError("slack down")
-            return await super().post_final(
-                target, text, blocks=blocks, key=key, recover=recover
-            )
+            return await super().post_final(target, result, key=key, recover=recover)
 
     runner, sessions, delivery, github = _waiting_runner(delivery=FlakyDelivery())
     session = await runner.run(_task("open an issue"), _target())

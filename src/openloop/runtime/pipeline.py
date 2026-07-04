@@ -47,6 +47,21 @@ SYSTEM_PROMPT = (
     "Be concise and helpful. When unsure, ask a clarifying question."
 )
 
+# Per-surface output hints appended to the system prompt. These shape *what*
+# the model writes for the destination (length, structure); rendering the
+# model's standard Markdown is the delivery layer's job. Slack's server-side
+# conversion has no table support and flattens heading hierarchies, so the
+# hint steers away from those shapes — it must NOT ask for Slack's mrkdwn
+# dialect, which models drift out of and which would pollute history/memory.
+SURFACE_HINTS = {
+    "slack": (
+        "You are replying in a Slack thread. Keep replies brief and "
+        "conversational. Prefer short bullet lists and bold key phrases over "
+        "headings. Never use Markdown tables — use a bulleted list instead. "
+        "Use code blocks for code or command output."
+    ),
+}
+
 # How many memories to pull into context per task.
 RECALL_LIMIT = 5
 # Safety cap on model<->tool round-trips per task.
@@ -111,6 +126,9 @@ class Runtime:
             name=self.agent.metadata.name,
             workspace=self.agent.metadata.workspace,
         )
+        hint = SURFACE_HINTS.get(task.surface)
+        if hint:
+            system = f"{system}\n\n{hint}"
         messages = [{"role": "system", "content": system}]
         if recalled:
             bullets = "\n".join(f"- {r.text}" for r in recalled)
