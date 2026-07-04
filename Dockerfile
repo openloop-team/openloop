@@ -27,7 +27,7 @@ COPY src ./src
 # auth (short-lived installation tokens) can sign at boot; without it the
 # runtime logs GITHUB APP AUTH DISABLED and degrades to GITHUB_TOKEN. Mount the
 # App private key read-only and point GITHUB_APP_PRIVATE_KEY_PATH at it.
-RUN pip install --upgrade pip && pip install ".[redis,githubapp,openhands]"
+RUN pip install --upgrade pip && pip install ".[redis,githubapp,mcp,openhands]"
 
 COPY agents ./agents
 
