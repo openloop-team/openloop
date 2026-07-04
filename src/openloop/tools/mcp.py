@@ -17,6 +17,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from openloop.credentials import CredentialResolver, CredentialScope
 from openloop.tools.base import ActionSpec, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -43,10 +44,35 @@ class HttpMCPClient:
 
     The ``mcp`` SDK is an optional dependency (``pip install
     'openloop[mcp]'``) and imported lazily.
+
+    Auth mirrors :class:`~openloop.tools.github.HttpGitHubClient`: the bearer
+    token flows through the :class:`CredentialResolver` seam **per request** —
+    the client never stores a raw token — so short-lived credentials (GitHub
+    App installation tokens) stay fresh across a long-running process.
+    ``headers`` carries static extras from config (e.g. GitHub's
+    ``X-MCP-Readonly``).
     """
 
-    def __init__(self, url: str) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        credentials: CredentialResolver | None = None,
+        scope: CredentialScope | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.url = url
+        self._credentials = credentials
+        self._scope = scope
+        self._static_headers = dict(headers or {})
+
+    async def _headers(self) -> dict[str, str] | None:
+        headers = dict(self._static_headers)
+        if self._credentials is not None:
+            scope = self._scope or CredentialScope(integration="mcp")
+            token = await self._credentials.resolve(scope)
+            headers["Authorization"] = f"Bearer {token}"
+        return headers or None
 
     def _require_sdk(self):
         try:
@@ -61,7 +87,8 @@ class HttpMCPClient:
 
     async def list_tools(self) -> list[MCPToolInfo]:  # pragma: no cover - needs server
         ClientSession, streamablehttp_client = self._require_sdk()
-        async with streamablehttp_client(self.url) as (read, write, _):
+        headers = await self._headers()
+        async with streamablehttp_client(self.url, headers=headers) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.list_tools()
@@ -76,7 +103,8 @@ class HttpMCPClient:
 
     async def call_tool(self, name: str, args: dict) -> str:  # pragma: no cover - needs server
         ClientSession, streamablehttp_client = self._require_sdk()
-        async with streamablehttp_client(self.url) as (read, write, _):
+        headers = await self._headers()
+        async with streamablehttp_client(self.url, headers=headers) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.call_tool(name, arguments=args)

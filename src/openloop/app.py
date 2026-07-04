@@ -28,6 +28,7 @@ from openloop.checkpoints.postgres import PostgresCheckpointStore
 from openloop.config import Settings, get_settings
 from openloop.credentials import (
     CredentialResolver,
+    CredentialScope,
     EnvCredentialResolver,
     GitHubAppResolver,
 )
@@ -515,11 +516,34 @@ def build_tool_gateway(
     for agent in agents.values():
         for tool in agent.spec.tools:
             if tool.type == "mcp" and tool.server and tool.name not in seen:
-                connector = MCPConnector(tool.name, HttpMCPClient(tool.server))
+                credentials = None
+                scope = None
+                if tool.credentials == "github" and github_credentials is not None:
+                    credentials = github_credentials
+                    scope = CredentialScope(integration="github")
+                elif tool.credentials:
+                    log.warning(
+                        "MCP tool %r wants %r credentials but none are "
+                        "configured — registering unauthenticated",
+                        tool.name,
+                        tool.credentials,
+                    )
+                client = HttpMCPClient(
+                    tool.server,
+                    credentials=credentials,
+                    scope=scope,
+                    headers=tool.headers,
+                )
+                connector = MCPConnector(tool.name, client)
                 gateway.register(connector)
                 mcp_connectors.append(connector)
                 seen.add(tool.name)
-                log.info("registered MCP tool %r -> %s", tool.name, tool.server)
+                log.info(
+                    "registered MCP tool %r -> %s%s",
+                    tool.name,
+                    tool.server,
+                    f" (credentials: {tool.credentials})" if credentials else "",
+                )
     gateway.mcp_connectors = mcp_connectors  # type: ignore[attr-defined]
     return gateway
 

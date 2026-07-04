@@ -46,15 +46,19 @@ spec:
       # issues:read / pulls:read are transitional: remove them once github-mcp
       # auth is wired, so the model sees exactly one way to read.
       permissions: ["issues:read", "issues:write", "pulls:read", "pulls:write"]
-    # Uncomment once HttpMCPClient can send a bearer token (wire it through the
-    # CredentialResolver seam). Left disabled until then because a configured
-    # server is dialed at every startup — including each test-suite app boot —
-    # and without auth the discovery call can only fail. After enabling,
-    # confirm the tool names against the startup discovery log, and drop the
-    # native read permissions above.
     - name: github-mcp
       type: mcp
       server: https://api.githubcopilot.com/mcp/
+      # Authorization: Bearer <token>, resolved per request from the "github"
+      # credential integration (GITHUB_TOKEN or GitHub App installation
+      # tokens). X-MCP-Readonly asks GitHub's server to expose only read
+      # tools — defense in depth on top of the permissions allowlist, which
+      # names the exact server tools the agent may call. Confirm the names
+      # against the startup discovery log ("mcp connector 'github-mcp'
+      # discovered N tool(s): ...").
+      credentials: github
+      headers:
+        X-MCP-Readonly: "true"
       permissions:
         - list_issues
         - get_issue

@@ -3,9 +3,13 @@
 import sys
 import types
 
-from openloop.app import build_github_credentials
+from openloop.agents.schema import Agent
+from openloop.app import build_github_credentials, build_tool_gateway
+from openloop.approvals import InMemoryApprovalStore
+from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.config import Settings
 from openloop.credentials import EnvCredentialResolver, GitHubAppResolver
+from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 
 
 def _settings(**kwargs) -> Settings:
@@ -103,3 +107,63 @@ def test_broken_app_config_without_token_registers_nothing(tmp_path, caplog):
     )
     assert "GITHUB APP AUTH DISABLED" in caplog.text
     assert resolver is None
+
+
+def _mcp_agent(tool: dict) -> Agent:
+    return Agent(
+        metadata={"name": "t", "workspace": "acme"},
+        spec={"model_policy": {"default": "openai/gpt-4o-mini"}, "tools": [tool]},
+    )
+
+
+def _build_gateway(settings: Settings, agent: Agent):
+    return build_tool_gateway(
+        settings,
+        {"t": agent},
+        InMemoryApprovalStore(),
+        InMemoryCheckpointStore(),
+        WorkflowEngine(InMemoryWorkflowStore()),
+    )
+
+
+def test_mcp_tool_with_github_credentials_gets_the_resolver():
+    agent = _mcp_agent({
+        "name": "github-mcp",
+        "type": "mcp",
+        "server": "https://api.githubcopilot.com/mcp/",
+        "credentials": "github",
+        "headers": {"X-MCP-Readonly": "true"},
+        "permissions": ["list_issues"],
+    })
+    gateway = _build_gateway(_settings(github_token="tok"), agent)
+
+    client = gateway.mcp_connectors[0].client
+    assert isinstance(client._credentials, EnvCredentialResolver)
+    assert client._scope.integration == "github"
+    assert client._static_headers == {"X-MCP-Readonly": "true"}
+
+
+def test_mcp_tool_credentials_without_github_auth_degrades_loudly(caplog):
+    agent = _mcp_agent({
+        "name": "github-mcp",
+        "type": "mcp",
+        "server": "https://api.githubcopilot.com/mcp/",
+        "credentials": "github",
+        "permissions": ["list_issues"],
+    })
+    gateway = _build_gateway(_settings(), agent)  # no GITHUB_TOKEN / app config
+
+    client = gateway.mcp_connectors[0].client
+    assert client._credentials is None
+    assert "registering unauthenticated" in caplog.text
+
+
+def test_mcp_tool_without_credentials_stays_unauthenticated():
+    agent = _mcp_agent({
+        "name": "ci-logs",
+        "type": "mcp",
+        "server": "http://localhost:8931",
+        "permissions": ["get_run_logs"],
+    })
+    gateway = _build_gateway(_settings(github_token="tok"), agent)
+    assert gateway.mcp_connectors[0].client._credentials is None

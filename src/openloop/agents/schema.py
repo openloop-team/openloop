@@ -51,6 +51,12 @@ class Tool(BaseModel):
     type: Literal["native", "mcp"]
     server: str | None = None
     permissions: list[str] = Field(default_factory=list)
+    # MCP-only: which credential integration (e.g. "github") supplies the
+    # bearer token for the Authorization header — resolved per request via the
+    # CredentialResolver seam — plus static extra headers (e.g. GitHub's
+    # X-MCP-Readonly).
+    credentials: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
 
 
 class Approvals(BaseModel):
