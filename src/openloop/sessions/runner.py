@@ -38,6 +38,7 @@ from openloop.sessions.store import (
     SurfaceSessionStore,
     SurfaceTarget,
 )
+from openloop.workflows.store import TERMINAL as _WORKFLOW_TERMINAL
 
 logger = logging.getLogger(__name__)
 
@@ -77,12 +78,17 @@ class SessionRunner:
         self.runtime = runtime
         self.sessions = sessions
         self.delivery = delivery
+        # Last progress phrase delivered per session, so identical heartbeats
+        # (e.g. the ~lease/3 lease-renewal ticks) don't re-hit the surface API.
+        self._progress_seen: dict[str, str] = {}
         engine = getattr(runtime, "engine", None)
         if engine is not None and hasattr(engine, "add_terminal_callback"):
             # Several runners may share one engine in tests or multi-surface
             # wiring. All callbacks may fire; delivery stays correct because the
             # persisted final_message_id/key guards below make it idempotent.
             engine.add_terminal_callback(self._on_workflow_terminal)
+            if hasattr(engine, "add_progress_callback"):
+                engine.add_progress_callback(self._on_workflow_progress)
 
     async def run(self, task: Task, target: SurfaceTarget) -> SurfaceSession:
         """Create/resume a session for ``task`` and deliver its outcome.
@@ -360,7 +366,35 @@ class SessionRunner:
         session = await self.sessions.get_by_approval(approval_id)
         if session is None:
             return
+        self._progress_seen.pop(session.id, None)
         await self._deliver_terminal_approval(session)
+
+    async def _on_workflow_progress(self, instance) -> None:
+        """Relay a running workflow's progress phrase as a transient status.
+
+        Best-effort UI: maps the instance back to its waiting session via the
+        approval id and pushes ``instance.state['progress']`` to the surface,
+        deduped so an unchanged phrase never re-hits the API.
+        """
+        # The instance is mutated in place by the drive, so a task scheduled
+        # during the last step but running just after completion sees the terminal
+        # status here and bails — the guard the engine's drain can't cover for a
+        # task that already started running.
+        if getattr(instance, "status", None) in _WORKFLOW_TERMINAL:
+            return
+        phrase = (getattr(instance, "state", {}) or {}).get("progress")
+        if not phrase:
+            return
+        approval_id = _approval_id_for_instance(instance)
+        if not approval_id:
+            return
+        session = await self.sessions.get_by_approval(approval_id)
+        if session is None or session.status != "waiting":
+            return
+        if self._progress_seen.get(session.id) == phrase:
+            return
+        self._progress_seen[session.id] = phrase
+        await self._set_progress_status(session, phrase)
 
     async def _deliver_terminal_approval(self, session: SurfaceSession) -> bool:
         """Deliver a waiting session whose approved workflow has finished."""
@@ -370,7 +404,6 @@ class SessionRunner:
             return False
         from openloop.surfaces.approvals import resolution_message
         from openloop.tools.gateway import _workflow_invocation
-        from openloop.workflows.store import TERMINAL as WORKFLOW_TERMINAL
 
         for approval_id in session.approval_ids:
             request = await tools.approvals.get(approval_id)
@@ -381,7 +414,7 @@ class SessionRunner:
                 continue
             instance_id = request.args.get("job_id") or request.id
             instance = await engine.store.get(instance_id)
-            if instance is None or instance.status not in WORKFLOW_TERMINAL:
+            if instance is None or instance.status not in _WORKFLOW_TERMINAL:
                 continue
             inv = _workflow_invocation(instance)
             approver = request.decided_by or "an approver"
@@ -437,11 +470,11 @@ class SessionRunner:
         """
         return f"{session.id}:{role}"
 
-    async def _set_progress_status(self, session: SurfaceSession) -> None:
+    async def _set_progress_status(
+        self, session: SurfaceSession, text: str = PROGRESS_STATUS_TEXT
+    ) -> None:
         try:
-            await self.delivery.set_progress_status(
-                session.target, PROGRESS_STATUS_TEXT
-            )
+            await self.delivery.set_progress_status(session.target, text)
         except Exception:  # noqa: BLE001 — status is transient UI polish
             logger.warning(
                 "failed to set progress status for session %s",

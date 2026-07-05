@@ -10,7 +10,7 @@ from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import CodingWorkerConnector
 from openloop.tools.github import GitHubConnector
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
-from openloop.workflows.coding_worker import build_coding_worker_workflow
+from openloop.workflows.coding_worker import _worker_phase, build_coding_worker_workflow
 from openloop.testing import FakeGitHub, FakeWorkerOrchestrator
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
@@ -18,6 +18,20 @@ AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 def _agent():
     return load_agent(AGENT_YAML)
+
+
+def test_worker_phase_maps_latest_milestone():
+    # Reads the most-advanced milestone reached, not merely the last appended.
+    assert _worker_phase([]) == "is starting…"
+    assert _worker_phase(["clone"]) == "is setting up the workspace…"
+    assert _worker_phase(["clone", "branch"]) == "is working on the changes…"
+    assert _worker_phase(["clone", "branch", "edit"]) == "is finalizing the changes…"
+    assert _worker_phase(["clone", "branch", "edit", "commit"]) == (
+        "is committing the changes…"
+    )
+    assert _worker_phase(["clone", "branch", "edit", "commit", "push"]) == (
+        "is pushing the branch…"
+    )
 
 
 def _setup(runner=None, github=None):

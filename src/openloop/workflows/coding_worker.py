@@ -38,6 +38,28 @@ WORKFLOW_NAME = "coding_worker"
 APPROVAL_EVENT = "await_approval"
 
 
+def _worker_phase(completed_steps: list[str]) -> str:
+    """A human 'still working' phrase for the worker's latest milestone.
+
+    Reads the most-advanced step reached (the list only grows). During the long
+    agent-edit phase the last completed step is still ``branch`` (the worker
+    appends ``edit`` only once the agent finishes), so that maps to the generic
+    "working on the changes" — the phase the user waits on longest.
+    """
+    steps = set(completed_steps)
+    if "push" in steps:
+        return "is pushing the branch…"
+    if "commit" in steps:
+        return "is committing the changes…"
+    if "edit" in steps:
+        return "is finalizing the changes…"
+    if "branch" in steps:
+        return "is working on the changes…"
+    if "clone" in steps:
+        return "is setting up the workspace…"
+    return "is starting…"
+
+
 def build_coding_worker_workflow(
     orchestrator: AttemptRunner, github: GitHubClient
 ) -> Workflow:
@@ -59,7 +81,10 @@ def build_coding_worker_workflow(
             # gateway (Phase 5) — the ledger attributes spend to it.
             agent=s.get("agent"),
         )
-        async def on_step(_: WorkerState) -> None:
+        async def on_step(ws: WorkerState) -> None:
+            # Record a human progress phrase so the surface can show "still
+            # working…" without knowing worker-internal step names.
+            s["progress"] = _worker_phase(ws.completed_steps)
             await ctx.checkpoint()
 
         outcome = await orchestrator.run_attempt(state, on_step=on_step)

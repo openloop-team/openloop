@@ -228,6 +228,42 @@ async def test_resume_incomplete_skips_in_process_background_drive_even_if_lease
     await engine.wait_background("i1")
 
 
+async def test_terminal_drains_in_flight_progress_before_callbacks():
+    # A progress task stalled mid-write (as if awaiting a slow surface call) is
+    # cancelled on the terminal transition, *before* terminal callbacks fire —
+    # so a stale "still working…" status can't land after the final answer.
+    progress_started = asyncio.Event()
+    progress_completed = False
+    terminal_fired_at: list[bool] = []
+
+    async def stalling_progress(instance):
+        nonlocal progress_completed
+        progress_started.set()
+        await asyncio.sleep(10)  # never completes; drain must cancel it
+        progress_completed = True
+
+    async def on_terminal(instance):
+        # Records that terminal delivery ran, and that no progress task survives.
+        terminal_fired_at.append("i1" not in instance_engine._progress_tasks)
+
+    async def work(ctx):
+        await ctx.checkpoint()  # schedules the progress task
+        await asyncio.wait_for(progress_started.wait(), timeout=1)  # it stalls
+
+    wf = Workflow("w", [Step("gate", wait=True), Step("work", work)])
+    instance_engine, store = _engine(wf)
+    instance_engine.add_progress_callback(stalling_progress)
+    instance_engine.add_terminal_callback(on_terminal)
+
+    await instance_engine.start("w", "i1", {})
+    await instance_engine.send_event("i1", "gate")  # drives inline to terminal
+
+    assert (await store.get("i1")).status == "completed"
+    assert progress_completed is False  # the stalled progress write was cancelled
+    assert terminal_fired_at == [True]  # drained before the terminal callback ran
+    assert "i1" not in instance_engine._progress_tasks
+
+
 def _two_step_workflow(calls):
     async def gen(ctx):
         calls.append("gen")

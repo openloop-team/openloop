@@ -6,9 +6,11 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
 # git + CA certs are needed by the coding worker, which shells out to `git`
-# to clone/commit/push over HTTPS.
+# to clone/commit/push over HTTPS. tmux backs the OpenHands terminal tool; without
+# it the SDK falls back to a subprocess terminal it warns is "less stable" (a
+# plausible hang source for the agent's shell commands).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates \
+    && apt-get install -y --no-install-recommends git ca-certificates tmux \
     && rm -rf /var/lib/apt/lists/*
 
 # Static docker CLI so CODING_WORKER_SANDBOX=docker works from inside this

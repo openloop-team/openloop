@@ -21,6 +21,7 @@ from openloop.sessions import (
     SurfaceSession,
     SurfaceTarget,
 )
+from openloop.sessions.runner import PROGRESS_STATUS_TEXT
 from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import CodingWorkerConnector
 from openloop.tools.github import GitHubConnector
@@ -293,6 +294,70 @@ async def test_workflow_approval_waits_for_background_terminal_result():
     assert completed.status == "completed"
     assert completed.final_message_id is not None
     assert "opened draft PR #1" in delivery.finals[-1]["text"]
+
+
+async def test_workflow_progress_is_surfaced_as_transient_status():
+    agent = load_agent(AGENT_YAML)
+    engine = WorkflowEngine(InMemoryWorkflowStore())
+    worker = FakeWorkerOrchestrator(title="Add retries")
+    github = FakeGitHub()
+    engine.register(build_coding_worker_workflow(worker, github))
+    tools = ToolGateway(
+        tools=[GitHubConnector(github), CodingWorkerConnector(worker, github)],
+        engine=engine,
+    )
+    sessions = InMemorySurfaceSessionStore()
+    delivery = FakeSurfaceDelivery()
+    runtime = Runtime(
+        agent,
+        gateway=ScriptedGateway([
+            tool_call_response(
+                "m",
+                [("c1", "coding_worker_pr_write",
+                  {"repo": "acme/x", "instruction": "add retries"})],
+            ),
+        ]),
+        tools=tools,
+        usage=InMemoryUsageStore(),
+        memory=InMemoryStore(),
+        engine=engine,
+    )
+    runner = SessionRunner(runtime, sessions, delivery)
+    session = await runner.run(_task("open a PR"), _target())
+    approval_id = session.approval_ids[0]
+    job_id = (await tools.approvals.get(approval_id)).args["job_id"]
+
+    await runner.resolve_approval(approval_id, "@maciag.artur", approve=True)
+    await engine.wait_background(job_id)
+    # Statuses recorded before the terminal drain are final by the time the
+    # background drive (awaited above) returns; let any just-scheduled ones run.
+    await asyncio.sleep(0)
+
+    phrases = [s["text"] for s in delivery.statuses]
+    # A "still working" worker phrase is surfaced beyond the initial status, and
+    # each phrase delivered is a real worker milestone (detached ticks coalesce
+    # to the latest state, which is the right transient-status semantic).
+    worker_phrases = [p for p in phrases if p != PROGRESS_STATUS_TEXT]
+    assert worker_phrases  # progress was surfaced
+    assert all(p.startswith("is ") and p.endswith("…") for p in worker_phrases)
+    # Deduped: an unchanged phrase never re-hits the API back-to-back.
+    assert all(a != b for a, b in zip(phrases, phrases[1:]))
+    # It still delivers the final answer after the progress ticks.
+    assert "opened draft PR #1" in delivery.finals[-1]["text"]
+
+
+async def test_progress_callback_bails_on_terminal_instance():
+    # Defense-in-depth for the drain: a progress task that runs just after the
+    # in-place-mutated instance goes terminal must not emit a stale status.
+    runner, _, delivery = _runner(ScriptedGateway([]))
+    terminal = WorkflowInstance(
+        id="i1", workflow="w", status="completed",
+        state={"progress": "is pushing the branch…", "approval_id": "a1"},
+    )
+
+    await runner._on_workflow_progress(terminal)
+
+    assert delivery.statuses == []  # bailed before touching the surface
 
 
 async def test_failed_outcome_delivery_is_repaired_on_second_click():

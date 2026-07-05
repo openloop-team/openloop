@@ -15,6 +15,20 @@ Wakeups are in-process today (``send_event`` can drive synchronously or only
 record the wake, and a startup reconciler re-drives stale running instances).
 Redis pub/sub can later make wakeups cross-process without changing the workflow
 contract.
+
+Coordination is **single-process**: the drive is guarded against concurrent
+re-drive by an in-memory marker (``_active_drives``) plus an advisory lease
+(``leased_until``, wall-clock, renewed by a ticker), and in-flight progress
+notifications are drained per-instance from this process's task set. This is
+correct for one runtime process. **Before running more than one replica**,
+replace the advisory lease + in-memory marker with a DB atomic-claim arbiter for
+the drive (``UPDATE … WHERE status='running' AND (leased_until IS NULL OR
+leased_until < now()) RETURNING`` — server-side ``now()`` kills clock skew and
+gives true mutual exclusion), because a second concurrent drive means double
+spend and a double push. Best-effort UI writes (the Slack "still working…"
+status) want the opposite primitive — level-triggered reconciliation against the
+shared instance state, which converges without a leader — not the drain, which
+is process-local.
 """
 
 from __future__ import annotations
@@ -98,6 +112,13 @@ class WorkflowEngine:
         self._terminal_callbacks: list[
             Callable[[WorkflowInstance], Awaitable[None]]
         ] = []
+        self._progress_callbacks: list[
+            Callable[[WorkflowInstance], Awaitable[None]]
+        ] = []
+        # Strong refs to in-flight progress notifications, keyed by instance so a
+        # terminal transition can drain just that instance's stragglers (not other
+        # workers') before delivering the final answer. Each self-removes on done.
+        self._progress_tasks: dict[str, set[asyncio.Task]] = {}
 
     def register(self, workflow: Workflow) -> None:
         self.workflows[workflow.name] = workflow
@@ -108,11 +129,24 @@ class WorkflowEngine:
         """Run ``callback`` after a workflow reaches a terminal state."""
         self._terminal_callbacks.append(callback)
 
+    def add_progress_callback(
+        self, callback: Callable[[WorkflowInstance], Awaitable[None]]
+    ) -> None:
+        """Run ``callback`` on each mid-step checkpoint of a running instance.
+
+        Best-effort UI signal (e.g. a Slack "still working…" status): callbacks
+        are fired as detached tasks from :meth:`checkpoint`, never awaited on the
+        checkpoint path, so a slow callback can't delay a lease renewal.
+        """
+        self._progress_callbacks.append(callback)
+
     async def checkpoint(self, instance: WorkflowInstance) -> None:
         """Persist mid-step state (e.g. after an idempotent write inside a step)."""
         if instance.status == "running":
             self._renew_lease(instance)
         await self.store.upsert(instance)
+        if instance.status == "running":
+            self._fire_progress(instance)
 
     async def start(
         self, workflow: str, instance_id: str, initial_state: dict
@@ -336,6 +370,9 @@ class WorkflowEngine:
     async def _notify_terminal(self, instance: WorkflowInstance) -> None:
         if instance.status not in TERMINAL:
             return
+        # Cancel in-flight progress writes before the terminal callbacks post the
+        # final answer, so no stale "still working…" status lands after it.
+        await self._drain_progress(instance.id)
         for callback in list(self._terminal_callbacks):
             try:
                 await callback(instance)
@@ -343,6 +380,53 @@ class WorkflowEngine:
                 logger.exception(
                     "workflow terminal callback failed for %s", instance.id
                 )
+
+    def _fire_progress(self, instance: WorkflowInstance) -> None:
+        """Schedule progress callbacks as detached tasks (never blocks the caller)."""
+        for callback in self._progress_callbacks:
+            task = asyncio.create_task(self._run_progress(callback, instance))
+            self._progress_tasks.setdefault(instance.id, set()).add(task)
+            task.add_done_callback(
+                lambda t, iid=instance.id: self._discard_progress(iid, t)
+            )
+
+    def _discard_progress(self, instance_id: str, task: asyncio.Task) -> None:
+        tasks = self._progress_tasks.get(instance_id)
+        if tasks is not None:
+            tasks.discard(task)
+            if not tasks:
+                self._progress_tasks.pop(instance_id, None)
+
+    async def _drain_progress(self, instance_id: str) -> None:
+        """Cancel and await this instance's in-flight progress tasks.
+
+        Called on the terminal transition *before* the final answer is posted, so
+        a straggler ``set_progress_status`` can't land after the post and leave a
+        stale "still working…" status behind (the final post clears it, and no
+        later status write re-sets it). Best-effort: a request already physically
+        sent to the surface in the same instant can't be un-sent — this closes the
+        common window, not the theoretical one against an unordered surface API.
+        """
+        tasks = self._progress_tasks.pop(instance_id, None)
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _run_progress(
+        self,
+        callback: Callable[[WorkflowInstance], Awaitable[None]],
+        instance: WorkflowInstance,
+    ) -> None:
+        try:
+            await callback(instance)
+        except Exception:
+            logger.exception(
+                "workflow progress callback failed for %s", instance.id
+            )
 
 
 def _has_pending_non_resumable_step(
