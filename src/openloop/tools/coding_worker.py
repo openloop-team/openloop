@@ -69,6 +69,30 @@ StepCallback = Callable[["WorkerState"], Awaitable[None]]
 
 logger = logging.getLogger(__name__)
 
+
+class WorkerRunAborted(RuntimeError):
+    """A worker stopped its own run early (in-run spend cap or deadline hit).
+
+    Carries the spend accrued up to the abort so the orchestrator can still
+    record it in the ledger before failing the attempt closed — the abort bounds
+    spend to roughly the cap instead of running to completion, but whatever was
+    spent before stopping is real and must land in the audit trail.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        cost_usd: float = 0.0,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.cost_usd = cost_usd
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+
 _REPO = {"type": "string", "description": "owner/repo, e.g. acme/ingestion"}
 CODING_WORKER_TOOL_NAME = "coding_worker"
 CODING_WORKER_PR_WRITE = "pr:write"
@@ -102,6 +126,11 @@ class WorkerState:
     title: str | None = None
     body: str | None = None
     agent: str | None = None
+    # Per-attempt in-run spend ceiling (this agent's per-task cap), stamped by
+    # the orchestrator before the worker runs so an agentic worker can stop
+    # itself near the cap instead of blowing past it. Transient — recomputed each
+    # attempt, deliberately not round-tripped through the checkpoint (from_dict).
+    budget_usd: float | None = None
 
     def push_key(self) -> str:
         """Idempotency key for the branch push — never a single global key."""
@@ -557,6 +586,10 @@ class GitWorkspaceOrchestrator:
         # Raises out of the attempt → terminal fail on both durable paths.
         if self._ledger is not None:
             await self._ledger.check_monthly(state.agent, job_id=state.job_id)
+            # Stamp this agent's per-task cap so an agentic worker can stop
+            # itself near the ceiling instead of running to completion and
+            # failing the post-run settle (the money is already spent by then).
+            state.budget_usd = self._ledger.per_task_usd_for(state.agent)
 
         # Resolved fresh per attempt and kept local — never stored, never in a
         # URL. The auth header value still surfaces in a failed command line,
@@ -584,7 +617,23 @@ class GitWorkspaceOrchestrator:
 
             # The worker edits the prepared workspace. No credential in scope:
             # not in its arguments, not anywhere under the workspace.
-            edit = await self.worker.run(workspace, state, on_step)
+            try:
+                edit = await self.worker.run(workspace, state, on_step)
+            except WorkerRunAborted as aborted:
+                # The worker stopped itself at the spend/time ceiling. Record the
+                # spend that already happened, then fail the attempt closed — no
+                # push, no PR, and the workspace teardown discards the partial edit.
+                if self._ledger is not None:
+                    await self._ledger.settle(
+                        agent=state.agent,
+                        job_id=state.job_id,
+                        cost_usd=aborted.cost_usd,
+                        prompt_tokens=aborted.prompt_tokens,
+                        completion_tokens=aborted.completion_tokens,
+                    )
+                # settle() raises on an over-cap spend; a deadline abort under the
+                # cap won't, so re-raise to fail closed regardless.
+                raise
             # Persist title/body so a post-push crash can still open the PR.
             state.title, state.body = edit.title, edit.body
 

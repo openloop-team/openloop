@@ -98,7 +98,11 @@ spec:
   # Spend guardrails
   budget:
     monthly_usd: 50
-    per_task_usd: 0.50
+    # The OpenHands coding worker is multi-step and token-heavy — observed runs
+    # land around $0.8–1.0. Keep this above real task cost or every attempt
+    # fails closed AFTER spending (the ledger cap is enforced post-run); the
+    # in-run guard bounds a run to roughly this ceiling.
+    per_task_usd: 1.50
     on_exceeded: block        # block | warn
 
   # Throughput guardrails (noisy-neighbor controls); unset = unlimited

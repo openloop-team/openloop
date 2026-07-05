@@ -20,6 +20,7 @@ from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import (
     CodingWorkerConnector,
     GitWorkspaceOrchestrator,
+    WorkerRunAborted,
 )
 from openloop.usage import (
     InMemoryUsageStore,
@@ -105,6 +106,48 @@ async def test_workflow_path_fails_closed_over_cap(monkeypatch):
     assert instance.status == "failed"
     assert "per-task budget" in instance.error
     assert github.pulls == []
+    assert usage.records[0].outcome == "over_task_budget"
+
+
+async def test_in_run_abort_records_partial_spend_and_fails_closed(monkeypatch):
+    # A worker that stops itself at the ceiling: the orchestrator records the
+    # spend that already happened and fails the attempt closed — no push, no PR.
+    usage = InMemoryUsageStore()
+    github = FakeGitHub()
+    agent = _agent(per_task_usd=0.50)
+    ledger = WorkerSpendLedger(
+        usage=usage, model="m",
+        agents={agent.metadata.name: agent}, default_agent=agent.metadata.name,
+    )
+
+    class AbortingWorker:
+        async def run(self, workspace, state, on_step=None):
+            # The orchestrator must have stamped this agent's cap for the guard.
+            assert state.budget_usd == 0.50
+            raise WorkerRunAborted(
+                "in-run spend $0.55 reached the $0.50 per-task cap",
+                cost_usd=0.55, prompt_tokens=120, completion_tokens=30,
+            )
+
+    orch = GitWorkspaceOrchestrator(
+        AbortingWorker(), EnvCredentialResolver({"github": "tok"}), ledger=ledger,
+    )
+
+    async def fake_run(*cmd, cwd=None, stdin=None, redact=None):
+        return ""
+
+    monkeypatch.setattr(orch, "_run", fake_run)
+    connector = CodingWorkerConnector(orch, github, checkpoints=InMemoryCheckpointStore())
+
+    result = await connector.execute(
+        "pr:write", {"repo": "acme/x", "instruction": "x", "job_id": "j1"}
+    )
+
+    assert not result.ok
+    assert result.data["status"] == "failed"
+    assert github.pulls == []  # fail closed: no PR from the aborted run
+    # The partial spend is on the audit trail, marked over the cap.
+    assert usage.records[0].cost_usd == 0.55
     assert usage.records[0].outcome == "over_task_budget"
 
 

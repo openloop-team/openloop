@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     # In-run iteration cap handed to the OpenHands conversation. The budget
     # cap is enforced by the worker-spend ledger (per_task_usd), not in-run.
     coding_worker_max_iterations: int = 100
+    # Wall-clock ceiling for a single OpenHands attempt, checked between agent
+    # events (a soft deadline: it cannot interrupt a truly-frozen single call —
+    # that needs the docker sandbox to hard-kill the container). 0 disables it.
+    coding_worker_deadline_seconds: float = 600.0
     # Agent-server image for the OpenHands docker runtime
     # (CODING_WORKER_SANDBOX=docker + backend=openhands).
     coding_worker_openhands_image: str = (

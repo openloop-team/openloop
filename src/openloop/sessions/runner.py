@@ -28,6 +28,7 @@ be awaited inline (tests) or scheduled in the background (Slack).
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 
 from openloop.runtime import Runtime, Task
@@ -43,6 +44,12 @@ from openloop.workflows.store import TERMINAL as _WORKFLOW_TERMINAL
 logger = logging.getLogger(__name__)
 
 PROGRESS_STATUS_TEXT = "is thinking..."
+# Slack's assistant-thread status is transient — it lapses if not re-asserted.
+# Re-send the current phrase at least this often (even unchanged) so a long,
+# single-phase run keeps showing "still working…" instead of going blank. Bursts
+# of identical ticks within the window still collapse. Kept below the lease
+# ticker's ~lease/3 cadence so each tick refreshes.
+PROGRESS_REFRESH_SECONDS = 5.0
 WAITING_TEXT = "⏳ Waiting for approval…"
 ERROR_TEXT = "⚠️ This task was interrupted and could not be completed."
 
@@ -78,9 +85,10 @@ class SessionRunner:
         self.runtime = runtime
         self.sessions = sessions
         self.delivery = delivery
-        # Last progress phrase delivered per session, so identical heartbeats
-        # (e.g. the ~lease/3 lease-renewal ticks) don't re-hit the surface API.
-        self._progress_seen: dict[str, str] = {}
+        # (phrase, last-sent monotonic) per session: collapse identical bursts,
+        # but still re-assert periodically so Slack's transient status doesn't
+        # lapse during a long single-phase run.
+        self._progress_seen: dict[str, tuple[str, float]] = {}
         engine = getattr(runtime, "engine", None)
         if engine is not None and hasattr(engine, "add_terminal_callback"):
             # Several runners may share one engine in tests or multi-surface
@@ -391,9 +399,13 @@ class SessionRunner:
         session = await self.sessions.get_by_approval(approval_id)
         if session is None or session.status != "waiting":
             return
-        if self._progress_seen.get(session.id) == phrase:
-            return
-        self._progress_seen[session.id] = phrase
+        last = self._progress_seen.get(session.id)
+        now = time.monotonic()
+        if last is not None:
+            last_phrase, last_at = last
+            if last_phrase == phrase and now - last_at < PROGRESS_REFRESH_SECONDS:
+                return
+        self._progress_seen[session.id] = (phrase, now)
         await self._set_progress_status(session, phrase)
 
     async def _deliver_terminal_approval(self, session: SurfaceSession) -> bool:

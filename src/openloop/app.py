@@ -340,6 +340,7 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
             settings.coding_worker_model,
             api_key=_provider_key(settings, settings.coding_worker_model),
             max_iterations=settings.coding_worker_max_iterations,
+            deadline_seconds=settings.coding_worker_deadline_seconds or None,
             docker=settings.coding_worker_sandbox == "docker",
             server_image=settings.coding_worker_openhands_image,
             network=settings.coding_worker_openhands_network,

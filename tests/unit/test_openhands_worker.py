@@ -1,11 +1,12 @@
 """Unit tests for the OpenHands worker backend (SDK faked at the factory seam)."""
 
 import asyncio
+import time
 
 import pytest
 
 import openloop.tools.openhands_worker as ohmod
-from openloop.tools.coding_worker import WorkerState
+from openloop.tools.coding_worker import WorkerRunAborted, WorkerState
 from openloop.tools.openhands_worker import (
     PR_FILE,
     OpenHandsCodingWorker,
@@ -160,6 +161,82 @@ async def test_events_heartbeat_into_on_step_throttled(tmp_path):
 
     assert len(calls) == 2  # 1 throttled heartbeat + 1 "edit" step
     assert calls[-1] == ["edit"]
+
+
+class GrowingCostConversation(FakeConversation):
+    """Cost climbs by ``per_event`` on every agent event — for the spend guard."""
+
+    def __init__(self, workspace, callbacks, *, per_event=0.5, **kw):
+        super().__init__(workspace, callbacks, cost=0.0, **kw)
+        self._per_event = per_event
+
+    def run(self):
+        for _ in range(self.events):
+            self.conversation_stats._metrics.accumulated_cost += self._per_event
+            for cb in self.callbacks:
+                cb(object())  # the guard reads current cost and may abort here
+        if self.pr_text is not None:
+            (self.workspace / PR_FILE).write_text(self.pr_text)
+
+
+class SleepyConversation(FakeConversation):
+    """Wall-time advances between events — for the deadline guard."""
+
+    def run(self):
+        for _ in range(self.events):
+            time.sleep(0.02)
+            for cb in self.callbacks:
+                cb(object())
+        if self.pr_text is not None:
+            (self.workspace / PR_FILE).write_text(self.pr_text)
+
+
+def _worker_with(conv_cls, *, deadline_seconds=None, **fake_kwargs):
+    created = []
+
+    def factory(workspace, callbacks):
+        conversation = conv_cls(workspace, callbacks, **fake_kwargs)
+        created.append(conversation)
+        return conversation, lambda: conversation.teardown.append("cleanup")
+
+    worker = OpenHandsCodingWorker(
+        "anthropic/m",
+        deadline_seconds=deadline_seconds,
+        conversation_factory=factory,
+    )
+    return worker, created
+
+
+async def test_in_run_cost_abort_stops_and_reports_partial_spend(tmp_path):
+    # $0.50/event, cap $1.00 → aborts on the 3rd event ($1.50), long before the
+    # 10-event ($5.00) completion.
+    worker, created = _worker_with(GrowingCostConversation, per_event=0.5, events=10)
+    state = _state()
+    state.budget_usd = 1.0
+
+    with pytest.raises(WorkerRunAborted) as exc:
+        await worker.run(tmp_path, state)
+
+    assert exc.value.cost_usd == pytest.approx(1.5)  # stopped near the cap
+    assert exc.value.prompt_tokens == 100 and exc.value.completion_tokens == 40
+    assert "cap" in exc.value.reason
+    assert not (tmp_path / PR_FILE).exists()  # aborted before the handoff
+    assert created[0].teardown == ["close", "cleanup"]  # runtime still reaped
+
+
+async def test_no_cost_abort_when_state_carries_no_budget(tmp_path):
+    # budget_usd unset → the guard never trips on cost; the run completes.
+    worker, _ = _worker_with(GrowingCostConversation, per_event=5.0, events=3)
+    edit = await worker.run(tmp_path, _state())  # state.budget_usd is None
+    assert edit.title == "Add retries"
+
+
+async def test_deadline_abort_stops_a_slow_run(tmp_path):
+    worker, created = _worker_with(SleepyConversation, deadline_seconds=0.01, events=10)
+    with pytest.raises(WorkerRunAborted) as exc:
+        await worker.run(tmp_path, _state())
+    assert "deadline" in exc.value.reason
+    assert created[0].teardown == ["close", "cleanup"]
 
 
 async def test_worker_holds_no_git_credential(tmp_path):

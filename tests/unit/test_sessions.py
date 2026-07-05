@@ -21,7 +21,9 @@ from openloop.sessions import (
     SurfaceSession,
     SurfaceTarget,
 )
-from openloop.sessions.runner import PROGRESS_STATUS_TEXT
+import time
+
+from openloop.sessions.runner import PROGRESS_REFRESH_SECONDS, PROGRESS_STATUS_TEXT
 from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import CodingWorkerConnector
 from openloop.tools.github import GitHubConnector
@@ -344,6 +346,35 @@ async def test_workflow_progress_is_surfaced_as_transient_status():
     assert all(a != b for a, b in zip(phrases, phrases[1:]))
     # It still delivers the final answer after the progress ticks.
     assert "opened draft PR #1" in delivery.finals[-1]["text"]
+
+
+async def test_progress_status_is_reasserted_after_refresh_interval():
+    # Slack's status is transient; an unchanged phrase must be re-sent periodically
+    # so a long single-phase run doesn't go blank. Bursts within the window still
+    # collapse to one call.
+    runner, sessions, delivery = _runner(ScriptedGateway([]))
+    await sessions.upsert(SurfaceSession(
+        id="s1", target=_target("ev1"), status="waiting", approval_ids=["a1"],
+    ))
+    inst = WorkflowInstance(
+        id="i1", workflow="w", status="running",
+        state={"progress": "is working on the changes…", "approval_id": "a1"},
+    )
+
+    await runner._on_workflow_progress(inst)
+    await runner._on_workflow_progress(inst)  # immediate repeat → collapsed
+    assert [s["text"] for s in delivery.statuses] == ["is working on the changes…"]
+
+    # Backdate the last-sent stamp past the refresh window → re-asserted.
+    phrase, _ = runner._progress_seen["s1"]
+    runner._progress_seen["s1"] = (
+        phrase, time.monotonic() - PROGRESS_REFRESH_SECONDS - 1
+    )
+    await runner._on_workflow_progress(inst)
+    assert [s["text"] for s in delivery.statuses] == [
+        "is working on the changes…",
+        "is working on the changes…",
+    ]
 
 
 async def test_progress_callback_bails_on_terminal_instance():

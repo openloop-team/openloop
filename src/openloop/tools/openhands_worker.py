@@ -47,12 +47,24 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from openloop.tools.coding_worker import StepCallback, WorkerEdit
+from openloop.tools.coding_worker import StepCallback, WorkerEdit, WorkerRunAborted
 
 if TYPE_CHECKING:
     from openloop.tools.coding_worker import WorkerState
 
 logger = logging.getLogger(__name__)
+
+
+class _RunAborted(Exception):
+    """Signal raised from the SDK callback to stop ``conversation.run()`` early.
+
+    Internal to the worker: ``_drive`` catches it, reads the spend accrued so
+    far, and re-raises as :class:`WorkerRunAborted` for the orchestrator.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 # The handoff protocol for PR metadata: the agent's last required act is to
 # write this file (first line = PR title, rest = body). The worker reads and
@@ -102,6 +114,7 @@ class OpenHandsCodingWorker:
         *,
         api_key: str | None = None,
         max_iterations: int = 100,
+        deadline_seconds: float | None = None,
         docker: bool = False,
         server_image: str = _DEFAULT_SERVER_IMAGE,
         network: str | None = None,
@@ -110,6 +123,10 @@ class OpenHandsCodingWorker:
         self.model = model
         self._api_key = api_key
         self.max_iterations = max_iterations
+        # Soft wall-clock ceiling for one run, checked between agent events
+        # (None/0 disables). Cannot interrupt a frozen single call — docker mode
+        # hard-kills for that; here it bounds a slow-but-responsive run.
+        self.deadline_seconds = deadline_seconds
         self.docker = docker
         self.server_image = server_image
         # None = docker's default bridge (the agent server needs egress to the
@@ -165,7 +182,7 @@ class OpenHandsCodingWorker:
         loop = asyncio.get_running_loop()
         heartbeat = self._heartbeat(loop, state, on_step)
         cost, prompt_tokens, completion_tokens = await asyncio.to_thread(
-            self._drive, workspace, self._prompt(state), heartbeat
+            self._drive, workspace, self._prompt(state), heartbeat, state.budget_usd
         )
         title, body = self._read_pr_file(workspace, state)
         state.completed_steps.append("edit")
@@ -179,19 +196,60 @@ class OpenHandsCodingWorker:
             completion_tokens=completion_tokens,
         )
 
-    def _drive(self, workspace: Path, prompt: str, heartbeat) -> tuple[float, int, int]:
+    def _drive(
+        self,
+        workspace: Path,
+        prompt: str,
+        heartbeat,
+        cost_limit: float | None,
+    ) -> tuple[float, int, int]:
         """Run the conversation to completion (worker thread; SDK is sync).
 
-        Metrics are read without defensive fallbacks on purpose: if the SDK's
-        stats API drifts, this raises and the attempt fails — silently
+        A guard runs on every agent event: it heartbeats, and stops the run early
+        (raising :class:`_RunAborted`) once accrued spend crosses ``cost_limit``
+        or wall-time crosses the deadline — the only in-thread hook that can
+        interrupt the sync ``run()``. It depends on the SDK invoking callbacks and
+        propagating their exceptions; if it doesn't, the run finishes and the
+        post-run ledger settle still fails an over-budget attempt closed.
+
+        Final metrics are read without defensive fallbacks on purpose: if the
+        SDK's stats API drifts, this raises and the attempt fails — silently
         reporting $0 would waltz straight past the fail-closed spend cap.
         """
-        conversation, cleanup = self._factory(
-            workspace, [lambda event: heartbeat()]
-        )
+        # Per-call holder (never instance state — one worker may drive concurrent
+        # attempts in separate threads); the guard reads spend off the live
+        # conversation once the factory has produced one.
+        conv_box: list = []
+        started = time.monotonic()
+        deadline = self.deadline_seconds
+
+        def guard(_event) -> None:
+            heartbeat()
+            conversation = conv_box[0] if conv_box else None
+            if conversation is not None and cost_limit is not None:
+                spent = self._accumulated_cost(conversation)
+                if spent is not None and spent > cost_limit:
+                    raise _RunAborted(
+                        f"in-run spend ${spent:.4f} reached the "
+                        f"${cost_limit:.2f} per-task cap"
+                    )
+            if deadline and time.monotonic() - started > deadline:
+                raise _RunAborted(
+                    f"exceeded the {deadline:.0f}s attempt deadline"
+                )
+
+        conversation, cleanup = self._factory(workspace, [guard])
+        conv_box.append(conversation)
         try:
             conversation.send_message(prompt)
-            conversation.run()
+            try:
+                conversation.run()
+            except _RunAborted as abort:
+                cost, pt, ct = self._safe_metrics(conversation)
+                raise WorkerRunAborted(
+                    abort.reason, cost_usd=cost, prompt_tokens=pt,
+                    completion_tokens=ct,
+                ) from abort
             metrics = conversation.conversation_stats.get_combined_metrics()
             usage = metrics.accumulated_token_usage
             return (
@@ -214,6 +272,38 @@ class OpenHandsCodingWorker:
                 cleanup()
             except Exception:  # noqa: BLE001 — teardown must not mask the run
                 logger.warning("openhands runtime cleanup failed", exc_info=True)
+
+    def _accumulated_cost(self, conversation) -> float | None:
+        """Best-effort spend-so-far for the in-run guard (never crashes the run).
+
+        Defensive on purpose — unlike the authoritative final read — so a
+        transient or absent stat mid-run doesn't turn every event into a failure;
+        the post-run ledger settle stays the fail-closed backstop.
+        """
+        try:
+            metrics = conversation.conversation_stats.get_combined_metrics()
+            cost = metrics.accumulated_cost
+            return float(cost) if cost is not None else None
+        except Exception:  # noqa: BLE001 — a stat blip must not kill the run
+            return None
+
+    def _safe_metrics(self, conversation) -> tuple[float, int, int]:
+        """Best-effort (cost, prompt, completion) for the abort path.
+
+        Records whatever spend can be read before failing an aborted attempt
+        closed; a read failure here degrades to zeros rather than masking the
+        abort with an unrelated exception.
+        """
+        try:
+            metrics = conversation.conversation_stats.get_combined_metrics()
+            usage = metrics.accumulated_token_usage
+            return (
+                float(metrics.accumulated_cost or 0.0),
+                int(usage.prompt_tokens or 0) if usage else 0,
+                int(usage.completion_tokens or 0) if usage else 0,
+            )
+        except Exception:  # noqa: BLE001 — best-effort audit on an aborted run
+            return (0.0, 0, 0)
 
     def _heartbeat(self, loop, state: "WorkerState", on_step: StepCallback | None):
         """A thread-safe, throttled bridge from SDK events to on_step.
