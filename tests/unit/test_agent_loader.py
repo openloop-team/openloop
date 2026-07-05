@@ -27,7 +27,7 @@ def test_load_agents_directory_keys_by_name():
 def test_rejects_unsupported_api_version(tmp_path):
     bad = tmp_path / "bad.yaml"
     bad.write_text(
-        "apiVersion: openloop.ai/v0\nkind: Agent\n"
+        "apiVersion: openloop.team/v0\nkind: Agent\n"
         "metadata: {name: x, workspace: y}\n"
         "spec: {model_policy: {default: openai/gpt-4o-mini}}\n"
     )
@@ -38,7 +38,7 @@ def test_rejects_unsupported_api_version(tmp_path):
 def test_rejects_missing_required_fields(tmp_path):
     bad = tmp_path / "bad.yaml"
     bad.write_text(
-        "apiVersion: openloop.ai/v1alpha1\nkind: Agent\n"
+        "apiVersion: openloop.team/v1alpha1\nkind: Agent\n"
         "metadata: {name: x, workspace: y}\nspec: {}\n"  # no model_policy
     )
     with pytest.raises(AgentConfigError):

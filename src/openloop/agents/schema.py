@@ -1,4 +1,4 @@
-"""Typed schema for the `apiVersion: openloop.ai/v1alpha1` Agent config.
+"""Typed schema for the `apiVersion: openloop.team/v1alpha1` Agent config.
 
 This is the in-code representation of `agents/*.yaml`. The schema is PRELIMINARY
 and tracks the README; expect it to evolve.
@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-API_VERSION = "openloop.ai/v1alpha1"
+API_VERSION = "openloop.team/v1alpha1"
 
 
 class Surface(BaseModel):

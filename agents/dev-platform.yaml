@@ -3,11 +3,11 @@
 # This is a PRELIMINARY schema (apiVersion v1alpha1) and will evolve.
 # Register it with the (placeholder) CLI:
 #   openloop agents apply -f agents/dev-platform.yaml
-apiVersion: openloop.ai/v1alpha1
+apiVersion: openloop.team/v1alpha1
 kind: Agent
 metadata:
-  name: dev-platform
-  workspace: acme
+  name: openloop
+  workspace: openloop-team
 
 spec:
   # Surfaces where this team agent is reachable

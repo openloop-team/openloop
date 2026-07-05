@@ -5,7 +5,7 @@
 #   - github issues:read / pulls:read as the approval-free read actions
 #   - approvals gating github writes + coding_worker.pr:write
 #   - budget: monthly 50 / per-task 0.50, on_exceeded block
-apiVersion: openloop.ai/v1alpha1
+apiVersion: openloop.team/v1alpha1
 kind: Agent
 metadata:
   name: dev-platform

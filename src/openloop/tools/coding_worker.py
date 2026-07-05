@@ -604,7 +604,7 @@ class GitWorkspaceOrchestrator:
 
             await self._git("add", "-A", cwd=workspace)
             await self._git(
-                "-c", "user.email=worker@openloop.ai",
+                "-c", "user.email=worker@openloop.team",
                 "-c", "user.name=OpenLoop coding worker",
                 "commit", "-m", edit.title, cwd=workspace,
             )

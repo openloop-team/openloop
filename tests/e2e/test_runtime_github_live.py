@@ -63,7 +63,7 @@ pytestmark = [
 def _build_agent(model: str) -> Agent:
     return Agent.model_validate(
         {
-            "apiVersion": "openloop.ai/v1alpha1",
+            "apiVersion": "openloop.team/v1alpha1",
             "kind": "Agent",
             "metadata": {"name": "e2e", "workspace": "e2e"},
             "spec": {

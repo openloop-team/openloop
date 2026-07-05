@@ -176,7 +176,7 @@ Agents are config-as-code (`apiVersion v1alpha1`, preliminary). Full example:
 [`agents/dev-platform.yaml`](agents/dev-platform.yaml).
 
 ```yaml
-apiVersion: openloop.ai/v1alpha1
+apiVersion: openloop.team/v1alpha1
 kind: Agent
 metadata: { name: dev-platform, workspace: acme }
 spec:

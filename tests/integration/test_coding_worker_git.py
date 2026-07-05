@@ -104,7 +104,7 @@ async def test_real_attempt_pushes_branch_with_edit(remote):
     assert _git("show", "openloop/job-j1:README.md", cwd=remote) == "hello world 1\n"
     # Commit is authored by the worker bot identity.
     log = _git("log", "-1", "--format=%an <%ae>", "openloop/job-j1", cwd=remote)
-    assert log.strip() == "OpenLoop coding worker <worker@openloop.ai>"
+    assert log.strip() == "OpenLoop coding worker <worker@openloop.team>"
 
 
 async def test_workspace_handed_to_worker_holds_no_credential(remote):

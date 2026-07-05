@@ -37,7 +37,7 @@ def _mcp_agent(permissions):
     """An agent allowed the given MCP tool names on a 'ci-logs' server."""
     return Agent.model_validate(
         {
-            "apiVersion": "openloop.ai/v1alpha1",
+            "apiVersion": "openloop.team/v1alpha1",
             "kind": "Agent",
             "metadata": {"name": "ci", "workspace": "acme"},
             "spec": {
