@@ -167,3 +167,30 @@ def test_surface_hint_shapes_system_prompt():
     # Other surfaces get the base prompt untouched.
     web = runtime._build_messages(Task(text="hi", surface="webhook"), [])
     assert "Slack" not in web[0]["content"]
+
+
+def test_tool_facts_ground_system_prompt():
+    # A tool-bearing agent is told the three facts it can't infer: tools are
+    # its only external reach, no fitting tool means saying so (not inventing
+    # data), and the loop's turn budget. The stated budget must track the
+    # loop's real cap so the two can't drift apart.
+    from openloop.runtime.pipeline import MAX_TOOL_ITERS
+
+    agent = load_agent(AGENT_YAML)
+    tools = ToolGateway(tools=[GitHubConnector(FakeGitHub())])
+    runtime = Runtime(agent, gateway=ScriptedGateway([]), tools=tools)
+
+    system = runtime._build_messages(Task(text="hi", surface="webhook"), [])[0][
+        "content"
+    ]
+    assert "never invent" in system
+    assert f"at most {MAX_TOOL_ITERS} model turns" in system
+
+    # Without tools, no tool facts — a capability claim about tools that
+    # don't exist would itself invite invention.
+    bare = Runtime(agent, gateway=ScriptedGateway([]))
+    bare_system = bare._build_messages(Task(text="hi", surface="webhook"), [])[0][
+        "content"
+    ]
+    assert "never invent" not in bare_system
+    assert "tool" not in bare_system.lower()

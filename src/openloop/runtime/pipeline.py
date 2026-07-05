@@ -48,6 +48,19 @@ SYSTEM_PROMPT = (
     "Be concise and helpful. When unsure, ask a clarifying question."
 )
 
+# Grounding facts the model cannot infer from its context: tools are its only
+# reach into external systems, and the loop expires after MAX_TOOL_ITERS model
+# turns. Stating both makes honest refusal the default behavior instead of a
+# model virtue. Appended only when the agent actually has tools — a capability
+# claim about tools that don't exist would itself be an invitation to invent.
+TOOL_FACTS = (
+    "Your tools are your only access to external systems and live data. "
+    "If no available tool fits a request, say plainly what you cannot do — "
+    "never invent data, links, or tool results. You have at most {max_iters} "
+    "model turns per task, and your final answer must fit within them, so "
+    "batch related tool calls and answer as soon as you have what you need."
+)
+
 # Per-surface output hints appended to the system prompt. These shape *what*
 # the model writes for the destination (length, structure); rendering the
 # model's standard Markdown is the delivery layer's job. Slack's server-side
@@ -148,6 +161,8 @@ class Runtime:
             name=self.agent.metadata.name,
             workspace=self.agent.metadata.workspace,
         )
+        if self.tools is not None and self.tools.tool_specs(self.agent).definitions:
+            system = f"{system}\n\n{TOOL_FACTS.format(max_iters=MAX_TOOL_ITERS)}"
         hint = SURFACE_HINTS.get(task.surface)
         if hint:
             system = f"{system}\n\n{hint}"
