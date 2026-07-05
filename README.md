@@ -154,20 +154,22 @@ usage, cost, and outcome to the audit trail and memory.
 ## Example: Slack
 
 ```
-@dev-platform  @agent summarize this thread and capture the decision
+#dev-platform
 
-agent  📝 Summary (last 24 messages):
-       • Moving ingestion off the legacy queue.
-       • Redis Streams chosen over Kafka for v1 (lower ops overhead).
-       • Owner: @maciag.artur, target: end of next sprint.
+@maciag.artur @openloop summarize this thread and capture the decision
 
-       🧠 Saved to channel memory: "Use Redis Streams for ingestion v1. Owner: @maciag.artur."
-       Open a GitHub issue to track it?
+@openloop 📝 Summary (last 24 messages):
+          • Moving ingestion off the legacy queue.
+          • Redis Streams chosen over Kafka for v1 (lower ops overhead).
+          • Owner: @maciag.artur, target: end of next sprint.
 
-@dev-platform  yes
+          🧠 Saved to channel memory: "Use Redis Streams for ingestion v1. Owner: @maciag.artur."
+          Open a GitHub issue to track it?
 
-agent  ⏳ Write action (create issue in openloop/ingestion) — approval required.
-       @maciag.artur / @maintainers, approve?   💸 est. $0.02 · claude-sonnet-4-6
+@maciag.artur yes
+
+@openloop ⏳ Write action (create issue in openloop-team/openloop) — approval required.
+          @maciag.artur, approve?   💸 est. $0.02 · claude-sonnet-4-6
 ```
 
 ## Example: agent config
