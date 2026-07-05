@@ -58,6 +58,9 @@ def resolution_message(inv, approver: str) -> str:
     if inv.status == "executed":
         detail = inv.result.summary if inv.result else (inv.message or "done")
         return f"✅ Approved by {approver} — {detail}"
+    if inv.status == "started":
+        detail = inv.result.summary if inv.result else (inv.message or "started")
+        return f"✅ Approved by {approver} — {detail}"
     if inv.status == "denied":
         return f"🚫 Denied by {approver}."
     # forbidden (not an approver / unknown / already resolved)

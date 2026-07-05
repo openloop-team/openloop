@@ -64,12 +64,15 @@ async def test_approval_event_drives_worker_and_opens_pr():
 
     resolved = await gw.resolve(pending.approval.id, "@maciag.artur", approve=True)
 
-    assert resolved.status == "executed"
+    assert resolved.status == "started"
     assert resolved.result.ok
-    assert resolved.result.data["job_id"] == job_id
-    assert resolved.result.data["pr_number"] == 1
+    assert resolved.result.data["instance_id"] == job_id
+    assert resolved.result.data["status"] == "running"
+    done = await engine.wait_background(job_id)
     # The workflow completed, the worker ran once, one draft PR opened.
-    assert (await store.get(job_id)).status == "completed"
+    assert done.status == "completed"
+    assert done.result["job_id"] == job_id
+    assert done.result["pr_number"] == 1
     assert runner.runs[0].job_id == job_id
     assert github.pulls[0]["draft"] is True
     assert github.pulls[0]["head"] == f"openloop/job-{job_id}"
@@ -89,8 +92,9 @@ async def test_resolve_recovers_when_workflow_was_never_started():
 
     resolved = await gw.resolve(pending.approval.id, "@maciag.artur", approve=True)
 
-    assert resolved.status == "executed" and resolved.result.ok
-    assert (await store.get(job_id)).status == "completed"
+    assert resolved.status == "started" and resolved.result.ok
+    done = await engine.wait_background(job_id)
+    assert done.status == "completed"
     assert len(github.pulls) == 1
 
 
@@ -106,7 +110,9 @@ async def test_result_includes_full_spend_telemetry():
     )
     resolved = await gw.resolve(pending.approval.id, "@maciag.artur", approve=True)
 
-    data = resolved.result.data
+    assert resolved.status == "started"
+    await engine.wait_background(pending.approval.args["job_id"])
+    data = (await store.get(pending.approval.args["job_id"])).result
     assert data["cost_usd"] == 0.2
     assert data["prompt_tokens"] == 120
     assert data["completion_tokens"] == 40
@@ -140,11 +146,12 @@ async def test_open_pr_failure_marks_workflow_failed():
 
     resolved = await gw.resolve(pending.approval.id, "@maciag.artur", approve=True)
 
-    assert resolved.status == "executed"
-    assert not resolved.result.ok
-    assert "failed" in resolved.result.summary
+    assert resolved.status == "started"
+    assert resolved.result.ok
+    await engine.wait_background(job_id)
     inst = await store.get(job_id)
     assert inst.status == "failed"
+    assert "422 blip" in inst.error
     # The worker step still completed (branch pushed); only PR open failed.
     assert "run_worker" in inst.completed_steps
 

@@ -50,6 +50,21 @@ ERROR_TEXT = "⚠️ This task was interrupted and could not be completed."
 HISTORY_TURN_LIMIT = 20
 
 
+def _is_non_terminal_invocation(inv) -> bool:
+    if inv.status == "started":
+        return True
+    data = getattr(getattr(inv, "result", None), "data", {}) or {}
+    return data.get("status") in {"running", "waiting"}
+
+
+def _approval_id_for_instance(instance) -> str | None:
+    state = getattr(instance, "state", {}) or {}
+    if state.get("approval_id"):
+        return state["approval_id"]
+    event = (state.get("events") or {}).get("await_approval") or {}
+    return event.get("approval_id")
+
+
 class SessionRunner:
     """Runs a task as a background session and delivers the answer back."""
 
@@ -62,6 +77,12 @@ class SessionRunner:
         self.runtime = runtime
         self.sessions = sessions
         self.delivery = delivery
+        engine = getattr(runtime, "engine", None)
+        if engine is not None and hasattr(engine, "add_terminal_callback"):
+            # Several runners may share one engine in tests or multi-surface
+            # wiring. All callbacks may fire; delivery stays correct because the
+            # persisted final_message_id/key guards below make it idempotent.
+            engine.add_terminal_callback(self._on_workflow_terminal)
 
     async def run(self, task: Task, target: SurfaceTarget) -> SurfaceSession:
         """Create/resume a session for ``task`` and deliver its outcome.
@@ -155,10 +176,11 @@ class SessionRunner:
     ) -> str:
         """Resolve an approval and continue the session that was waiting on it.
 
-        Resolves the approval through the tool gateway (which executes the write /
-        wakes its workflow), then — if a session is parked on this approval —
-        posts the outcome as the final answer in the original thread and closes
-        the session. Returns the status line for the button-click reply.
+        Resolves the approval through the tool gateway. Immediate tools still
+        deliver their outcome here; workflow-backed tools only return a started
+        status, leave the session waiting, and deliver later from the terminal
+        workflow callback or reconciler. Returns the status line for the
+        button-click reply.
 
         Delivery failures never block the button reply and always leave the
         session in a repairable state: a session left ``waiting`` retries the
@@ -215,6 +237,9 @@ class SessionRunner:
         repaired: list[str] = []
         for session in await self.sessions.recent(limit=1000):
             if session.status == "waiting":
+                if await self._deliver_terminal_approval(session):
+                    repaired.append(session.id)
+                    continue
                 if session.progress_message_id is None and session.approval_ids:
                     requests = await self._approval_requests(session.approval_ids)
                     if requests:
@@ -286,8 +311,28 @@ class SessionRunner:
     async def _continue_session(
         self, session: SurfaceSession, inv, approver: str, message: str
     ) -> None:
-        """Post a resolved approval's outcome in-thread and close the session."""
+        """Apply an approval outcome without treating non-terminal work as final."""
+        fresh = await self.sessions.get(session.id)
+        if fresh is not None:
+            session = fresh
+        if _is_non_terminal_invocation(inv):
+            if session.final_message_id is not None or session.status in TERMINAL:
+                return
+            session.status = "waiting"
+            session.result_summary = (
+                inv.result.summary if inv.result else (inv.message or message)
+            )
+            await self.sessions.upsert(session)
+            try:
+                await self._update_approval(session, message, [])
+            except Exception:  # noqa: BLE001 — buttons going stale is cosmetic
+                logger.exception(
+                    "failed to mark approval started for session %s", session.id
+                )
+            return
         if inv.status == "executed":
+            if session.final_message_id is not None:
+                return
             detail = inv.result.summary if inv.result else (inv.message or "done")
             final_text = detail
         elif inv.status == "denied":
@@ -307,6 +352,44 @@ class SessionRunner:
             logger.exception(
                 "failed to collapse approval card for session %s", session.id
             )
+
+    async def _on_workflow_terminal(self, instance) -> None:
+        approval_id = _approval_id_for_instance(instance)
+        if not approval_id:
+            return
+        session = await self.sessions.get_by_approval(approval_id)
+        if session is None:
+            return
+        await self._deliver_terminal_approval(session)
+
+    async def _deliver_terminal_approval(self, session: SurfaceSession) -> bool:
+        """Deliver a waiting session whose approved workflow has finished."""
+        tools = getattr(self.runtime, "tools", None)
+        engine = getattr(tools, "engine", None) or getattr(self.runtime, "engine", None)
+        if tools is None or engine is None:
+            return False
+        from openloop.surfaces.approvals import resolution_message
+        from openloop.tools.gateway import _workflow_invocation
+        from openloop.workflows.store import TERMINAL as WORKFLOW_TERMINAL
+
+        for approval_id in session.approval_ids:
+            request = await tools.approvals.get(approval_id)
+            if request is None or request.status != "approved":
+                continue
+            tool = getattr(tools, "_tools", {}).get(request.tool)
+            if not getattr(tool, "workflow", None):
+                continue
+            instance_id = request.args.get("job_id") or request.id
+            instance = await engine.store.get(instance_id)
+            if instance is None or instance.status not in WORKFLOW_TERMINAL:
+                continue
+            inv = _workflow_invocation(instance)
+            approver = request.decided_by or "an approver"
+            await self._continue_session(
+                session, inv, approver, resolution_message(inv, approver)
+            )
+            return True
+        return False
 
     async def _ensure_delivered(self, session: SurfaceSession) -> SurfaceSession:
         """Re-deliver an existing session's answer if it crashed before posting.
@@ -399,7 +482,7 @@ class SessionRunner:
         out = []
         for rid in approval_ids:
             req = await tools.approvals.get(rid)
-            if req is not None:
+            if req is not None and req.status == "pending":
                 out.append(req)
         return out
 

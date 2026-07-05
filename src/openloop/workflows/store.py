@@ -36,6 +36,7 @@ class WorkflowInstance:
     waiting_on: str | None = None  # name of the wait node it is parked at
     result: dict | None = None
     error: str | None = None
+    leased_until: datetime | None = None
     created_at: datetime = field(default_factory=_now)
     updated_at: datetime = field(default_factory=_now)
 

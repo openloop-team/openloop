@@ -227,6 +227,7 @@ async def test_spend_follows_the_invoking_agent_through_the_approval_hop(
     resolved = await gateway.resolve(
         pending.approval.id, "@maciag.artur", approve=True
     )
+    await engine.wait_background(pending.approval.args["job_id"])
 
     assert resolved.result.ok  # within docs-bot's cap, over the default's
     assert len(github.pulls) == 1

@@ -59,7 +59,10 @@ def build_coding_worker_workflow(
             # gateway (Phase 5) — the ledger attributes spend to it.
             agent=s.get("agent"),
         )
-        outcome = await orchestrator.run_attempt(state)
+        async def on_step(_: WorkerState) -> None:
+            await ctx.checkpoint()
+
+        outcome = await orchestrator.run_attempt(state, on_step=on_step)
         s["branch"] = outcome.branch
         s["title"] = outcome.title
         s["body"] = outcome.body

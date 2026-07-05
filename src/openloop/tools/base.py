@@ -27,7 +27,7 @@ class ActionSpec:
 class Invocation:
     """Outcome of asking the gateway to run an action."""
 
-    status: str  # executed | pending_approval | forbidden | denied
+    status: str  # executed | started | pending_approval | forbidden | denied
     result: ToolResult | None = None
     approval: ApprovalRequest | None = None
     message: str | None = None

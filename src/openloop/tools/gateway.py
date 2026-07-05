@@ -15,6 +15,7 @@ from openloop.approvals.store import (
 )
 from openloop.tools.base import Invocation, Tool, ToolResult, split_action
 from openloop.tools.policy import is_allowed
+from openloop.workflows.store import TERMINAL as WORKFLOW_TERMINAL
 
 if TYPE_CHECKING:
     from openloop.workflows.engine import WorkflowEngine
@@ -156,6 +157,11 @@ class ToolGateway:
         if request is None:
             return Invocation(status="forbidden", message="no such approval request")
         if request.status != "pending":
+            if request.status == "approved":
+                tool = self._tools.get(request.tool)
+                if self.engine is not None and getattr(tool, "workflow", None):
+                    instance = await self.engine.store.get(_instance_id(request))
+                    return _workflow_invocation(instance)
             return Invocation(
                 status="denied" if request.status == "denied" else "executed",
                 message=f"approval {request_id} already {request.status}",
@@ -180,20 +186,30 @@ class ToolGateway:
         tool = self._tools[request.tool]
 
         # Thin adapter: for a workflow-backed tool, approval is just an event that
-        # wakes the parked workflow — not a direct execute(). Do the durable work
-        # *before* flipping the approval to "approved", and make it idempotent, so
-        # a crash anywhere leaves the request still "pending" and re-resolvable:
+        # wakes the parked workflow — not a direct execute(). Record that durable
+        # wake *before* flipping the approval to "approved", so a crash before the
+        # state change leaves the request still "pending" and re-resolvable:
         #   - start() ensures the workflow exists (covers a crash in invoke() after
         #     the approval was created but before the workflow was started),
-        #   - send_event() then wakes it (a no-op if already past the wait node).
+        #   - send_event() records the approval event (a no-op if already past the
+        #     wait node),
+        #   - the rest of the workflow runs in the background after the button
+        #     handler can return "started".
         if self.engine is not None and getattr(tool, "workflow", None):
             instance_id = _instance_id(request)
-            await self.engine.start(tool.workflow, instance_id, dict(request.args))
+            await self.engine.start(
+                tool.workflow, instance_id, _workflow_initial_state(request)
+            )
             instance = await self.engine.send_event(
-                instance_id, "await_approval", {"approver": approver}
+                instance_id,
+                "await_approval",
+                {"approver": approver, "approval_id": request.id},
+                drive=False,
             )
             request.status = "approved"
             await self.approvals.update(request)
+            if instance is not None and instance.status not in WORKFLOW_TERMINAL:
+                self.engine.drive_background(instance_id)
             logger.info("approval %s approved by %s; workflow woken", request_id, approver)
             return _workflow_invocation(instance)
 
@@ -210,13 +226,19 @@ class ToolGateway:
         await self.engine.start(
             workflow,
             instance_id=_instance_id(request),
-            initial_state=dict(request.args),
+            initial_state=_workflow_initial_state(request),
         )
 
 
 def _instance_id(request: ApprovalRequest) -> str:
     """Workflow instance id for an approval — the job_id thread, else the req id."""
     return request.args.get("job_id") or request.id
+
+
+def _workflow_initial_state(request: ApprovalRequest) -> dict:
+    state = dict(request.args)
+    state.setdefault("approval_id", request.id)
+    return state
 
 
 def _workflow_invocation(instance) -> Invocation:
@@ -243,11 +265,15 @@ def _workflow_invocation(instance) -> Invocation:
         )
     # Still running/waiting (e.g. another wait node) — surface progress.
     return Invocation(
-        status="executed",
+        status="started",
         result=ToolResult(
             ok=True,
-            summary=f"workflow {instance.id} {instance.status}",
-            data={"status": instance.status, "waiting_on": instance.waiting_on},
+            summary=f"workflow {instance.id} started",
+            data={
+                "instance_id": instance.id,
+                "status": instance.status,
+                "waiting_on": instance.waiting_on,
+            },
         ),
     )
 

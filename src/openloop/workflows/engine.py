@@ -11,24 +11,31 @@ approval is just a wait node, and ``resolve`` becomes a thin adapter that emits
 the approval event. Steps must be **idempotent** — a crash between a step's side
 effect and its checkpoint write means the step re-runs on resume.
 
-Wakeups are in-process today (``send_event`` drives synchronously, and a startup
-reconciler re-drives anything left running). Redis pub/sub can later make wakeups
-cross-process without changing the workflow contract.
+Wakeups are in-process today (``send_event`` can drive synchronously or only
+record the wake, and a startup reconciler re-drives stale running instances).
+Redis pub/sub can later make wakeups cross-process without changing the workflow
+contract.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import timedelta
 
 from openloop.workflows.store import (
     TERMINAL,
     WorkflowInstance,
     WorkflowStore,
+    _now,
 )
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_LEASE_SECONDS = 30.0
 
 
 @dataclass(slots=True)
@@ -36,10 +43,16 @@ class WorkflowContext:
     """What a step sees: the live instance (mutate ``state`` / ``result``)."""
 
     instance: WorkflowInstance
+    _checkpoint: Callable[[WorkflowInstance], Awaitable[None]] | None = None
 
     @property
     def state(self) -> dict:
         return self.instance.state
+
+    async def checkpoint(self) -> None:
+        """Persist current state and renew this run's lease."""
+        if self._checkpoint is not None:
+            await self._checkpoint(self.instance)
 
 
 StepFn = Callable[[WorkflowContext], Awaitable[None]]
@@ -71,16 +84,34 @@ class WorkflowEngine:
     """Runs workflows durably: checkpoint per step, park on wait, resume on event."""
 
     def __init__(
-        self, store: WorkflowStore, workflows: dict[str, Workflow] | None = None
+        self,
+        store: WorkflowStore,
+        workflows: dict[str, Workflow] | None = None,
+        *,
+        lease_seconds: float = DEFAULT_LEASE_SECONDS,
     ) -> None:
         self.store = store
         self.workflows = workflows or {}
+        self.lease_seconds = lease_seconds
+        self._background: dict[str, asyncio.Task] = {}
+        self._active_drives: set[str] = set()
+        self._terminal_callbacks: list[
+            Callable[[WorkflowInstance], Awaitable[None]]
+        ] = []
 
     def register(self, workflow: Workflow) -> None:
         self.workflows[workflow.name] = workflow
 
+    def add_terminal_callback(
+        self, callback: Callable[[WorkflowInstance], Awaitable[None]]
+    ) -> None:
+        """Run ``callback`` after a workflow reaches a terminal state."""
+        self._terminal_callbacks.append(callback)
+
     async def checkpoint(self, instance: WorkflowInstance) -> None:
         """Persist mid-step state (e.g. after an idempotent write inside a step)."""
+        if instance.status == "running":
+            self._renew_lease(instance)
         await self.store.upsert(instance)
 
     async def start(
@@ -103,9 +134,14 @@ class WorkflowEngine:
         return await self._drive(instance)
 
     async def send_event(
-        self, instance_id: str, event: str, payload: dict | None = None
+        self,
+        instance_id: str,
+        event: str,
+        payload: dict | None = None,
+        *,
+        drive: bool = True,
     ) -> WorkflowInstance | None:
-        """Deliver an awaited event, waking a parked instance and driving on."""
+        """Deliver an awaited event, optionally driving the instance inline."""
         instance = await self.store.get(instance_id)
         if instance is None:
             return None
@@ -117,8 +153,36 @@ class WorkflowEngine:
         instance.completed_steps.append(event)
         instance.status = "running"
         instance.waiting_on = None
+        self._renew_lease(instance)
         await self.store.upsert(instance)
+        if not drive:
+            return instance
         return await self._drive(instance)
+
+    def drive_background(self, instance_id: str) -> asyncio.Task:
+        """Drive a running instance in a background task, coalesced per process."""
+        existing = self._background.get(instance_id)
+        if existing is not None and not existing.done():
+            return existing
+        task = asyncio.create_task(self._drive_from_store(instance_id))
+        self._background[instance_id] = task
+
+        def _forget(done: asyncio.Task) -> None:
+            self._background.pop(instance_id, None)
+            try:
+                done.result()
+            except Exception:
+                logger.exception("background workflow drive failed for %s", instance_id)
+
+        task.add_done_callback(_forget)
+        return task
+
+    async def wait_background(self, instance_id: str) -> WorkflowInstance | None:
+        """Test/helper hook: await an in-process background drive if one exists."""
+        task = self._background.get(instance_id)
+        if task is None:
+            return await self.store.get(instance_id)
+        return await task
 
     async def cancel(self, instance_id: str, reason: str = "") -> WorkflowInstance | None:
         """Cancel a parked/running instance (e.g. its approval was denied)."""
@@ -128,7 +192,9 @@ class WorkflowEngine:
         instance.status = "cancelled"
         instance.waiting_on = None
         instance.error = reason or None
+        instance.leased_until = None
         await self.store.upsert(instance)
+        await self._notify_terminal(instance)
         return instance
 
     async def resume_incomplete(self) -> list[str]:
@@ -140,8 +206,23 @@ class WorkflowEngine:
         :class:`~openloop.coordination.DistributedLock` so only the leader sweeps.
         """
         resumed: list[str] = []
+        now = _now()
         for instance in await self.store.recent(limit=1000):
             if instance.status != "running":
+                continue
+            if self._is_driving_in_process(instance.id):
+                logger.debug(
+                    "workflow %s is already being driven in this process; "
+                    "skipping resume",
+                    instance.id,
+                )
+                continue
+            if instance.leased_until is not None and instance.leased_until > now:
+                logger.debug(
+                    "workflow %s is still leased until %s; skipping resume",
+                    instance.id,
+                    instance.leased_until,
+                )
                 continue
             workflow = self.workflows.get(instance.workflow)
             if workflow is None:
@@ -152,7 +233,9 @@ class WorkflowEngine:
                 # completed — resuming would replay it. Abandon instead.
                 instance.status = "abandoned"
                 instance.error = "interrupted before a non-resumable step completed"
+                instance.leased_until = None
                 await self.store.upsert(instance)
+                await self._notify_terminal(instance)
                 continue
             logger.info("resuming workflow %s (%s)", instance.id, instance.workflow)
             await self._drive(instance)
@@ -161,11 +244,26 @@ class WorkflowEngine:
 
     async def _drive(self, instance: WorkflowInstance) -> WorkflowInstance:
         """Run steps from where the instance left off, checkpointing each."""
+        if instance.id in self._active_drives:
+            return instance
+        self._active_drives.add(instance.id)
+        try:
+            return await self._drive_active(instance)
+        finally:
+            self._active_drives.discard(instance.id)
+
+    async def _drive_active(self, instance: WorkflowInstance) -> WorkflowInstance:
+        """Run steps while this process owns the in-memory drive marker."""
         workflow = self.workflows.get(instance.workflow)
         if workflow is None:
             raise KeyError(f"unknown workflow {instance.workflow!r}")
         if instance.status in TERMINAL:
             return instance
+
+        instance.status = "running"
+        instance.waiting_on = None
+        self._renew_lease(instance)
+        await self.store.upsert(instance)
 
         for step in workflow.steps:
             if step.name in instance.completed_steps:
@@ -173,24 +271,78 @@ class WorkflowEngine:
             if step.wait:
                 instance.status = "waiting"
                 instance.waiting_on = step.name
+                instance.leased_until = None
                 await self.store.upsert(instance)
                 return instance
-            ctx = WorkflowContext(instance)
+            ctx = WorkflowContext(instance, self.checkpoint)
             try:
                 assert step.run is not None
-                await step.run(ctx)
+                self._renew_lease(instance)
+                await self.store.upsert(instance)
+                await self._run_step_with_lease(step, ctx)
             except Exception as exc:  # noqa: BLE001 — record failure, don't crash caller
                 instance.status = "failed"
                 instance.error = str(exc)
+                instance.leased_until = None
                 await self.store.upsert(instance)
                 logger.exception("workflow %s failed at step %s", instance.id, step.name)
+                await self._notify_terminal(instance)
                 return instance
             instance.completed_steps.append(step.name)
+            self._renew_lease(instance)
             await self.store.upsert(instance)  # checkpoint after each step
 
         instance.status = "completed"
+        instance.leased_until = None
         await self.store.upsert(instance)
+        await self._notify_terminal(instance)
         return instance
+
+    async def _drive_from_store(self, instance_id: str) -> WorkflowInstance | None:
+        instance = await self.store.get(instance_id)
+        if instance is None:
+            return None
+        return await self._drive(instance)
+
+    def _renew_lease(self, instance: WorkflowInstance) -> None:
+        instance.leased_until = _now() + timedelta(seconds=self.lease_seconds)
+
+    async def _run_step_with_lease(
+        self, step: Step, ctx: WorkflowContext
+    ) -> None:
+        ticker = asyncio.create_task(self._renew_lease_while_running(ctx.instance))
+        try:
+            assert step.run is not None
+            await step.run(ctx)
+        finally:
+            ticker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ticker
+
+    async def _renew_lease_while_running(self, instance: WorkflowInstance) -> None:
+        interval = max(self.lease_seconds / 3, 0.01)
+        while True:
+            await asyncio.sleep(interval)
+            if instance.status != "running":
+                return
+            await self.checkpoint(instance)
+
+    def _is_driving_in_process(self, instance_id: str) -> bool:
+        if instance_id in self._active_drives:
+            return True
+        task = self._background.get(instance_id)
+        return task is not None and not task.done()
+
+    async def _notify_terminal(self, instance: WorkflowInstance) -> None:
+        if instance.status not in TERMINAL:
+            return
+        for callback in list(self._terminal_callbacks):
+            try:
+                await callback(instance)
+            except Exception:
+                logger.exception(
+                    "workflow terminal callback failed for %s", instance.id
+                )
 
 
 def _has_pending_non_resumable_step(

@@ -5,8 +5,9 @@ mention → progress → final / waiting / interrupted flows with idempotent del
 (a duplicate event never starts a second turn or posts a second answer).
 """
 
-from pathlib import Path
+import asyncio
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -21,12 +22,15 @@ from openloop.sessions import (
     SurfaceTarget,
 )
 from openloop.tools import ToolGateway
+from openloop.tools.coding_worker import CodingWorkerConnector
 from openloop.tools.github import GitHubConnector
 from openloop.usage import InMemoryUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowInstance
+from openloop.workflows.coding_worker import build_coding_worker_workflow
 from openloop.testing import (
     FakeGitHub,
     FakeSurfaceDelivery,
+    FakeWorkerOrchestrator,
     ScriptedGateway,
     tool_call_response,
 )
@@ -228,6 +232,69 @@ async def test_non_approver_leaves_session_waiting():
     assert delivery.finals == []
 
 
+async def test_workflow_approval_waits_for_background_terminal_result():
+    class PausedOrchestrator(FakeWorkerOrchestrator):
+        def __init__(self):
+            super().__init__(title="Add retries")
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def run_attempt(self, state, on_step=None):
+            self.started.set()
+            await self.release.wait()
+            return await super().run_attempt(state, on_step=on_step)
+
+    agent = load_agent(AGENT_YAML)
+    engine = WorkflowEngine(InMemoryWorkflowStore())
+    runner_impl = PausedOrchestrator()
+    github = FakeGitHub()
+    engine.register(build_coding_worker_workflow(runner_impl, github))
+    tools = ToolGateway(
+        tools=[GitHubConnector(github), CodingWorkerConnector(runner_impl, github)],
+        engine=engine,
+    )
+    sessions = InMemorySurfaceSessionStore()
+    delivery = FakeSurfaceDelivery()
+    runtime = Runtime(
+        agent,
+        gateway=ScriptedGateway([
+            tool_call_response(
+                "m",
+                [("c1", "coding_worker_pr_write",
+                  {"repo": "acme/x", "instruction": "add retries"})],
+            ),
+        ]),
+        tools=tools,
+        usage=InMemoryUsageStore(),
+        memory=InMemoryStore(),
+        engine=engine,
+    )
+    runner = SessionRunner(runtime, sessions, delivery)
+    session = await runner.run(_task("open a PR"), _target())
+    approval_id = session.approval_ids[0]
+    request = await tools.approvals.get(approval_id)
+    job_id = request.args["job_id"]
+
+    message = await runner.resolve_approval(
+        approval_id, "@maciag.artur", approve=True
+    )
+
+    assert message.startswith("✅ Approved by @maciag.artur")
+    await asyncio.wait_for(runner_impl.started.wait(), timeout=1)
+    still_waiting = await sessions.get(session.id)
+    assert still_waiting.status == "waiting"
+    assert delivery.finals == []
+
+    runner_impl.release.set()
+    done = await engine.wait_background(job_id)
+
+    assert done.status == "completed"
+    completed = await sessions.get(session.id)
+    assert completed.status == "completed"
+    assert completed.final_message_id is not None
+    assert "opened draft PR #1" in delivery.finals[-1]["text"]
+
+
 async def test_failed_outcome_delivery_is_repaired_on_second_click():
     # The write succeeds but the Slack post_final fails the first time. The session
     # is left terminal-without-final; a second click must re-deliver the answer
@@ -303,6 +370,59 @@ async def test_reconcile_recovers_crashed_turn_from_completed_workflow():
 
     assert delivery.finals[-1]["text"] == "recovered answer"
     assert (await sessions.get("s2")).status == "completed"
+
+
+async def test_reconcile_delivers_approved_workflow_waiting_session():
+    agent = load_agent(AGENT_YAML)
+    engine = WorkflowEngine(InMemoryWorkflowStore())
+    worker = FakeWorkerOrchestrator()
+    github = FakeGitHub()
+    engine.register(build_coding_worker_workflow(worker, github))
+    tools = ToolGateway(
+        tools=[GitHubConnector(github), CodingWorkerConnector(worker, github)],
+        engine=engine,
+    )
+    pending = await tools.invoke(
+        agent,
+        "coding_worker.pr:write",
+        {"repo": "acme/x", "instruction": "x"},
+    )
+    request = pending.approval
+    request.status = "approved"
+    request.decided_by = "@maciag.artur"
+    await tools.approvals.update(request)
+    job_id = request.args["job_id"]
+    inst = await engine.store.get(job_id)
+    inst.status = "completed"
+    inst.waiting_on = None
+    inst.leased_until = None
+    inst.result = {"summary": "opened draft PR #7 in acme/x"}
+    await engine.store.upsert(inst)
+
+    sessions = InMemorySurfaceSessionStore()
+    delivery = FakeSurfaceDelivery()
+    runtime = Runtime(
+        agent,
+        gateway=ScriptedGateway([]),
+        tools=tools,
+        usage=InMemoryUsageStore(),
+        memory=InMemoryStore(),
+        engine=engine,
+    )
+    runner = SessionRunner(runtime, sessions, delivery)
+    await sessions.upsert(SurfaceSession(
+        id="s-approved",
+        target=_target("ev-approved"),
+        status="waiting",
+        approval_ids=[request.id],
+        progress_message_id="p0",
+    ))
+
+    repaired = await runner.reconcile()
+
+    assert repaired == ["s-approved"]
+    assert delivery.finals[-1]["text"] == "opened draft PR #7 in acme/x"
+    assert (await sessions.get("s-approved")).status == "completed"
 
 
 async def test_reconcile_posts_interrupted_notice_for_abandoned_turn():
