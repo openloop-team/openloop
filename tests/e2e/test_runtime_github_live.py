@@ -31,12 +31,14 @@ APPROVER = "@e2e-runner"
 
 
 def _model() -> str | None:
+    # This test exercises the live tool loop, so it needs a model that picks
+    # tools reliably — mini/haiku-class models flake here.
     if os.environ.get("E2E_MODEL"):
         return os.environ["E2E_MODEL"]
-    if os.environ.get("OPENAI_API_KEY"):
-        return "openai/gpt-4o-mini"
     if os.environ.get("ANTHROPIC_API_KEY"):
-        return "anthropic/claude-3-5-haiku-latest"
+        return "anthropic/claude-sonnet-4-6"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai/gpt-4o"
     return None
 
 

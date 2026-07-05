@@ -24,10 +24,10 @@ spec:
     retention_days: 90
 
   model_policy:
-    default: openai/gpt-4o-mini
+    default: anthropic/claude-sonnet-4-6
     routes:
       - match: { task: summarize }
-        model: groq/llama-3.1-8b-instant
+        model: openai/gpt-4o-mini
       - match: { task: code }
         model: anthropic/claude-opus-4-8
       - match: { task: investigate }

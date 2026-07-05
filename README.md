@@ -167,7 +167,7 @@ agent  📝 Summary (last 24 messages):
 @dev-platform  yes
 
 agent  ⏳ Write action (create issue in openloop/ingestion) — approval required.
-       @maciag.artur / @maintainers, approve?   💸 est. $0.004 · gpt-4o-mini
+       @maciag.artur / @maintainers, approve?   💸 est. $0.02 · claude-sonnet-4-6
 ```
 
 ## Example: agent config
@@ -185,9 +185,9 @@ spec:
     - { type: discord, channel: "eng" }
   memory: { scope: channel, backend: postgres, retention_days: 90 }
   model_policy:
-    default: openai/gpt-4o-mini
+    default: anthropic/claude-sonnet-4-6
     routes:
-      - { match: { task: code }, model: anthropic/claude-sonnet-4-6 }
+      - { match: { task: summarize }, model: openai/gpt-4o-mini }
   tools:
     - { name: github, type: native, permissions: ["issues:write", "pulls:read"] }
   approvals:

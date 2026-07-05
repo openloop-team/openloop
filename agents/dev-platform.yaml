@@ -23,12 +23,14 @@ spec:
     backend: postgres        # pgvector-backed
     retention_days: 90
 
-  # Which models handle which kinds of task
+  # Which models handle which kinds of task. The default is what drives the
+  # tool loop (tasks arrive without a kind), so it must be a model that picks
+  # tools reliably — mini-class models are summarize-only.
   model_policy:
-    default: openai/gpt-4o-mini
+    default: anthropic/claude-sonnet-4-6
     routes:
       - match: { task: summarize }
-        model: groq/llama-3.1-8b-instant
+        model: openai/gpt-4o-mini
       - match: { task: code }
         model: anthropic/claude-opus-4-8
       - match: { task: investigate }
