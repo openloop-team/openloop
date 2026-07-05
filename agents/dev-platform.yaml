@@ -56,15 +56,31 @@ spec:
       # names the exact server tools the agent may call (verified against the
       # startup discovery log; e.g. single-issue/PR reads are the consolidated
       # issue_read / pull_request_read tools, not get_issue / get_pull_request).
+      #
+      # X-MCP-Toolsets pins which server toolsets are exposed. It REPLACES the
+      # server default (not additive), so it must list every toolset the tools
+      # below live in: `issues` (list_issues, issue_read, search_issues),
+      # `pull_requests` (list_pull_requests, pull_request_read), and `actions`
+      # for CI/GitHub Actions reads. Pinning is also least-privilege — it keeps
+      # the discovery surface to these three groups (12 read tools) rather than
+      # the ~28-tool default, and shields us from server-side default drift.
       credentials: github
       headers:
         X-MCP-Readonly: "true"
+        X-MCP-Toolsets: "issues,pull_requests,actions"
       permissions:
         - list_issues
         - issue_read
         - search_issues
         - list_pull_requests
         - pull_request_read
+        # GitHub Actions / CI reads (consolidated tools, readonly-safe):
+        #   actions_list — list workflows, runs, jobs, artifacts
+        #   actions_get  — get a workflow / run / job / artifact by id
+        #   get_job_logs — job logs (single job_id, or run_id + failed_only)
+        - actions_list
+        - actions_get
+        - get_job_logs
     - name: coding_worker
       type: native
       # Runs the worker (clone → model-edit → commit → push) and opens a draft PR.
