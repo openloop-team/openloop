@@ -13,21 +13,24 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates tmux \
     && rm -rf /var/lib/apt/lists/*
 
-# Node + the Claude Code CLI for the EXPERIMENTAL claude worker backend
-# (CODING_WORKER_BACKEND=claude), which shells out to `claude -p`. Baked in
-# rather than mounted because the CLI is a Node app — mounting the launcher
-# alone wouldn't bring its runtime. Auth is separate (a subscription token in
-# CLAUDE_CODE_OAUTH_TOKEN, or a mounted ~/.claude — see the deploy compose).
-# Without this binary the claude backend's probe fails at boot and the coding
-# worker is disabled (fail-closed) — it never runs half-configured. Unused by
-# the default builtin/openhands backends, so it only costs image size.
+# The Claude Code CLI for the EXPERIMENTAL claude worker backend
+# (CODING_WORKER_BACKEND=claude), which shells out to `claude -p`. Installed via
+# the native installer (`npm install -g` is deprecated); it drops a
+# self-contained binary into ~/.local/bin — no Node runtime needed. `stable` is
+# the stability channel; replace it with an explicit X.Y.Z to freeze the CLI
+# across rebuilds (the installer also accepts `latest`). Auth is separate (a
+# subscription token in CLAUDE_CODE_OAUTH_TOKEN, or a mounted ~/.claude — see
+# the deploy compose). Without this binary the claude backend's probe fails at
+# boot and the coding worker is disabled (fail-closed) — it never runs
+# half-configured. Unused by the default builtin/openhands backends.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g @anthropic-ai/claude-code \
+    && curl -fsSL https://claude.ai/install.sh | bash -s -- stable \
     && apt-get purge -y curl && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
+# The native installer puts `claude` in ~/.local/bin (/root here — the runtime
+# runs as root), which is not on the default PATH.
+ENV PATH="/root/.local/bin:${PATH}"
 
 # Static docker CLI so CODING_WORKER_SANDBOX=docker works from inside this
 # container (sibling containers over the mounted /var/run/docker.sock — see
