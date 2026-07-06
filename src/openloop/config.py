@@ -67,16 +67,33 @@ class Settings(BaseSettings):
     #   "openhands" — the heavy agentic worker (needs the `openhands` extra
     #               AND a per-task budget on the owning agent — the run is
     #               refused without a fail-closed spend cap).
+    #   "claude"    — EXPERIMENTAL / personal use: drive the `claude` CLI in
+    #               headless mode (`claude -p`), authenticating with whatever
+    #               `claude` is logged into, INCLUDING a Pro/Max subscription.
+    #               Host sandbox only; bounded by --max-turns + the deadline
+    #               (its load-bearing fail-closed cap, since the subscription
+    #               dollar signal is unreliable). See claude_worker.py for the
+    #               ToS/reversibility caveats before enabling on a team surface.
     # FAIL-CLOSED: an unknown value disables the coding worker loudly; a typo
     # in a spend/safety setting must not select a different worker.
     coding_worker_backend: str = "builtin"
-    # In-run iteration cap handed to the OpenHands conversation. The budget
-    # cap is enforced by the worker-spend ledger (per_task_usd), not in-run.
+    # In-run iteration cap handed to the OpenHands conversation / claude
+    # `--max-turns`. For openhands the budget cap is enforced by the worker-spend
+    # ledger (per_task_usd), not in-run; for claude this is half the fail-closed
+    # bound (the deadline is the other half).
     coding_worker_max_iterations: int = 100
-    # Wall-clock ceiling for a single OpenHands attempt, checked between agent
-    # events (a soft deadline: it cannot interrupt a truly-frozen single call —
-    # that needs the docker sandbox to hard-kill the container). 0 disables it.
+    # Wall-clock ceiling for a single attempt. For OpenHands it is a soft deadline
+    # checked between agent events (it cannot interrupt a truly-frozen single call
+    # — that needs the docker sandbox to hard-kill the container); 0 disables it.
+    # For the claude backend it is a HARD kill of the subprocess and its
+    # load-bearing fail-closed bound, so a value > 0 is required there.
     coding_worker_deadline_seconds: float = 600.0
+    # Path to the `claude` CLI for CODING_WORKER_BACKEND=claude.
+    coding_worker_claude_bin: str = "claude"
+    # Headless permission handling for the claude backend. "acceptEdits" (default)
+    # auto-accepts file edits; "bypassPermissions" grants full autonomy (shell,
+    # tests) at higher risk — recommended only inside a sandbox.
+    coding_worker_claude_permission_mode: str = "acceptEdits"
     # Agent-server image for the OpenHands docker runtime
     # (CODING_WORKER_SANDBOX=docker + backend=openhands).
     coding_worker_openhands_image: str = (

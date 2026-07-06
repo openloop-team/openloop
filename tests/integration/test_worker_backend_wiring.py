@@ -14,6 +14,7 @@ from openloop.agents import load_agent
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.config import Settings
+from openloop.tools.claude_worker import ClaudeCodeCodingWorker
 from openloop.tools.coding_worker import BuiltinCodingWorker
 from openloop.tools.openhands_worker import (
     OpenHandsCodingWorker,
@@ -65,7 +66,7 @@ def test_retired_backend_names_fail_closed(retired, caplog):
 
     assert "coding_worker" not in gateway._tools
     assert "unknown CODING_WORKER_BACKEND" in caplog.text
-    assert "expected builtin|openhands" in caplog.text
+    assert "expected builtin|openhands|claude" in caplog.text
 
 
 def test_unknown_backend_fails_closed(caplog):
@@ -73,7 +74,7 @@ def test_unknown_backend_fails_closed(caplog):
         gateway = _gateway(_settings(coding_worker_backend="opnhands"))
     assert "coding_worker" not in gateway._tools
     assert "unknown CODING_WORKER_BACKEND" in caplog.text
-    assert "expected builtin|openhands" in caplog.text
+    assert "expected builtin|openhands|claude" in caplog.text
     assert "CODING WORKER DISABLED" in caplog.text
 
 
@@ -194,3 +195,59 @@ def test_openhands_with_sandbox_typo_fails_closed(monkeypatch, caplog):
         )
     assert "coding_worker" not in gateway._tools
     assert "unknown CODING_WORKER_SANDBOX" in caplog.text
+
+
+def test_claude_registers_in_host_mode(monkeypatch):
+    monkeypatch.setattr(ClaudeCodeCodingWorker, "probe", lambda self: None)
+    gateway = _gateway(_settings(coding_worker_backend="claude"))
+
+    worker = gateway._tools["coding_worker"].orchestrator.worker
+    assert isinstance(worker, ClaudeCodeCodingWorker)
+    # --max-turns + the deadline are threaded from settings as the fail-closed
+    # bound; the deadline default (600) is passed through, not disabled.
+    assert worker.max_turns == 100
+    assert worker.deadline_seconds == 600.0
+
+
+def test_claude_docker_mode_fails_closed(monkeypatch, caplog):
+    # Docker isolation for the claude backend is not implemented: requesting it
+    # must disable the worker loudly, never silently run on the host.
+    monkeypatch.setattr(ClaudeCodeCodingWorker, "probe", lambda self: None)
+    with caplog.at_level("ERROR"):
+        gateway = _gateway(
+            _settings(coding_worker_backend="claude", coding_worker_sandbox="docker")
+        )
+    assert "coding_worker" not in gateway._tools
+    assert "supports only CODING_WORKER_SANDBOX=host" in caplog.text
+    assert "CODING WORKER DISABLED" in caplog.text
+
+
+def test_claude_registers_without_a_per_task_dollar_cap(monkeypatch):
+    # Unlike openhands, the claude backend's fail-closed bound is turns +
+    # deadline (the subscription dollar signal is unreliable), so it does NOT
+    # require a per-task dollar cap to register. The ledger still rides along.
+    monkeypatch.setattr(ClaudeCodeCodingWorker, "probe", lambda self: None)
+    uncapped = load_agent(AGENT_YAML)
+    uncapped.spec.budget.per_task_usd = None
+
+    gateway = _gateway(
+        _settings(coding_worker_backend="claude"),
+        agents={"dev-platform": uncapped},
+    )
+
+    assert "coding_worker" in gateway._tools
+    assert gateway._tools["coding_worker"].orchestrator._ledger is not None
+
+
+def test_claude_probe_failure_fails_closed(monkeypatch, caplog):
+    def boom(self):
+        from openloop.tools.claude_worker import ClaudeCodeUnavailable
+
+        raise ClaudeCodeUnavailable("claude CLI not found")
+
+    monkeypatch.setattr(ClaudeCodeCodingWorker, "probe", boom)
+    with caplog.at_level("ERROR"):
+        gateway = _gateway(_settings(coding_worker_backend="claude"))
+    assert "coding_worker" not in gateway._tools
+    assert "claude backend probe failed" in caplog.text
+    assert "CODING WORKER DISABLED" in caplog.text

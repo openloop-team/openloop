@@ -389,6 +389,23 @@ the workflow.
   capped **fail-closed** by the owning agent's `per_task_usd` before anything
   is pushed — on both durable paths — and the agentic backend refuses to
   register without that cap
+- [x] Claude Code worker backend (`CODING_WORKER_BACKEND=claude`) —
+  **experimental, personal use only**: drives the `claude` CLI in headless mode
+  (`claude -p`) over the same prepared, credential-free workspace, authenticating
+  with whatever `claude` is logged into — **including a Pro/Max subscription**.
+  Because the subscription dollar signal is unreliable (`total_cost_usd` is an
+  API-equivalent estimate, often `0`), the load-bearing **fail-closed** bound is
+  resource-based — `--max-turns` **and** a hard wall-clock deadline (the
+  subprocess is killed on expiry) — while the spend ledger still records the
+  estimate and enforces `per_task_usd` when it is non-zero. Host sandbox only
+  (docker isolation for this backend is not implemented; requesting it fails
+  closed). ⚠️ Anthropic designs the subscription for individual use through its
+  first-party apps, not for powering a shared team runtime — pooling one
+  subscription across a team surface is outside that intent and may violate the
+  Consumer Terms. Availability rides on a private CLI/auth contract that can
+  change between `claude` releases. Keep it off by default; for anything shared
+  or production use metered API keys (`builtin`/`openhands`) or a local model.
+  The backend seam makes reverting one env var
 - [x] Budget/usage unification + throughput limits (Phase 5) — worker spend is
   attributed to the *invoking* agent (threaded through the approval args, so
   multi-agent configs charge and cap the right budget) and gated by that

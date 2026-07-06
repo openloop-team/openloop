@@ -99,6 +99,10 @@ from openloop.tools.coding_worker import (
 )
 from openloop.tools.github import GitHubConnector, HttpGitHubClient
 from openloop.tools.mcp import HttpMCPClient, MCPConnector
+from openloop.tools.claude_worker import (
+    ClaudeCodeCodingWorker,
+    ClaudeCodeUnavailable,
+)
 from openloop.tools.workspace_pool import WarmWorkspacePool
 from openloop.tools.openhands_worker import (
     OpenHandsCodingWorker,
@@ -490,8 +494,36 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
             settings.coding_worker_sandbox,
         )
         return worker
+    if backend == "claude":
+        # EXPERIMENTAL / personal use — see claude_worker.py. Host sandbox only:
+        # a containerized `claude` (workspace mounted, subscription credentials
+        # forwarded) is not implemented, so fail CLOSED rather than silently
+        # running model-generated edits on the host under a different boundary
+        # than the operator asked for.
+        if settings.coding_worker_sandbox != "host":
+            log.error(
+                "CODING_WORKER_BACKEND=claude supports only "
+                "CODING_WORKER_SANDBOX=host today (got %r); docker isolation for "
+                "the claude backend is not implemented — failing closed",
+                settings.coding_worker_sandbox,
+            )
+            return None
+        claude_worker = ClaudeCodeCodingWorker(
+            settings.coding_worker_model,
+            claude_bin=settings.coding_worker_claude_bin,
+            max_turns=settings.coding_worker_max_iterations,
+            deadline_seconds=settings.coding_worker_deadline_seconds or None,
+            permission_mode=settings.coding_worker_claude_permission_mode,
+        )
+        try:
+            claude_worker.probe()
+        except ClaudeCodeUnavailable:
+            log.error("claude backend probe failed", exc_info=True)
+            return None
+        return claude_worker
     log.error(
-        "unknown CODING_WORKER_BACKEND=%r (expected builtin|openhands)", backend
+        "unknown CODING_WORKER_BACKEND=%r (expected builtin|openhands|claude)",
+        backend,
     )
     return None
 
