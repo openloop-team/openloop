@@ -13,6 +13,22 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates tmux \
     && rm -rf /var/lib/apt/lists/*
 
+# Node + the Claude Code CLI for the EXPERIMENTAL claude worker backend
+# (CODING_WORKER_BACKEND=claude), which shells out to `claude -p`. Baked in
+# rather than mounted because the CLI is a Node app — mounting the launcher
+# alone wouldn't bring its runtime. Auth is separate (a subscription token in
+# CLAUDE_CODE_OAUTH_TOKEN, or a mounted ~/.claude — see the deploy compose).
+# Without this binary the claude backend's probe fails at boot and the coding
+# worker is disabled (fail-closed) — it never runs half-configured. Unused by
+# the default builtin/openhands backends, so it only costs image size.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g @anthropic-ai/claude-code \
+    && apt-get purge -y curl && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
 # Static docker CLI so CODING_WORKER_SANDBOX=docker works from inside this
 # container (sibling containers over the mounted /var/run/docker.sock — see
 # docker-compose.deploy.yml). CLI only, no daemon; major version pinned so a
