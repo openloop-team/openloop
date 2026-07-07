@@ -11,6 +11,12 @@
 
 services:
   runtime:
+    # Unix socket authorization uses the host socket's numeric GID. This lets
+    # a non-root runtime connect without changing the socket mode or running
+    # the controller as root. Set DOCKER_GID from the daemon host with:
+    #   stat -c '%g' /var/run/docker.sock
+    group_add:
+      - ${DOCKER_GID:-0}
     environment:
       # Sibling containers resolve bind mounts on the Docker daemon's host.
       # Both workers therefore use children of the same host-visible root that
