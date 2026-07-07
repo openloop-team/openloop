@@ -30,6 +30,7 @@ services:
   runtime:
     build: .
     restart: unless-stopped
+    user: "1000:1000"
     env_file: .env
     # Derive the DB URL from the same vars Postgres uses, pointed at the
     # in-network service host. Overrides any DATABASE_URL in .env so the
