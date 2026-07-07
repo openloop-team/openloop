@@ -59,6 +59,13 @@ def test_example_github_mcp_exposes_ci_actions():
     assert mcp.headers.get("X-MCP-Readonly") == "true"
 
 
+def test_coding_worker_runs_as_non_root():
+    agent = load_agent(EXAMPLE)
+    worker = next(t for t in agent.spec.tools if t.name == "coding_worker")
+    assert worker.run_as_user is not None, "coding_worker must declare run_as_user"
+    assert worker.run_as_user != 0, "coding_worker must not run as root (uid 0)"
+
+
 def test_rejects_unsupported_api_version(tmp_path):
     bad = tmp_path / "bad.yaml"
     bad.write_text(
