@@ -57,6 +57,8 @@ class Tool(BaseModel):
     # X-MCP-Readonly).
     credentials: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
+    # UID the worker process runs as; 0 (root) is forbidden in production.
+    run_as_user: int | None = None
 
 
 class Approvals(BaseModel):

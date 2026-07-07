@@ -85,6 +85,7 @@ spec:
       type: native
       # Runs the worker (clone → model-edit → commit → push) and opens a draft PR.
       permissions: ["pr:write"]
+      run_as_user: 1000
 
   # Risky / write actions require a human
   approvals:
