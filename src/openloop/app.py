@@ -710,6 +710,11 @@ def create_app() -> FastAPI:
         if isinstance(threads, PostgresThreadRecordStore):
             try:
                 await threads.setup()
+                # A crashed drain leader leaves its active-turn claim set; clear
+                # stale claims at startup so threads aren't wedged (single-replica).
+                cleared = await threads.reset_active_claims()
+                if cleared:
+                    log.info("cleared %d stale thread claim(s) at startup", cleared)
                 log.info("thread-record backend: postgres")
             except Exception:
                 log.exception(

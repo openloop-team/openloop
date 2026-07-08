@@ -74,6 +74,36 @@ def _approval_id_for_instance(instance) -> str | None:
     return event.get("approval_id")
 
 
+def _inbox_payload(task: Task, target: SurfaceTarget) -> dict:
+    """Serialize just enough to reconstruct the task + delivery target at drain
+    time. History is intentionally omitted — it's rebuilt from the (by then
+    delivered) transcript when the turn actually runs."""
+    return {
+        "text": task.text,
+        "user": task.user,
+        "kind": task.kind,
+        "surface": target.surface,
+        "workspace": target.workspace,
+        "agent": target.agent,
+        "channel": target.channel,
+        "thread": target.thread,
+        "event_id": target.event_id,
+    }
+
+
+def _task_target_from_payload(p: dict) -> tuple[Task, SurfaceTarget]:
+    task = Task(
+        text=p["text"], surface=p["surface"], channel=p.get("channel"),
+        user=p.get("user"), kind=p.get("kind"),
+    )
+    target = SurfaceTarget(
+        surface=p["surface"], workspace=p["workspace"], agent=p["agent"],
+        channel=p.get("channel"), thread=p.get("thread"),
+        event_id=p.get("event_id"),
+    )
+    return task, target
+
+
 class SessionRunner:
     """Runs a task as a background session and delivers the answer back."""
 
@@ -162,6 +192,35 @@ class SessionRunner:
             return session
 
         return await self._deliver(session, response)
+
+    async def run_threaded(self, task: Task, target: SurfaceTarget) -> None:
+        """Serialize a thread's turns: enqueue this reply, then drain the thread's
+        inbox one turn at a time.
+
+        Two replies to the same thread must not run concurrently — the later one
+        has to see the earlier's delivered answer as context, and racing them would
+        also double-drive. So an inbound reply is appended to the durable inbox and
+        then the caller tries to become the thread's single drain leader
+        (``try_begin_turn``, an atomic CAS). The winner drains every queued turn via
+        :meth:`run` (itself idempotent on ``event_id``) until the inbox is empty,
+        then releases; a loser simply returns, its reply left for the leader. The
+        outer re-claim loop closes the window where a reply lands after the last
+        dequeue but before the release. Falls back to a direct :meth:`run` when
+        there is no thread store or no thread/event scope to serialize on.
+        """
+        if self.threads is None or target.thread is None or not target.event_id:
+            await self.run(task, target)
+            return
+        await self.threads.append_inbox(
+            target, target.event_id, _inbox_payload(task, target)
+        )
+        while await self.threads.try_begin_turn(target):
+            try:
+                while (item := await self.threads.next_inbox(target)) is not None:
+                    turn_task, turn_target = _task_target_from_payload(item.payload)
+                    await self.run(turn_task, turn_target)
+            finally:
+                await self.threads.end_turn(target)
 
     async def _deliver(self, session: SurfaceSession, response) -> SurfaceSession:
         if response.model == "error":

@@ -13,6 +13,7 @@ from openloop.sessions.store import (
     SurfaceTarget,
 )
 from openloop.sessions.threads import (
+    InboxItem,
     InMemoryThreadRecordStore,
     ThreadRecord,
     ThreadRecordStore,
@@ -22,6 +23,7 @@ from openloop.sessions.threads import (
 __all__ = [
     "Artifact",
     "Deliverable",
+    "InboxItem",
     "InMemorySurfaceSessionStore",
     "InMemoryThreadRecordStore",
     "Prose",

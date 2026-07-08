@@ -758,6 +758,49 @@ async def test_thread_store_records_fragment_and_feeds_followup():
     assert pairs.index(("assistant", "first answer")) < pairs.index(("user", "second question"))
 
 
+async def test_run_threaded_serializes_concurrent_replies():
+    # Phase C slice 2: two replies to the same thread arrive together; they must
+    # run one at a time, in order, and the second must see the first's answer.
+    threads = InMemoryThreadRecordStore()
+    gateway = ScriptedGateway([
+        ModelResponse(text="a1", model="m"),
+        ModelResponse(text="a2", model="m"),
+    ])
+    runner, _, delivery = _runner(gateway, threads=threads)
+
+    await asyncio.gather(
+        runner.run_threaded(_task("q1"), _target("ev1")),
+        runner.run_threaded(_task("q2"), _target("ev2")),
+    )
+
+    # Both answered, in order, exactly once — serialized, none dropped.
+    assert [f["text"] for f in delivery.finals] == ["a1", "a2"]
+    frags = await threads.replayable_transcript(_target("ev3"))
+    assert [(f.request, f.answer) for f in frags] == [("q1", "a1"), ("q2", "a2")]
+    # The second turn was driven AFTER the first delivered — it saw a1 as context.
+    pairs = [(m["role"], m.get("content")) for m in gateway.calls[1]["messages"]]
+    assert ("user", "q1") in pairs and ("assistant", "a1") in pairs
+
+
+async def test_run_threaded_dedupes_duplicate_event():
+    threads = InMemoryThreadRecordStore()
+    gateway = ScriptedGateway([ModelResponse(text="only", model="m")])
+    runner, _, delivery = _runner(gateway, threads=threads)
+
+    await runner.run_threaded(_task("q1"), _target("dup"))
+    await runner.run_threaded(_task("q1"), _target("dup"))  # same event_id
+
+    assert len(gateway.calls) == 1  # the model ran once (run() dedups on event_id)
+    assert [f["text"] for f in delivery.finals] == ["only"]
+
+
+async def test_run_threaded_falls_back_without_thread_store():
+    gateway = ScriptedGateway([ModelResponse(text="hi", model="m")])
+    runner, _, delivery = _runner(gateway)  # threads=None
+    await runner.run_threaded(_task("q"), _target("ev1"))
+    assert [f["text"] for f in delivery.finals] == ["hi"]
+
+
 async def test_apply_thread_history_reads_thread_store_over_sessions():
     # When a thread store is present, history comes from IT — not the per-session
     # scan. Prove it by seeding ONLY the thread store (sessions left empty).

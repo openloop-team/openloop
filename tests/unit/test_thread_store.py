@@ -90,3 +90,68 @@ async def test_get_or_create_is_idempotent():
     r1 = await store.get_or_create(scope)
     r2 = await store.get_or_create(scope)
     assert r1.scope.thread == r2.scope.thread == "100.1"
+
+
+# --- inbox + active-turn claim (Phase C) ---
+
+
+async def test_inbox_enqueue_dedup_and_ordered_drain():
+    store = InMemoryThreadRecordStore()
+    scope = _scope()
+    assert await store.append_inbox(scope, "e1", {"text": "one"}) is True
+    assert await store.append_inbox(scope, "e2", {"text": "two"}) is True
+    # A re-delivered event that is still pending does not enqueue twice.
+    assert await store.append_inbox(scope, "e1", {"text": "one"}) is False
+
+    assert await store.try_begin_turn(scope) is True
+    drained = []
+    while (item := await store.next_inbox(scope)) is not None:
+        drained.append(item.payload["text"])
+    assert drained == ["one", "two"]  # oldest-first
+
+
+async def test_try_begin_turn_is_exclusive():
+    store = InMemoryThreadRecordStore()
+    scope = _scope()
+    await store.append_inbox(scope, "e1", {"text": "one"})
+
+    assert await store.try_begin_turn(scope) is True   # first handler wins
+    assert await store.try_begin_turn(scope) is False  # second is refused
+
+    await store.end_turn(scope)
+    # After release, if work remains it can be re-claimed (drain-race guard).
+    await store.append_inbox(scope, "e2", {"text": "two"})
+    assert await store.try_begin_turn(scope) is True
+
+
+async def test_try_begin_turn_false_on_empty_inbox():
+    # A free thread with nothing queued is not claimed — so the drain loop's
+    # re-claim after release can't spin on an empty inbox.
+    store = InMemoryThreadRecordStore()
+    scope = _scope()
+    assert await store.try_begin_turn(scope) is False
+
+
+async def test_claim_is_per_thread_scope():
+    store = InMemoryThreadRecordStore()
+    a, b = _scope(thread="100.1"), _scope(thread="200.2")
+    await store.append_inbox(a, "e1", {"text": "a"})
+    await store.append_inbox(b, "e1", {"text": "b"})
+
+    assert await store.try_begin_turn(a) is True
+    # A different thread scope is independently claimable while `a` is held.
+    assert await store.try_begin_turn(b) is True
+
+
+async def test_reset_active_claims_unwedges_a_crashed_leader():
+    # A drain leader that crashed left its claim held; a startup reset clears it so
+    # the thread is claimable again (its queued work is still pending).
+    store = InMemoryThreadRecordStore()
+    scope = _scope()
+    await store.append_inbox(scope, "e1", {"text": "one"})
+    assert await store.try_begin_turn(scope) is True   # "leader" claims...
+    # ...then "crashes" (never releases). A second claim is refused.
+    assert await store.try_begin_turn(scope) is False
+
+    assert await store.reset_active_claims() == 1
+    assert await store.try_begin_turn(scope) is True   # claimable again

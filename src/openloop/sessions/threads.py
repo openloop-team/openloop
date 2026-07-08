@@ -25,6 +25,7 @@ implementation, sharing ``SurfaceTarget`` for scope and the same pool as
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
@@ -69,6 +70,20 @@ class TranscriptFragment:
 
 
 @dataclass(slots=True)
+class InboxItem:
+    """One queued inbound reply awaiting its turn on the thread.
+
+    ``event_id`` is the dedup key (a re-delivered event never enqueues twice);
+    ``payload`` is opaque to the store — the runner stashes what it needs to
+    reconstruct the task + delivery target.
+    """
+
+    event_id: str
+    payload: dict
+    seq: int = 0
+
+
+@dataclass(slots=True)
 class ThreadRecord:
     """The per-thread aggregate. Phase A carries only its scope identity; the inbox,
     active-turn claim, and ``context_ref`` land in later phases."""
@@ -93,6 +108,20 @@ class ThreadRecordStore(Protocol):
         limit: int = 20,
     ) -> list[TranscriptFragment]: ...
 
+    # --- inbox + active-turn claim (Phase C) ---
+
+    async def append_inbox(
+        self, scope: SurfaceTarget, event_id: str, payload: dict
+    ) -> bool: ...
+
+    async def try_begin_turn(self, scope: SurfaceTarget) -> bool: ...
+
+    async def next_inbox(self, scope: SurfaceTarget) -> InboxItem | None: ...
+
+    async def end_turn(self, scope: SurfaceTarget) -> None: ...
+
+    async def reset_active_claims(self) -> int: ...
+
 
 class InMemoryThreadRecordStore:
     """Process-local thread records — good for dev and tests (not crash-durable)."""
@@ -101,6 +130,10 @@ class InMemoryThreadRecordStore:
         self._threads: dict[str, ThreadRecord] = {}
         # scope_key -> {turn_id: fragment}, insertion-ordered by first append.
         self._transcript: dict[str, dict[str, TranscriptFragment]] = {}
+        # scope_key -> ordered pending inbox items; scope_key -> is-a-turn-active.
+        self._inbox: dict[str, list[InboxItem]] = {}
+        self._active: dict[str, bool] = {}
+        self._seq = 0
 
     async def get_or_create(self, scope: SurfaceTarget) -> ThreadRecord:
         key = _scope_key(scope)
@@ -131,6 +164,44 @@ class InMemoryThreadRecordStore:
         fragments.sort(key=lambda f: f.created_at)  # oldest-first
         return fragments[-limit:] if limit else fragments
 
+    async def append_inbox(
+        self, scope: SurfaceTarget, event_id: str, payload: dict
+    ) -> bool:
+        await self.get_or_create(scope)
+        items = self._inbox.setdefault(_scope_key(scope), [])
+        if any(it.event_id == event_id for it in items):
+            return False  # dedup: this event is already pending
+        self._seq += 1
+        items.append(InboxItem(event_id=event_id, payload=payload, seq=self._seq))
+        return True
+
+    async def try_begin_turn(self, scope: SurfaceTarget) -> bool:
+        # Claim the thread iff it is free AND there is pending work. The
+        # "has pending work" condition is what lets the runner's drain loop
+        # re-claim after releasing (to catch a reply that arrived mid-drain)
+        # without spinning on an empty inbox.
+        key = _scope_key(scope)
+        if self._active.get(key):
+            return False
+        if not self._inbox.get(key):
+            return False
+        self._active[key] = True
+        return True
+
+    async def next_inbox(self, scope: SurfaceTarget) -> InboxItem | None:
+        items = self._inbox.get(_scope_key(scope))
+        if not items:
+            return None
+        return items.pop(0)  # oldest-first
+
+    async def end_turn(self, scope: SurfaceTarget) -> None:
+        self._active[_scope_key(scope)] = False
+
+    async def reset_active_claims(self) -> int:
+        held = sum(1 for v in self._active.values() if v)
+        self._active.clear()
+        return held
+
 
 class PostgresThreadRecordStore:
     """Postgres-backed thread records — the durable delivered-transcript lane.
@@ -154,15 +225,21 @@ class PostgresThreadRecordStore:
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS surface_threads (
-                    scope_key   TEXT PRIMARY KEY,
-                    surface     TEXT NOT NULL,
-                    workspace   TEXT NOT NULL,
-                    agent       TEXT NOT NULL,
-                    channel     TEXT,
-                    thread      TEXT,
-                    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+                    scope_key      TEXT PRIMARY KEY,
+                    surface        TEXT NOT NULL,
+                    workspace      TEXT NOT NULL,
+                    agent          TEXT NOT NULL,
+                    channel        TEXT,
+                    thread         TEXT,
+                    active_turn_id TEXT,
+                    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
                 """
+            )
+            # Migration for thread rows created before the active-turn claim (C).
+            await conn.execute(
+                "ALTER TABLE surface_threads "
+                "ADD COLUMN IF NOT EXISTS active_turn_id TEXT"
             )
             await conn.execute(
                 """
@@ -181,6 +258,25 @@ class PostgresThreadRecordStore:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS surface_thread_transcript_seq_idx "
                 "ON surface_thread_transcript (scope_key, seq)"
+            )
+            # Ordered inbox of pending replies (Phase C). `id` (serial) both orders
+            # the drain and is the dedup-friendly key; UNIQUE(scope, event_id) makes
+            # a re-delivered event a no-op INSERT while it is still pending.
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS surface_thread_inbox (
+                    id          BIGSERIAL PRIMARY KEY,
+                    scope_key   TEXT NOT NULL,
+                    event_id    TEXT NOT NULL,
+                    payload     JSONB NOT NULL,
+                    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (scope_key, event_id)
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS surface_thread_inbox_scope_idx "
+                "ON surface_thread_inbox (scope_key, id)"
             )
 
     async def close(self) -> None:
@@ -279,3 +375,101 @@ class PostgresThreadRecordStore:
             )
             for r in rows
         ]
+
+    async def append_inbox(
+        self, scope: SurfaceTarget, event_id: str, payload: dict
+    ) -> bool:
+        pool = self._require_pool()
+        key = _scope_key(scope)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO surface_threads
+                        (scope_key, surface, workspace, agent, channel, thread)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (scope_key) DO NOTHING
+                    """,
+                    key, scope.surface, scope.workspace, scope.agent,
+                    scope.channel, scope.thread,
+                )
+                # Dedup on (scope, event_id) while the event is still pending.
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO surface_thread_inbox (scope_key, event_id, payload)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (scope_key, event_id) DO NOTHING
+                    RETURNING id
+                    """,
+                    key, event_id, json.dumps(payload),
+                )
+        return row is not None
+
+    async def try_begin_turn(self, scope: SurfaceTarget) -> bool:
+        # Atomic CAS: claim the thread iff it is free AND has pending work. The
+        # EXISTS clause means the runner's drain loop can re-claim after releasing
+        # (to catch a reply that arrived mid-drain) without spinning on an empty
+        # inbox — a free thread with nothing queued is simply not claimed.
+        pool = self._require_pool()
+        key = _scope_key(scope)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE surface_threads SET active_turn_id = 'held'
+                WHERE scope_key = $1 AND active_turn_id IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM surface_thread_inbox WHERE scope_key = $1
+                  )
+                RETURNING scope_key
+                """,
+                key,
+            )
+        return row is not None
+
+    async def next_inbox(self, scope: SurfaceTarget) -> InboxItem | None:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                DELETE FROM surface_thread_inbox
+                WHERE id = (
+                    SELECT id FROM surface_thread_inbox
+                    WHERE scope_key = $1 ORDER BY id LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING id, event_id, payload
+                """,
+                _scope_key(scope),
+            )
+        if row is None:
+            return None
+        return InboxItem(
+            event_id=row["event_id"],
+            payload=json.loads(row["payload"]),
+            seq=row["id"],
+        )
+
+    async def end_turn(self, scope: SurfaceTarget) -> None:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE surface_threads SET active_turn_id = NULL WHERE scope_key = $1",
+                _scope_key(scope),
+            )
+
+    async def reset_active_claims(self) -> int:
+        """Clear every active-turn claim. Called once at startup: a crashed drain
+        leader would otherwise leave ``active_turn_id`` set forever, wedging the
+        thread. Single-replica-correct (a restart means nothing is draining); the
+        multi-replica version is a leased claim, not a blanket reset."""
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "UPDATE surface_threads SET active_turn_id = NULL "
+                "WHERE active_turn_id IS NOT NULL"
+            )
+        # asyncpg returns e.g. "UPDATE 3"; parse the count defensively.
+        try:
+            return int(result.split()[-1])
+        except (ValueError, IndexError):
+            return 0

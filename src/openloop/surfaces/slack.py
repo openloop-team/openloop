@@ -88,7 +88,7 @@ async def handle_mention(runner: SessionRunner, event: dict, say) -> None:  # ty
         channel=event.get("channel"),
         user=event.get("user"),
     )
-    await runner.run(task, target)
+    await runner.run_threaded(task, target)
 
 
 async def handle_message(
@@ -127,7 +127,7 @@ async def handle_message(
         text=text, surface="slack", channel=event.get("channel"),
         user=event.get("user"),
     )
-    await runner.run(task, target)
+    await runner.run_threaded(task, target)
 
 
 def build_slack_app(

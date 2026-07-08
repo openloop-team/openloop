@@ -610,3 +610,65 @@ async def test_thread_record_transcript_across_real_postgres():
         except Exception:
             pass
         await store.close()
+
+
+async def test_thread_inbox_and_claim_across_real_postgres():
+    """Phase C: inbox dedup, ordered drain, and the atomic active-turn claim."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    from openloop.sessions.threads import PostgresThreadRecordStore
+    from openloop.sessions.store import SurfaceTarget
+
+    thread = f"thr-{uuid.uuid4().hex[:8]}"
+    scope = SurfaceTarget(
+        surface="slack", workspace="acme", agent="dev-platform",
+        channel="C1", thread=thread, event_id="ignored",
+    )
+    key = "\x1f".join(("slack", "acme", "dev-platform", "C1", thread))
+
+    store = PostgresThreadRecordStore(DSN)
+    await store.setup()
+    try:
+        assert await store.append_inbox(scope, "e1", {"text": "one"}) is True
+        assert await store.append_inbox(scope, "e2", {"text": "two"}) is True
+        assert await store.append_inbox(scope, "e1", {"text": "one"}) is False  # dedup
+
+        # A fresh store (restart) claims and drains, oldest-first; the claim is
+        # exclusive against a concurrent second claimant.
+        store2 = PostgresThreadRecordStore(DSN)
+        await store2.setup()
+        try:
+            assert await store.try_begin_turn(scope) is True
+            assert await store2.try_begin_turn(scope) is False  # exclusive CAS
+
+            drained = []
+            while (item := await store.next_inbox(scope)) is not None:
+                drained.append(item.payload["text"])
+            assert drained == ["one", "two"]
+
+            await store.end_turn(scope)
+            # Nothing queued now → not claimable (drain-loop re-claim can't spin).
+            assert await store2.try_begin_turn(scope) is False
+
+            # A crashed leader's stale claim is cleared at startup, unwedging the
+            # thread (with work queued again, it becomes claimable).
+            await store.append_inbox(scope, "e3", {"text": "three"})
+            assert await store.try_begin_turn(scope) is True  # "leader" holds
+            assert await store2.try_begin_turn(scope) is False
+            assert await store2.reset_active_claims() >= 1
+            assert await store2.try_begin_turn(scope) is True  # unwedged
+            await store2.end_turn(scope)
+        finally:
+            await store2.close()
+    finally:
+        try:
+            pool = store._require_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM surface_thread_inbox WHERE scope_key = $1", key)
+                await conn.execute(
+                    "DELETE FROM surface_threads WHERE scope_key = $1", key)
+        except Exception:
+            pass
+        await store.close()
