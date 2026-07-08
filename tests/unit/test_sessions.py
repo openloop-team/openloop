@@ -17,9 +17,11 @@ from openloop.models.gateway import ModelResponse
 from openloop.runtime import Runtime, Task
 from openloop.sessions import (
     InMemorySurfaceSessionStore,
+    InMemoryThreadRecordStore,
     SessionRunner,
     SurfaceSession,
     SurfaceTarget,
+    TranscriptFragment,
 )
 import time
 
@@ -58,7 +60,7 @@ def _task(text="hi"):
     return Task(text=text, surface="slack", channel="C1", user="U1")
 
 
-def _runner(model_gateway, *, tools=None, delivery=None):
+def _runner(model_gateway, *, tools=None, delivery=None, threads=None):
     sessions = InMemorySurfaceSessionStore()
     delivery = delivery or FakeSurfaceDelivery()
     engine = WorkflowEngine(InMemoryWorkflowStore())
@@ -70,7 +72,7 @@ def _runner(model_gateway, *, tools=None, delivery=None):
         memory=InMemoryStore(),
         engine=engine,
     )
-    return SessionRunner(runtime, sessions, delivery), sessions, delivery
+    return SessionRunner(runtime, sessions, delivery, threads=threads), sessions, delivery
 
 
 # --- session store -------------------------------------------------------
@@ -727,6 +729,64 @@ async def test_followup_turn_threads_prior_exchange_into_history():
     # History is replayed before the current question, in order.
     assert pairs.index(("user", "first question")) < pairs.index(("assistant", "first answer"))
     assert pairs.index(("assistant", "first answer")) < pairs.index(("user", "second question"))
+
+
+async def test_thread_store_records_fragment_and_feeds_followup():
+    # Phase A slice 2: with a ThreadRecordStore wired, a delivered turn commits a
+    # transcript fragment, and the next turn in the thread replays it as history.
+    threads = InMemoryThreadRecordStore()
+    gateway = ScriptedGateway([
+        ModelResponse(text="first answer", model="m"),
+        ModelResponse(text="second answer", model="m"),
+    ])
+    runner, _, _ = _runner(gateway, threads=threads)
+
+    await runner.run(_task("first question"), _target("ev1"))
+    await runner.run(_task("second question"), _target("ev2"))
+
+    # Both delivered turns were committed to the thread's transcript, oldest-first.
+    frags = await threads.replayable_transcript(_target("ev3"))
+    assert [(f.request, f.answer) for f in frags] == [
+        ("first question", "first answer"),
+        ("second question", "second answer"),
+    ]
+
+    # The second turn saw that exchange (replayed before its own question, in order).
+    pairs = [(m["role"], m.get("content")) for m in gateway.calls[1]["messages"]]
+    assert ("user", "first question") in pairs
+    assert ("assistant", "first answer") in pairs
+    assert pairs.index(("assistant", "first answer")) < pairs.index(("user", "second question"))
+
+
+async def test_apply_thread_history_reads_thread_store_over_sessions():
+    # When a thread store is present, history comes from IT — not the per-session
+    # scan. Prove it by seeding ONLY the thread store (sessions left empty).
+    threads = InMemoryThreadRecordStore()
+    runner, sessions, _ = _runner(ScriptedGateway([]), threads=threads)
+    target = _target("ev-seed")
+    await threads.append_delivered_fragment(
+        target, TranscriptFragment(turn_id="t0", request="seeded q", answer="seeded a")
+    )
+
+    task = _task("now")
+    await runner._apply_thread_history(task, SurfaceSession(id="cur", target=_target("ev-cur")))
+
+    assert {"role": "user", "content": "seeded q"} in task.history
+    assert {"role": "assistant", "content": "seeded a"} in task.history
+
+
+async def test_apply_thread_history_falls_back_to_sessions_without_thread_store():
+    # No thread store → the old per-session thread_history path still works.
+    runner, sessions, _ = _runner(ScriptedGateway([]))  # threads=None
+    await sessions.upsert(_completed(
+        "a", request="q1", answer="a1", at=datetime(2026, 6, 28, tzinfo=timezone.utc)
+    ))
+
+    task = _task("now")
+    await runner._apply_thread_history(task, SurfaceSession(id="cur", target=_target("ev-cur")))
+
+    assert {"role": "user", "content": "q1"} in task.history
+    assert {"role": "assistant", "content": "a1"} in task.history
 
 
 async def test_history_skips_non_completed_and_orders_oldest_first():

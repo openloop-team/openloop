@@ -44,9 +44,12 @@ from openloop.memory.postgres import PostgresMemoryStore
 from openloop.runtime import Runtime
 from openloop.sessions import (
     InMemorySurfaceSessionStore,
+    InMemoryThreadRecordStore,
     SurfaceSessionStore,
+    ThreadRecordStore,
 )
 from openloop.sessions.postgres import PostgresSurfaceSessionStore
+from openloop.sessions.threads import PostgresThreadRecordStore
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 
 from openloop.surfaces.slack import build_slack_app
@@ -141,6 +144,13 @@ def build_surface_session_store(settings: Settings) -> SurfaceSessionStore:
     if settings.memory_backend == "postgres":
         return PostgresSurfaceSessionStore(settings.database_url)
     return InMemorySurfaceSessionStore()
+
+
+def build_thread_record_store(settings: Settings) -> ThreadRecordStore:
+    """Pick a thread-record backend (Phase A). Postgres setup at startup."""
+    if settings.memory_backend == "postgres":
+        return PostgresThreadRecordStore(settings.database_url)
+    return InMemoryThreadRecordStore()
 
 
 def _resolve_lock_backend(settings: Settings) -> str:
@@ -584,6 +594,9 @@ def create_app() -> FastAPI:
     workflows = build_workflow_store(settings)
     engine = WorkflowEngine(workflows)
     sessions = build_surface_session_store(settings)
+    # Phase A: the thread-scoped delivered-transcript store. Captured by the Slack
+    # SessionRunner (like `sessions`); repointed in the lifespan on a PG fallback.
+    threads = build_thread_record_store(settings)
     # Cross-process lock: lets one replica lead startup recovery. Rebound to an
     # in-process lock in the lifespan if a configured Redis can't be reached.
     coordinator = build_lock(settings)
@@ -694,6 +707,21 @@ def create_app() -> FastAPI:
         else:
             log.info("surface-session backend: in-memory (process-local)")
 
+        if isinstance(threads, PostgresThreadRecordStore):
+            try:
+                await threads.setup()
+                log.info("thread-record backend: postgres")
+            except Exception:
+                log.exception(
+                    "postgres thread-record setup failed — falling back to in-memory"
+                )
+                fallback_threads = InMemoryThreadRecordStore()
+                app.state.threads = fallback_threads
+                if session_runner is not None:
+                    session_runner.threads = fallback_threads
+        else:
+            log.info("thread-record backend: in-memory (process-local)")
+
         coordinator = await _setup_coordination(coordinator, settings)
         app.state.coordinator = coordinator  # the resolved lock (post-fallback)
 
@@ -739,6 +767,8 @@ def create_app() -> FastAPI:
             await workflows.close()
         if isinstance(sessions, PostgresSurfaceSessionStore):
             await sessions.close()
+        if isinstance(threads, PostgresThreadRecordStore):
+            await threads.close()
         if hasattr(coordinator, "close"):  # RedisLock / PostgresLock (not in-process)
             await _safe_close(coordinator)
 
@@ -749,6 +779,7 @@ def create_app() -> FastAPI:
     app.state.usage = usage
     app.state.tools = tools
     app.state.sessions = sessions
+    app.state.threads = threads
     app.state.limiter = limiter
     # app.state.coordinator is set in the lifespan, after Redis connectivity is
     # checked, so it reflects the resolved lock (post any fallback).
@@ -772,6 +803,7 @@ def create_app() -> FastAPI:
             sessions,
             bot_token=settings.slack_bot_token,
             signing_secret=settings.slack_signing_secret or None,
+            threads=threads,
         )
         app.state.slack_app = slack_app
         # Captured so the session-store fallback can repoint the runner (above).

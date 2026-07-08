@@ -39,6 +39,7 @@ from openloop.sessions.store import (
     SurfaceSessionStore,
     SurfaceTarget,
 )
+from openloop.sessions.threads import ThreadRecordStore, TranscriptFragment
 from openloop.workflows.store import TERMINAL as _WORKFLOW_TERMINAL
 
 logger = logging.getLogger(__name__)
@@ -81,10 +82,16 @@ class SessionRunner:
         runtime: Runtime,
         sessions: SurfaceSessionStore,
         delivery: SurfaceDelivery,
+        threads: "ThreadRecordStore | None" = None,
     ) -> None:
         self.runtime = runtime
         self.sessions = sessions
         self.delivery = delivery
+        # Phase A: the thread-scoped delivered-transcript store. When present, a
+        # follow-up turn's history is the real conversation (request→answer per
+        # delivered turn) rather than the per-session summary scan; when absent the
+        # runner falls back to SurfaceSessionStore.thread_history (old path).
+        self.threads = threads
         # (phrase, last-sent monotonic) per session: collapse identical bursts,
         # but still re-assert periodically so Slack's transient status doesn't
         # lapse during a long single-phase run.
@@ -303,13 +310,21 @@ class SessionRunner:
         """
         if task.history or session.target.thread is None:
             return
-        prior = await self.sessions.thread_history(
-            session.target, exclude_id=session.id, limit=HISTORY_TURN_LIMIT
-        )
         turns: list[dict[str, str]] = []
-        for s in prior:
-            turns.append({"role": "user", "content": s.request_text})
-            turns.append({"role": "assistant", "content": s.result_summary})
+        if self.threads is not None:
+            # Phase A: read the thread-scoped delivered transcript (request→answer).
+            for frag in await self.threads.replayable_transcript(
+                session.target, exclude_turn_id=session.id, limit=HISTORY_TURN_LIMIT
+            ):
+                turns.append({"role": "user", "content": frag.request})
+                turns.append({"role": "assistant", "content": frag.answer})
+        else:
+            # Fallback: reconstruct from the per-session delivered-turn scan.
+            for s in await self.sessions.thread_history(
+                session.target, exclude_id=session.id, limit=HISTORY_TURN_LIMIT
+            ):
+                turns.append({"role": "user", "content": s.request_text})
+                turns.append({"role": "assistant", "content": s.result_summary})
         if turns:
             task.history = turns
 
@@ -544,6 +559,30 @@ class SessionRunner:
         )
         session.final_message_id = mid
         await self.sessions.upsert(session)
+        # Post-delivery, commit the turn to the thread's delivered transcript so a
+        # later turn replays it as real conversation. Idempotent on the session id,
+        # so a redelivery/reconcile never double-appends; only after the answer
+        # actually reached the thread (final_message_id recorded above).
+        await self._record_transcript(session, text)
+
+    async def _record_transcript(self, session: SurfaceSession, answer: str) -> None:
+        if self.threads is None or session.target.thread is None:
+            return
+        if not session.request_text or not answer:
+            return
+        try:
+            await self.threads.append_delivered_fragment(
+                session.target,
+                TranscriptFragment(
+                    turn_id=session.id, request=session.request_text, answer=answer
+                ),
+            )
+        except Exception:  # noqa: BLE001 — transcript is history, never block delivery
+            logger.warning(
+                "failed to record thread transcript for session %s",
+                session.id,
+                exc_info=True,
+            )
 
     async def _post_error(
         self, session: SurfaceSession, *, recover: bool = False

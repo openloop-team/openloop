@@ -23,6 +23,7 @@ from openloop.sessions import (
     SlackSurfaceDelivery,
     SurfaceSessionStore,
     SurfaceTarget,
+    ThreadRecordStore,
 )
 from openloop.surfaces.approvals import APPROVE_ACTION, DENY_ACTION
 
@@ -135,6 +136,7 @@ def build_slack_app(
     *,
     bot_token: str,
     signing_secret: str | None = None,
+    threads: ThreadRecordStore | None = None,
 ) -> AsyncApp:
     """Build the Bolt app (mention + approval handlers) bound to a runtime.
 
@@ -148,7 +150,9 @@ def build_slack_app(
     else:
         app = AsyncApp(token=bot_token, request_verification_enabled=False)
 
-    runner = SessionRunner(runtime, sessions, SlackSurfaceDelivery(app.client))
+    runner = SessionRunner(
+        runtime, sessions, SlackSurfaceDelivery(app.client), threads=threads
+    )
     # Exposed so the app lifespan can repoint the runner's session store after a
     # Postgres-setup fallback (mirrors how the workflow engine's store is swapped)
     # — and so the approval handler can reach the runner in a later slice.
