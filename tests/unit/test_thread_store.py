@@ -8,6 +8,7 @@ from openloop.sessions import (
     InMemoryThreadRecordStore,
     SurfaceTarget,
     TranscriptFragment,
+    thread_scope_key,
 )
 
 
@@ -155,3 +156,37 @@ async def test_reset_active_claims_unwedges_a_crashed_leader():
 
     assert await store.reset_active_claims() == 1
     assert await store.try_begin_turn(scope) is True   # claimable again
+
+
+# --- warm-context handle (Phase B) ---
+
+
+async def test_context_ref_set_get_and_clear():
+    store = InMemoryThreadRecordStore()
+    key = thread_scope_key(_scope())
+
+    assert await store.get_context_ref(key) is None
+    await store.set_context_ref(key, "handle-1")
+    assert await store.get_context_ref(key) == "handle-1"
+    # Clearing (a warm context evicted) drops the handle.
+    await store.set_context_ref(key, None)
+    assert await store.get_context_ref(key) is None
+
+
+async def test_context_ref_is_per_scope_key():
+    store = InMemoryThreadRecordStore()
+    a = thread_scope_key(_scope(thread="100.1"))
+    b = thread_scope_key(_scope(thread="200.2"))
+    await store.set_context_ref(a, "handle-a")
+
+    assert await store.get_context_ref(a) == "handle-a"
+    assert await store.get_context_ref(b) is None
+
+
+async def test_get_or_create_reflects_context_ref():
+    store = InMemoryThreadRecordStore()
+    scope = _scope()
+    await store.set_context_ref(thread_scope_key(scope), "handle-x")
+
+    record = await store.get_or_create(scope)
+    assert record.context_ref == "handle-x"

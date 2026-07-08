@@ -55,6 +55,17 @@ def _scope_key(target: SurfaceTarget) -> str:
     )
 
 
+def thread_scope_key(target: SurfaceTarget) -> str:
+    """Public alias for a thread's durable scope key (see :func:`_scope_key`).
+
+    Doubles as the **warm-context key** (Phase B): the same string keys the
+    thread's ``context_ref`` here *and* the process-local warm-workspace pool the
+    coding worker draws from, so a follow-up turn in the thread reuses the
+    checkout the prior turn warmed instead of cloning cold.
+    """
+    return _scope_key(target)
+
+
 @dataclass(slots=True)
 class TranscriptFragment:
     """One delivered exchange in a thread: the user's request and the answer.
@@ -85,10 +96,17 @@ class InboxItem:
 
 @dataclass(slots=True)
 class ThreadRecord:
-    """The per-thread aggregate. Phase A carries only its scope identity; the inbox,
-    active-turn claim, and ``context_ref`` land in later phases."""
+    """The per-thread aggregate: scope identity, plus (Phase B) an optional
+    ``context_ref`` — a durable handle to a warm execution context (a kept git
+    checkout, later a process/container) that a follow-up turn can reuse.
+
+    The handle is only ever a *cache pointer*: the process-local pool is the
+    authoritative liveness check, and a replica that finds no live context (a
+    restart, another replica) simply reconstructs cold. So a stale or missing
+    ``context_ref`` is always safe."""
 
     scope: SurfaceTarget
+    context_ref: str | None = None
     created_at: datetime = field(default_factory=_now)
 
 
@@ -122,6 +140,14 @@ class ThreadRecordStore(Protocol):
 
     async def reset_active_claims(self) -> int: ...
 
+    # --- warm-context handle (Phase B) ---
+
+    async def set_context_ref(
+        self, scope_key: str, context_ref: str | None
+    ) -> None: ...
+
+    async def get_context_ref(self, scope_key: str) -> str | None: ...
+
 
 class InMemoryThreadRecordStore:
     """Process-local thread records — good for dev and tests (not crash-durable)."""
@@ -133,6 +159,8 @@ class InMemoryThreadRecordStore:
         # scope_key -> ordered pending inbox items; scope_key -> is-a-turn-active.
         self._inbox: dict[str, list[InboxItem]] = {}
         self._active: dict[str, bool] = {}
+        # scope_key -> serialized warm-context handle (Phase B).
+        self._context_ref: dict[str, str] = {}
         self._seq = 0
 
     async def get_or_create(self, scope: SurfaceTarget) -> ThreadRecord:
@@ -141,6 +169,7 @@ class InMemoryThreadRecordStore:
         if record is None:
             record = ThreadRecord(scope=scope)
             self._threads[key] = record
+        record.context_ref = self._context_ref.get(key)
         return record
 
     async def append_delivered_fragment(
@@ -202,6 +231,20 @@ class InMemoryThreadRecordStore:
         self._active.clear()
         return held
 
+    async def set_context_ref(
+        self, scope_key: str, context_ref: str | None
+    ) -> None:
+        if context_ref is None:
+            self._context_ref.pop(scope_key, None)
+        else:
+            self._context_ref[scope_key] = context_ref
+        record = self._threads.get(scope_key)
+        if record is not None:
+            record.context_ref = context_ref
+
+    async def get_context_ref(self, scope_key: str) -> str | None:
+        return self._context_ref.get(scope_key)
+
 
 class PostgresThreadRecordStore:
     """Postgres-backed thread records — the durable delivered-transcript lane.
@@ -232,6 +275,7 @@ class PostgresThreadRecordStore:
                     channel        TEXT,
                     thread         TEXT,
                     active_turn_id TEXT,
+                    context_ref    TEXT,
                     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
                 """
@@ -240,6 +284,11 @@ class PostgresThreadRecordStore:
             await conn.execute(
                 "ALTER TABLE surface_threads "
                 "ADD COLUMN IF NOT EXISTS active_turn_id TEXT"
+            )
+            # Migration for the Phase B warm-context handle.
+            await conn.execute(
+                "ALTER TABLE surface_threads "
+                "ADD COLUMN IF NOT EXISTS context_ref TEXT"
             )
             await conn.execute(
                 """
@@ -473,3 +522,32 @@ class PostgresThreadRecordStore:
             return int(result.split()[-1])
         except (ValueError, IndexError):
             return 0
+
+    async def set_context_ref(
+        self, scope_key: str, context_ref: str | None
+    ) -> None:
+        """Persist (or clear) the thread's warm-context handle.
+
+        Keyed by the raw ``scope_key`` because the caller is the warm-workspace
+        pool, which holds only that string — not the full :class:`SurfaceTarget`.
+        An UPDATE (never an INSERT): the thread row is created by the inbox/
+        transcript path before any turn — and hence any warm context — exists, so
+        a missing row means the thread was never seen and the (best-effort, cache)
+        handle is simply dropped.
+        """
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE surface_threads SET context_ref = $2 WHERE scope_key = $1",
+                scope_key,
+                context_ref,
+            )
+
+    async def get_context_ref(self, scope_key: str) -> str | None:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT context_ref FROM surface_threads WHERE scope_key = $1",
+                scope_key,
+            )
+        return row["context_ref"] if row is not None else None

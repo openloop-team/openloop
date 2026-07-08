@@ -40,7 +40,11 @@ from openloop.sessions.store import (
     SurfaceSessionStore,
     SurfaceTarget,
 )
-from openloop.sessions.threads import ThreadRecordStore, TranscriptFragment
+from openloop.sessions.threads import (
+    ThreadRecordStore,
+    TranscriptFragment,
+    thread_scope_key,
+)
 from openloop.workflows.store import TERMINAL as _WORKFLOW_TERMINAL
 
 logger = logging.getLogger(__name__)
@@ -149,6 +153,12 @@ class SessionRunner:
         existing = await self.sessions.get_by_event(target.event_id)
         if existing is not None:
             return await self._ensure_delivered(existing)
+
+        # Phase B: tag the turn with its thread's warm-context key so a workflow-
+        # backed tool (the coding worker) can reuse this thread's warm checkout.
+        # Only threaded turns have warm context; a top-level turn stays cold.
+        if target.thread is not None:
+            task.thread_key = thread_scope_key(target)
 
         session = SurfaceSession(
             id=uuid.uuid4().hex,
@@ -501,6 +511,12 @@ class SessionRunner:
             text=session.request_text or "",
             surface=session.target.surface,
             channel=session.target.channel,
+            # Same thread → same warm context for any follow-on write.
+            thread_key=(
+                thread_scope_key(session.target)
+                if session.target.thread is not None
+                else None
+            ),
         )
         cont_id = f"{session.id}:cont:{approval_id}"
         response = await cont(task, messages, instance_id=cont_id)

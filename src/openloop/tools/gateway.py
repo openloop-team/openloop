@@ -18,6 +18,7 @@ from openloop.tools.policy import is_allowed
 from openloop.workflows.store import TERMINAL as WORKFLOW_TERMINAL
 
 if TYPE_CHECKING:
+    from openloop.tools.workspace_pool import WarmWorkspacePool
     from openloop.workflows.engine import WorkflowEngine
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,10 @@ class ToolGateway:
         # Optional: when set, a tool that declares a `workflow` runs as a durable
         # workflow — approval becomes a wait node and resolve() emits the event.
         self.engine = engine
+        # Optional Phase B warm-workspace pool (set during app wiring). Held here
+        # so the app can reach it to wire its durable sink + lifecycle without a
+        # separate registry; the orchestrator uses it directly.
+        self.warm_pool: "WarmWorkspacePool | None" = None
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
@@ -98,6 +103,7 @@ class ToolGateway:
         args: dict,
         *,
         requested_by: str | None = None,
+        warm_key: str | None = None,
     ) -> Invocation:
         tool_name, permission = split_action(action)
 
@@ -120,7 +126,9 @@ class ToolGateway:
         # invoking agent so spend attribution survives the approval hop).
         prepare = getattr(tool, "prepare_args", None)
         if prepare is not None:
-            args = prepare(permission, args, agent)
+            # warm_key (Phase B) rides the args across the approval boundary so a
+            # workflow-backed tool can reuse the requesting thread's warm context.
+            args = prepare(permission, args, agent, warm_key=warm_key)
 
         if agent.spec.approvals.requires_approval(action):
             request = ApprovalRequest(

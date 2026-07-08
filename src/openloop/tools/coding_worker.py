@@ -60,6 +60,7 @@ from openloop.tools.github import GitHubClient
 
 if TYPE_CHECKING:
     from openloop.sandbox import Sandbox
+    from openloop.tools.workspace_pool import WarmWorkspacePool
     from openloop.usage.ledger import WorkerSpendLedger
 
 # Persist-after-each-step callback invoked after each completed step so a crash
@@ -126,6 +127,13 @@ class WorkerState:
     title: str | None = None
     body: str | None = None
     agent: str | None = None
+    # Warm-context key (Phase B): the requesting thread's durable scope key,
+    # stamped by the gateway from the invoking turn. When a warm-workspace pool is
+    # wired, the orchestrator reuses this thread's kept checkout instead of cloning
+    # cold. Rides the checkpoint/workflow state so a resume re-warms the same
+    # thread; ``None`` (a non-threaded turn, or warm context disabled) means the
+    # unchanged ephemeral clone-and-discard path.
+    warm_key: str | None = None
     # Per-attempt in-run spend ceiling (this agent's per-task cap), stamped by
     # the orchestrator before the worker runs so an agentic worker can stop
     # itself near the cap instead of blowing past it. Transient — recomputed each
@@ -147,7 +155,7 @@ class WorkerState:
     def from_dict(cls, data: dict) -> "WorkerState":
         fields = {
             "job_id", "repo", "instruction", "base", "branch",
-            "completed_steps", "title", "body", "agent",
+            "completed_steps", "title", "body", "agent", "warm_key",
         }
         return cls(**{k: v for k, v in data.items() if k in fields})
 
@@ -289,7 +297,9 @@ class CodingWorkerConnector:
     def supported_permissions(self) -> set[str]:
         return {CODING_WORKER_PR_WRITE}
 
-    def prepare_args(self, permission: str, args: dict, agent=None) -> dict:
+    def prepare_args(
+        self, permission: str, args: dict, agent=None, *, warm_key: str | None = None
+    ) -> dict:
         """Finalize args before they cross the approval boundary.
 
         Called by the gateway prior to creating the approval request, so the
@@ -300,6 +310,10 @@ class CodingWorkerConnector:
         - stamps the *invoking* agent's name (Phase 5) so the spend ledger
           attributes the attempt to whoever asked. Stamped unconditionally —
           a model-supplied ``agent`` arg must never redirect attribution.
+        - stamps the requesting thread's ``warm_key`` (Phase B) so a warm-
+          workspace pool can reuse this thread's checkout across turns. Only the
+          gateway supplies it (from the invoking turn); a model-supplied value is
+          ignored.
         """
         if permission != CODING_WORKER_PR_WRITE:
             return args
@@ -307,6 +321,8 @@ class CodingWorkerConnector:
             args = {**args, "job_id": uuid.uuid4().hex[:12]}
         if agent is not None:
             args = {**args, "agent": agent.metadata.name}
+        if warm_key:
+            args = {**args, "warm_key": warm_key}
         return args
 
     def describe(self, permission: str) -> ActionSpec:
@@ -355,6 +371,7 @@ class CodingWorkerConnector:
                 base=base,
                 branch=_branch_for(job_id),
                 agent=args.get("agent"),
+                warm_key=args.get("warm_key"),
             )
 
         # The two side effects run after resolve() already marked the approval
@@ -559,6 +576,7 @@ class GitWorkspaceOrchestrator:
         remote_base: str = "https://github.com",
         workspace_root: Path | None = None,
         ledger: "WorkerSpendLedger | None" = None,
+        warm_pool: "WarmWorkspacePool | None" = None,
     ) -> None:
         self.worker = worker
         self._credentials = credentials
@@ -572,6 +590,11 @@ class GitWorkspaceOrchestrator:
         self._workspace_root = workspace_root
         # Optional Phase 4 spend ledger: record + fail-closed per-task cap.
         self._ledger = ledger
+        # Optional Phase B warm-workspace pool: when a WorkerState carries a
+        # warm_key, reuse the thread's kept checkout (fetch + reset) instead of
+        # cloning cold. The pool owns only the directory lifecycle — every git
+        # command still runs here, so the one credential boundary is unchanged.
+        self._warm_pool = warm_pool
 
     async def run_attempt(
         self, state: WorkerState, on_step: StepCallback | None = None
@@ -595,25 +618,51 @@ class GitWorkspaceOrchestrator:
         # URL. The auth header value still surfaces in a failed command line,
         # so git failures redact both the token and its basic-auth encoding.
         token = await self._credentials.resolve(self._scope)
-        if self._workspace_root is not None:
-            self._workspace_root.mkdir(parents=True, exist_ok=True)
-        workspace = Path(
-            tempfile.mkdtemp(
-                prefix=f"openloop-{state.job_id}-",
-                dir=self._workspace_root,
-            )
-        )
-        try:
-            await self._git(
-                *_auth_config(token),
-                "clone", "--depth", "1", "--branch", state.base,
-                f"{self._remote_base}/{state.repo}.git", str(workspace),
-                redact=_auth_secrets(token),
-            )
-            await step("clone")
 
-            await self._git("checkout", "-b", state.branch, cwd=workspace)
-            await step("branch")
+        # Provision the workspace. With a warm pool and a thread warm_key, borrow
+        # the thread's checkout (reused if live, else freshly provisioned by the
+        # pool); otherwise the unchanged ephemeral clone-and-discard temp dir.
+        lease = None
+        if self._warm_pool is not None and state.warm_key:
+            lease = await self._warm_pool.acquire(state.warm_key, state.repo)
+            workspace = lease.path
+        else:
+            if self._workspace_root is not None:
+                self._workspace_root.mkdir(parents=True, exist_ok=True)
+            workspace = Path(
+                tempfile.mkdtemp(
+                    prefix=f"openloop-{state.job_id}-",
+                    dir=self._workspace_root,
+                )
+            )
+        try:
+            if lease is not None and lease.warm:
+                # Reuse the kept checkout: reset to the freshly fetched base and
+                # branch off it, reusing the object store instead of re-cloning.
+                # The job-exclusive branch is (re)created with -B so a re-warm on
+                # resume is idempotent, and `clean -fdx` drops any prior leftovers
+                # so the worker sees a pristine tree — same as a cold clone.
+                await self._git(
+                    *_auth_config(token),
+                    "fetch", "--depth", "1", "origin", state.base,
+                    cwd=workspace, redact=_auth_secrets(token),
+                )
+                await self._git("reset", "--hard", "FETCH_HEAD", cwd=workspace)
+                await self._git("clean", "-fdx", cwd=workspace)
+                await self._git("checkout", "-B", state.branch, cwd=workspace)
+                await step("clone")
+                await step("branch")
+            else:
+                await self._git(
+                    *_auth_config(token),
+                    "clone", "--depth", "1", "--branch", state.base,
+                    f"{self._remote_base}/{state.repo}.git", str(workspace),
+                    redact=_auth_secrets(token),
+                )
+                await step("clone")
+
+                await self._git("checkout", "-b", state.branch, cwd=workspace)
+                await step("branch")
 
             # The worker edits the prepared workspace. No credential in scope:
             # not in its arguments, not anywhere under the workspace.
@@ -678,7 +727,7 @@ class GitWorkspaceOrchestrator:
             )
             await step("push")
 
-            return WorkerOutcome(
+            outcome = WorkerOutcome(
                 branch=state.branch,
                 title=edit.title,
                 body=edit.body,
@@ -686,8 +735,23 @@ class GitWorkspaceOrchestrator:
                 prompt_tokens=edit.prompt_tokens,
                 completion_tokens=edit.completion_tokens,
             )
+            # Keep the checkout warm for this thread's next turn (a no-op for the
+            # ephemeral path). The push already succeeded, so the warm tree is a
+            # clean, pushed state — safe to reuse.
+            if lease is not None:
+                await lease.keep()
+            return outcome
+        except BaseException:
+            # Any failure may leave the tree dirty/corrupt; drop it so the next
+            # turn cold-reconstructs rather than reusing a bad checkout.
+            if lease is not None:
+                await lease.discard()
+            raise
         finally:
-            shutil.rmtree(workspace, ignore_errors=True)
+            if lease is not None:
+                await lease.release()
+            else:
+                shutil.rmtree(workspace, ignore_errors=True)
 
     async def _git(
         self,

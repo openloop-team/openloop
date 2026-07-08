@@ -93,6 +93,18 @@ class Settings(BaseSettings):
     # sibling sandbox containers resolve bind-mount paths on the HOST, so this
     # must be a host path mounted into the runtime at the same location.
     coding_worker_workspace_dir: str | None = None
+    # Phase B — warm execution context. When on, a coding worker keeps its git
+    # checkout alive between turns in the same thread so a follow-up reuses it
+    # (fetch + reset) instead of cloning cold. Process-local and single-replica-
+    # correct: warm is only a cache, a cold clone is always the fallback, so this
+    # can default on — a warm miss (restart, eviction, busy, or a discarded dirty
+    # tree) degrades to the unchanged ephemeral clone-and-discard path. Set to
+    # false to force that path everywhere.
+    coding_worker_warm_context: bool = True
+    # Evict a thread's warm checkout after this many idle seconds (leak guard).
+    coding_worker_warm_idle_seconds: float = 900.0
+    # Cap on concurrently-kept warm checkouts (LRU-evicted past it).
+    coding_worker_warm_capacity: int = 8
 
     # Storage / queue
     database_url: str = (

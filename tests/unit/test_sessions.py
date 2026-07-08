@@ -22,6 +22,7 @@ from openloop.sessions import (
     SurfaceSession,
     SurfaceTarget,
     TranscriptFragment,
+    thread_scope_key,
 )
 import time
 
@@ -123,6 +124,30 @@ async def test_mention_to_progress_then_final():
     assert session.progress_message_id is None
     assert session.final_message_id == delivery.finals[0]["id"]
     assert session.workflow_instance_id == session.id
+
+
+async def test_threaded_turn_stamps_warm_context_key():
+    # Phase B: a threaded turn carries its thread's warm-context key so a
+    # workflow-backed tool can reuse the thread's warm checkout.
+    runner, _, _ = _runner(
+        ScriptedGateway([ModelResponse(text="ok", model="m")])
+    )
+    task = _task()
+    await runner.run(task, _target())
+    assert task.thread_key == thread_scope_key(_target())
+
+
+async def test_top_level_turn_has_no_warm_context_key():
+    runner, _, _ = _runner(
+        ScriptedGateway([ModelResponse(text="ok", model="m")])
+    )
+    task = _task()
+    top_level = SurfaceTarget(
+        surface="slack", workspace="acme", agent="dev-platform",
+        channel="C1", thread=None, event_id="top1",
+    )
+    await runner.run(task, top_level)
+    assert task.thread_key is None
 
 
 async def test_duplicate_event_is_deduped():

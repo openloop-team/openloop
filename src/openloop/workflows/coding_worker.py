@@ -80,6 +80,9 @@ def build_coding_worker_workflow(
             # The invoking agent, stamped into the approval args by the
             # gateway (Phase 5) — the ledger attributes spend to it.
             agent=s.get("agent"),
+            # The requesting thread's warm-context key (Phase B) — lets the
+            # orchestrator reuse this thread's kept checkout.
+            warm_key=s.get("warm_key"),
         )
         async def on_step(ws: WorkerState) -> None:
             # Record a human progress phrase so the surface can show "still

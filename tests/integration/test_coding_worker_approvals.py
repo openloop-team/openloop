@@ -62,6 +62,28 @@ async def test_coding_worker_is_held_for_approval():
     assert github.pulls == []
 
 
+async def test_warm_key_rides_into_the_approval_args():
+    # Phase B: the requesting thread's warm_key is stamped into the persisted
+    # approval args (like job_id/agent), so it reaches the orchestrator through
+    # the workflow/execute hop. A model-supplied warm_key is ignored — only the
+    # gateway's value (from the invoking turn) wins.
+    agent = _agent()
+    gw = _gateway()
+
+    inv = await gw.invoke(
+        agent,
+        "coding_worker.pr:write",
+        {"repo": "acme/x", "instruction": "add retries", "warm_key": "spoofed"},
+        requested_by="U1",
+        warm_key="slack\x1facme\x1fdev-platform\x1fC1\x1f100.1",
+    )
+
+    assert inv.status == "pending_approval"
+    assert inv.approval.args["warm_key"] == (
+        "slack\x1facme\x1fdev-platform\x1fC1\x1f100.1"
+    )
+
+
 async def test_approve_runs_worker_and_opens_draft_pr():
     agent = _agent()
     runner = FakeWorkerOrchestrator(title="Add retries")

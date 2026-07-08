@@ -147,3 +147,92 @@ async def test_second_attempt_force_pushes_idempotently(remote):
 
     assert first != second  # regenerated attempt replaced the branch
     assert _git("show", "openloop/job-j3:README.md", cwd=remote) == "hello world 2\n"
+
+
+class _RecordingOrchestrator(GitWorkspaceOrchestrator):
+    """Records every git subcommand so a test can prove warm reuse skips clone."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.commands: list[tuple[str, ...]] = []
+
+    async def _run(self, *cmd, cwd=None, stdin=None, redact=None):
+        self.commands.append(cmd)
+        return await super()._run(*cmd, cwd=cwd, stdin=stdin, redact=redact)
+
+
+def _count(commands, sub):
+    return sum(1 for c in commands if sub in c)
+
+
+async def test_warm_reuse_skips_clone_and_lands_edit(remote, tmp_path):
+    from openloop.tools.workspace_pool import WarmHandle, WarmWorkspacePool
+
+    refs: list = []
+
+    async def sink(key, ref):
+        refs.append((key, ref))
+
+    pool = WarmWorkspacePool(root=tmp_path / "warm", on_change=sink)
+    orch = _RecordingOrchestrator(
+        BuiltinCodingWorker(model="stub", gateway=_StubCompleter()),
+        EnvCredentialResolver({"github": "secrettoken"}),
+        remote_base=f"file://{remote.parent.parent}",
+        warm_pool=pool,
+    )
+
+    # Two turns of the SAME thread — new job each, but one warm checkout.
+    s1 = _state("w1")
+    s1.warm_key = "thread-A"
+    await orch.run_attempt(s1)
+    s2 = _state("w2")
+    s2.warm_key = "thread-A"
+    await orch.run_attempt(s2)
+
+    # Exactly one clone (the first, cold) — the second reused via fetch.
+    assert _count(orch.commands, "clone") == 1
+    assert _count(orch.commands, "fetch") >= 1
+    # Both attempts pushed their branch, and the warm tree was reset to base so
+    # the second diff applied cleanly against `hello` (not the first edit).
+    assert _git("show", "openloop/job-w1:README.md", cwd=remote) == "hello world 1\n"
+    assert _git("show", "openloop/job-w2:README.md", cwd=remote) == "hello world 2\n"
+    # The thread's warm context_ref was persisted (a live handle for the repo).
+    live = [r for k, r in refs if k == "thread-A" and r is not None]
+    assert live and WarmHandle.from_json(live[0]).repo == "acme/x"
+
+    await pool.shutdown()
+
+
+async def test_warm_discard_on_failure_cold_starts_next(remote, tmp_path):
+    from openloop.tools.workspace_pool import WarmWorkspacePool
+
+    # A worker that raises → the attempt fails → the checkout is discarded.
+    class _Boom(BuiltinCodingWorker):
+        async def run(self, workspace, state, on_step=None):
+            raise RuntimeError("worker blew up")
+
+    pool = WarmWorkspacePool(root=tmp_path / "warm")
+    orch = _RecordingOrchestrator(
+        _Boom(model="stub", gateway=_StubCompleter()),
+        EnvCredentialResolver({"github": "secrettoken"}),
+        remote_base=f"file://{remote.parent.parent}",
+        warm_pool=pool,
+    )
+    s1 = _state("f1")
+    s1.warm_key = "thread-B"
+    with pytest.raises(RuntimeError):
+        await orch.run_attempt(s1)
+
+    # The failed checkout was dropped, so a good follow-up cold-clones again.
+    orch2 = _RecordingOrchestrator(
+        BuiltinCodingWorker(model="stub", gateway=_StubCompleter()),
+        EnvCredentialResolver({"github": "secrettoken"}),
+        remote_base=f"file://{remote.parent.parent}",
+        warm_pool=pool,
+    )
+    s2 = _state("f2")
+    s2.warm_key = "thread-B"
+    await orch2.run_attempt(s2)
+    assert _count(orch2.commands, "clone") == 1  # no warm entry to reuse
+    assert _count(orch2.commands, "fetch") == 0
+    await pool.shutdown()

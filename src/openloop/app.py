@@ -69,6 +69,7 @@ from openloop.tools.coding_worker import (
 )
 from openloop.tools.github import GitHubConnector, HttpGitHubClient
 from openloop.tools.mcp import HttpMCPClient, MCPConnector
+from openloop.tools.workspace_pool import WarmWorkspacePool
 from openloop.tools.openhands_worker import (
     OpenHandsCodingWorker,
     OpenHandsUnavailable,
@@ -314,6 +315,22 @@ def build_worker_sandbox(settings: Settings) -> "Sandbox | None":
     return None
 
 
+def build_warm_workspace_pool(settings: Settings) -> "WarmWorkspacePool | None":
+    """The process-local warm-workspace pool (Phase B), or None when disabled.
+
+    Off unless ``CODING_WORKER_WARM_CONTEXT`` is set. Shares the attempt-workspace
+    root so warm checkouts live where the sandbox can reach them (same constraint
+    as the ephemeral path). The durable ``context_ref`` sink is wired later, once
+    the thread-record store exists (and stays repoint-safe on a PG fallback)."""
+    if not settings.coding_worker_warm_context:
+        return None
+    return WarmWorkspacePool(
+        root=_worker_workspace_root(settings),
+        idle_seconds=settings.coding_worker_warm_idle_seconds,
+        capacity=settings.coding_worker_warm_capacity,
+    )
+
+
 def _provider_key(settings: Settings, model: str) -> str | None:
     """The configured API key for a LiteLLM-style model's provider prefix."""
     provider = model.split("/", 1)[0]
@@ -489,11 +506,17 @@ def build_tool_gateway(
                 # credential and is the ONE helper both durable paths run
                 # attempts through — which is also what lets the Phase 4
                 # ledger cover both paths at once.
+                # Phase B: an optional warm-workspace pool lets the orchestrator
+                # reuse a thread's checkout across turns. Attached to the gateway
+                # so create_app can wire its durable context_ref sink + lifecycle.
+                warm_pool = build_warm_workspace_pool(settings)
+                gateway.warm_pool = warm_pool
                 orchestrator = GitWorkspaceOrchestrator(
                     worker,
                     github_credentials,
                     workspace_root=_worker_workspace_root(settings),
                     ledger=ledger,
+                    warm_pool=warm_pool,
                 )
                 gateway.register(
                     CodingWorkerConnector(
@@ -617,6 +640,7 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI):
         nonlocal coordinator
         recovery_task: asyncio.Task | None = None
+        warm_sweep_task: asyncio.Task | None = None
         if isinstance(store, PostgresMemoryStore):
             try:
                 await store.setup()
@@ -745,6 +769,16 @@ def create_app() -> FastAPI:
                 _recovery_loop(coordinator, tools, session_runner, interval=interval)
             )
 
+        # Phase B: periodically evict idle warm checkouts so a thread that goes
+        # quiet doesn't leak its directory (acquire also evicts opportunistically).
+        warm_pool = getattr(tools, "warm_pool", None)
+        if warm_pool is not None:
+            warm_sweep_task = asyncio.create_task(
+                _warm_sweep_loop(
+                    warm_pool, interval=settings.coding_worker_warm_idle_seconds
+                )
+            )
+
         for connector in getattr(tools, "mcp_connectors", []):
             try:
                 await connector.setup()
@@ -760,6 +794,13 @@ def create_app() -> FastAPI:
             recovery_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await recovery_task
+        if warm_sweep_task is not None:
+            warm_sweep_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await warm_sweep_task
+        warm_pool = getattr(tools, "warm_pool", None)
+        if warm_pool is not None:
+            await warm_pool.shutdown()
         if isinstance(store, PostgresMemoryStore):
             await store.close()
         if isinstance(usage, PostgresUsageStore):
@@ -786,6 +827,16 @@ def create_app() -> FastAPI:
     app.state.sessions = sessions
     app.state.threads = threads
     app.state.limiter = limiter
+
+    # Phase B: bridge the warm-workspace pool's durable handle to the thread
+    # record. Reads app.state.threads at call time so it survives a PG fallback
+    # repoint; best-effort by design (the pool's liveness is authoritative).
+    warm_pool = getattr(tools, "warm_pool", None)
+    if warm_pool is not None:
+        async def _persist_context_ref(warm_key: str, ref: str | None) -> None:
+            await app.state.threads.set_context_ref(warm_key, ref)
+
+        warm_pool.set_on_change(_persist_context_ref)
     # app.state.coordinator is set in the lifespan, after Redis connectivity is
     # checked, so it reflects the resolved lock (post any fallback).
     app.state.primary_agent = primary_agent
@@ -1029,6 +1080,18 @@ async def _recovery_loop(
             raise
         except Exception:
             log.exception("periodic recovery pass failed")
+
+
+async def _warm_sweep_loop(pool: WarmWorkspacePool, *, interval: float) -> None:
+    """Evict idle warm checkouts every ``interval`` seconds until cancelled."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await pool.sweep()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.warning("warm-workspace sweep failed", exc_info=True)
 
 
 async def _safe_close(closeable) -> None:

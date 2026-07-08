@@ -183,6 +183,10 @@ class Task:
     # Optional task class (e.g. "summarize", "code") used for model routing.
     kind: str | None = None
     history: list[dict[str, str]] = field(default_factory=list)
+    # The requesting thread's durable scope key (Phase B). Set by the session
+    # runner for threaded turns; threaded down to a workflow-backed tool so it can
+    # reuse the thread's warm execution context. None for non-threaded turns.
+    thread_key: str | None = None
 
 
 class Runtime:
@@ -595,6 +599,7 @@ class Runtime:
                 inv = await self.tools.invoke(
                     self.agent, action, _parse_json(fn.get("arguments")),
                     requested_by=task.user,
+                    warm_key=task.thread_key,
                 )
                 if inv.status == "executed":
                     messages.append(_tool_message(call_id, _result_content(inv.result)))

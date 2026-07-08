@@ -18,6 +18,7 @@ from openloop.sessions.threads import (
     ThreadRecord,
     ThreadRecordStore,
     TranscriptFragment,
+    thread_scope_key,
 )
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "ThreadRecord",
     "ThreadRecordStore",
     "TranscriptFragment",
+    "thread_scope_key",
 ]

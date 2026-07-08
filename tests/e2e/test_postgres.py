@@ -612,6 +612,49 @@ async def test_thread_record_transcript_across_real_postgres():
         await store.close()
 
 
+async def test_thread_context_ref_across_real_postgres():
+    """Phase B: the warm-context handle column round-trips and clears."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    from openloop.sessions.threads import PostgresThreadRecordStore, thread_scope_key
+    from openloop.sessions.store import SurfaceTarget
+
+    thread = f"thr-{uuid.uuid4().hex[:8]}"
+    scope = SurfaceTarget(
+        surface="slack", workspace="acme", agent="dev-platform",
+        channel="C1", thread=thread, event_id="ignored",
+    )
+    key = thread_scope_key(scope)
+
+    store = PostgresThreadRecordStore(DSN)
+    await store.setup()
+    try:
+        # The row must exist first — set_context_ref is UPDATE-only (the caller,
+        # the warm pool, holds only the scope_key, not the full target).
+        await store.get_or_create(scope)
+        await store.set_context_ref(key, "handle-1")
+
+        # A fresh store (a restart) reads the persisted handle back, then clears it.
+        store2 = PostgresThreadRecordStore(DSN)
+        await store2.setup()
+        try:
+            assert await store2.get_context_ref(key) == "handle-1"
+            await store2.set_context_ref(key, None)
+            assert await store2.get_context_ref(key) is None
+        finally:
+            await store2.close()
+    finally:
+        try:
+            pool = store._require_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM surface_threads WHERE scope_key = $1", key)
+        except Exception:
+            pass
+        await store.close()
+
+
 async def test_thread_inbox_and_claim_across_real_postgres():
     """Phase C: inbox dedup, ordered drain, and the atomic active-turn claim."""
     if not await _reachable():
