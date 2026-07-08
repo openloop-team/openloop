@@ -179,6 +179,16 @@ class SessionRunner:
         # context, not just semantic recall. Done before handle() so the history
         # is baked into the workflow's persisted turn state (resume-safe).
         await self._apply_thread_history(task, session)
+        # TEMP DEBUG (thread-isolation diagnosis): show exactly which thread this
+        # turn resolved to and how many prior turns were replayed as history.
+        logger.debug(
+            "THREAD-DEBUG event=%s channel=%r thread=%r history_turns=%d session=%s",
+            target.event_id,
+            target.channel,
+            target.thread,
+            len(task.history) // 2,
+            session.id,
+        )
 
         try:
             response = await self.runtime.handle(
