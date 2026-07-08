@@ -552,3 +552,61 @@ async def test_session_reconcile_across_real_postgres():
             pass
         await sessions.close()
         await workflows.close()
+
+
+async def test_thread_record_transcript_across_real_postgres():
+    """Phase A: the delivered-transcript lane round-trips and appends idempotently."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    from openloop.sessions.threads import (
+        PostgresThreadRecordStore,
+        TranscriptFragment,
+    )
+    from openloop.sessions.store import SurfaceTarget
+
+    thread = f"thr-{uuid.uuid4().hex[:8]}"
+    scope = SurfaceTarget(
+        surface="slack", workspace="acme", agent="dev-platform",
+        channel="C1", thread=thread, event_id="ignored",
+    )
+
+    store = PostgresThreadRecordStore(DSN)
+    await store.setup()
+    try:
+        await store.get_or_create(scope)
+        await store.append_delivered_fragment(
+            scope, TranscriptFragment(turn_id="t1", request="q1", answer="a1")
+        )
+        await store.append_delivered_fragment(
+            scope, TranscriptFragment(turn_id="t2", request="q2", answer="a2")
+        )
+        # Redelivery of t1 must not duplicate it (idempotent UPSERT on turn_id).
+        await store.append_delivered_fragment(
+            scope, TranscriptFragment(turn_id="t1", request="q1", answer="a1-DUP")
+        )
+
+        # A fresh store (a restart) reads the transcript back, oldest-first.
+        store2 = PostgresThreadRecordStore(DSN)
+        await store2.setup()
+        try:
+            out = await store2.replayable_transcript(scope)
+            assert [(f.request, f.answer) for f in out] == [("q1", "a1"), ("q2", "a2")]
+            # Limit keeps the most recent, still oldest-first; exclude drops a turn.
+            assert [f.turn_id for f in await store2.replayable_transcript(scope, limit=1)] == ["t2"]
+            assert [f.turn_id for f in await store2.replayable_transcript(
+                scope, exclude_turn_id="t2")] == ["t1"]
+        finally:
+            await store2.close()
+    finally:
+        try:
+            pool = store._require_pool()
+            key = "\x1f".join(("slack", "acme", "dev-platform", "C1", thread))
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM surface_thread_transcript WHERE scope_key = $1", key)
+                await conn.execute(
+                    "DELETE FROM surface_threads WHERE scope_key = $1", key)
+        except Exception:
+            pass
+        await store.close()

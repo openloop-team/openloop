@@ -12,11 +12,18 @@ from openloop.sessions.store import (
     SurfaceSessionStore,
     SurfaceTarget,
 )
+from openloop.sessions.threads import (
+    InMemoryThreadRecordStore,
+    ThreadRecord,
+    ThreadRecordStore,
+    TranscriptFragment,
+)
 
 __all__ = [
     "Artifact",
     "Deliverable",
     "InMemorySurfaceSessionStore",
+    "InMemoryThreadRecordStore",
     "Prose",
     "SessionRunner",
     "SlackSurfaceDelivery",
@@ -24,4 +31,7 @@ __all__ = [
     "SurfaceSession",
     "SurfaceSessionStore",
     "SurfaceTarget",
+    "ThreadRecord",
+    "ThreadRecordStore",
+    "TranscriptFragment",
 ]

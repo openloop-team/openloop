@@ -90,6 +90,71 @@ def _tool_message(call_id: str, content: str) -> dict:
     return {"role": "tool", "tool_call_id": call_id, "content": content}
 
 
+# --- turn-scoped replay cursor (M0a) ---
+#
+# In a threaded conversation `messages` is prefixed with prior delivered turns, so
+# the replay cursor (what has this turn already done?) must read only the CURRENT
+# turn's slice — everything from its user message onward. A whole-log cursor would
+# see the previous turn's final answer and treat the new turn as already finished.
+# The model still receives the full `messages`; only the cursor is turn-scoped.
+
+
+def _turn_start(messages: list[dict]) -> int:
+    """Index of the current turn's user message (the last user-role message)."""
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            return i
+    return 0
+
+
+def _turn_slice(messages: list[dict]) -> list[dict]:
+    return messages[_turn_start(messages):]
+
+
+def _trailing_assistant(turn: list[dict]) -> dict | None:
+    for msg in reversed(turn):
+        if msg.get("role") == "assistant":
+            return msg
+    return None
+
+
+def _executed_ids(turn: list[dict]) -> set[str]:
+    return {
+        m["tool_call_id"]
+        for m in turn
+        if m.get("role") == "tool" and m.get("tool_call_id")
+    }
+
+
+def _rounds_used(turn: list[dict]) -> int:
+    return sum(1 for m in turn if m.get("role") == "assistant")
+
+
+def _unresolved_tool_calls(turn: list[dict]) -> list[dict]:
+    """Tool-call dicts of the trailing assistant round that lack a tool result."""
+    last = _trailing_assistant(turn)
+    if last is None or not last.get("tool_calls"):
+        return []
+    executed = _executed_ids(turn)
+    return [tc for tc in last["tool_calls"] if tc.get("id") not in executed]
+
+
+def _parse_json(raw) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+async def _noop_checkpoint() -> None:
+    """Checkpoint hook for the inline (engine-less) path — nothing to persist."""
+    return None
+
+
 def _result_content(result: ToolResult | None) -> str:
     """Serialize an executed tool's result for the model.
 
@@ -220,15 +285,36 @@ class Runtime:
             )
             return _blocked_response(block_reason)
 
-        final_text, accounted, approval_ids = await self._run_tool_loop(
-            model, messages, task
-        )
+        state: dict = {"model": model, "messages": messages}
+        await self._run_tool_loop(state, task, checkpoint=_noop_checkpoint)
         if self.remember:
             await self._remember(task, scope, query_embedding)
+        accounted = self._accounted_from_state(state)
         outcome = self._task_outcome(accounted)
         await self._record_usage(task, model, accounted, outcome=outcome)
         self._log_completion(task, accounted, outcome)
-        return _final_response(final_text, accounted, approval_ids, model)
+        return self._final_from_state(state)
+
+    def _accounted_from_state(self, state: dict) -> ModelResponse:
+        """The accumulated ModelResponse for usage accounting, from turn state."""
+        usage = state.get("usage_total") or {}
+        return ModelResponse(
+            text=state.get("final_text") or "",
+            model=usage.get("model") or state.get("model", ""),
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            cost_usd=usage.get("cost_usd", 0.0),
+        )
+
+    def _final_from_state(self, state: dict) -> ModelResponse:
+        """The user-facing ModelResponse (approval-gate model tag if parked)."""
+        accounted = self._accounted_from_state(state)
+        return _final_response(
+            state.get("final_text") or "",
+            accounted,
+            state.get("approval_ids", []),
+            accounted.model,
+        )
 
     # --- shared phases (used by both the inline and workflow paths) ---
 
@@ -290,10 +376,11 @@ class Runtime:
             self.workflow_name,
             [
                 Step("prepare", self._wf_prepare),
-                # Model calls aren't idempotent: a crash before `run` completes is
-                # abandoned (not replayed); once `run` is done, the idempotent
-                # `persist` tail can still resume.
-                Step("run", self._wf_run, resumable=False),
+                # M0a: `run` is resumable because the tool loop is checkpoint-driven
+                # and resume-safe — it derives position from the committed `messages`
+                # log, so a resume never re-issues a recorded model round or
+                # re-executes a recorded tool call (see `_run_tool_loop`).
+                Step("run", self._wf_run, resumable=True),
                 Step("persist", self._wf_persist),
             ],
         )
@@ -325,14 +412,10 @@ class Runtime:
         if s.get("blocked"):
             return
         task = _task_from_dict(s["task"])
-        final_text, accounted, approval_ids = await self._run_tool_loop(
-            s["model"], s["messages"], task
-        )
-        # Persist received model outputs + tool-loop state + approvals.
-        s["messages"] = s["messages"]  # mutated in place by the loop
-        s["final_text"] = final_text
-        s["accounted"] = _resp_to_dict(accounted)
-        s["approval_ids"] = approval_ids
+        # Checkpoint-driven and resume-safe: the loop persists `messages`,
+        # `usage_total`, `final_text`, and `approval_ids` into `s` via ctx.checkpoint
+        # as it goes, so a re-drive of this step continues from the committed log.
+        await self._run_tool_loop(s, task, checkpoint=ctx.checkpoint)
 
     async def _wf_persist(self, ctx: "WorkflowContext") -> None:
         s = ctx.state
@@ -346,7 +429,7 @@ class Runtime:
                 s["usage_recorded"] = True
             return
 
-        accounted = _resp_from_dict(s["accounted"])
+        accounted = self._accounted_from_state(s)
         # Idempotent writes: flags guard against a resumed persist double-writing.
         if self.remember and not s.get("remembered"):
             await self._remember(task, s["scope"], s.get("query_embedding"))
@@ -393,92 +476,104 @@ class Runtime:
             return _blocked_response(s["block_reason"])
         if instance.status in ("failed", "abandoned"):
             return _interrupted_response()
-        accounted = _resp_from_dict(s.get("accounted", {}))
-        return _final_response(
-            s.get("final_text", ""), accounted, s.get("approval_ids", []),
-            s.get("model", accounted.model),
-        )
+        return self._final_from_state(s)
 
-    async def _run_tool_loop(
-        self, model: str, messages: list[dict], task: Task
-    ) -> tuple[str, ModelResponse, list[str]]:
-        """Drive model<->tool round-trips until a final answer or an approval.
+    async def _run_tool_loop(self, state: dict, task: Task, *, checkpoint) -> None:
+        """Drive model<->tool round-trips, checkpoint-driven and resume-safe (M0a).
 
-        Returns the user-facing text, an accumulated ModelResponse for usage
-        accounting (real model + summed tokens/cost), and the IDs of any write
-        actions left awaiting human approval.
+        Reads and writes ``state`` in place — ``messages`` (the durable round log),
+        ``usage_total`` (summed tokens/cost), ``final_text``, ``approval_ids`` — and
+        calls ``checkpoint`` after each committed model round and tool result. Loop
+        position is derived from the current turn's slice of ``messages`` (see the
+        turn-cursor helpers), so a resume never re-issues a recorded model round or
+        re-executes a recorded tool call. ``checkpoint`` is a no-op on the inline
+        path and the workflow engine's checkpoint on the durable path.
+
+        Ends the turn on a final answer, budget exhaustion (a synthesized answer is
+        committed so the log stays complete), or a human-approval gate (M0a records
+        the approval and stops; the continuation that re-runs the model is M0b).
         """
         specs = self.tools.tool_specs(self.agent) if self.tools else None
         tool_defs = specs.definitions if specs and specs.definitions else None
         by_name = specs.by_name if specs else {}
 
-        total_cost = 0.0
-        total_pt = total_ct = 0
-        final_model = model
-        final_text = ""
-        approval_messages: list[str] = []
-        approval_ids: list[str] = []
-        response = None
+        model = state["model"]
+        messages = state["messages"]
+        usage = state.setdefault(
+            "usage_total",
+            {"model": model, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0},
+        )
 
-        for _ in range(MAX_TOOL_ITERS):
-            response = await self.gateway.complete(model, messages, tools=tool_defs)
-            total_cost += response.cost_usd
-            total_pt += response.prompt_tokens
-            total_ct += response.completion_tokens
-            final_model = response.model or model
-
-            if not response.tool_calls:
-                final_text = response.text
+        while True:
+            # (T) TERMINAL FIRST — a committed final answer (or approval end) ends the
+            # turn, at any rounds_used. Covers the crash window where the answer was
+            # logged/persisted but the run step wasn't yet marked complete.
+            if state.get("final_text") is not None:
+                break
+            turn = _turn_slice(messages)
+            last = _trailing_assistant(turn)
+            if last is not None and not last.get("tool_calls"):
+                state["final_text"] = last.get("content") or ""
                 break
 
-            messages.append(
-                response.raw_message
-                or {"role": "assistant", "content": response.text}
-            )
-            stop_for_approval = False
-            for call in response.tool_calls:
-                action = by_name.get(call.name)
+            pending = _unresolved_tool_calls(turn)
+            if not pending:
+                # Would start a NEW model round (turn start, or round fully resolved).
+                if _rounds_used(turn) >= MAX_TOOL_ITERS:  # (G) budget stops a new round only
+                    messages.append({
+                        "role": "assistant",
+                        "content": "I couldn't finish that within the tool-call limit.",
+                    })
+                    state["final_text"] = messages[-1]["content"]
+                    await checkpoint()
+                    break
+                response = await self.gateway.complete(model, messages, tools=tool_defs)
+                usage["prompt_tokens"] += response.prompt_tokens
+                usage["completion_tokens"] += response.completion_tokens
+                usage["cost_usd"] += response.cost_usd
+                usage["model"] = response.model or model
+                messages.append(
+                    response.raw_message
+                    or {"role": "assistant", "content": response.text}
+                )
+                await checkpoint()  # (B) COMMIT the round BEFORE any tool runs
+                if not response.tool_calls:
+                    state["final_text"] = response.text
+                    break
+                continue  # re-derive pending from the just-appended assistant round
+
+            # (C) Execute this round's unresolved tool calls (budget can't abandon them).
+            for tc in pending:
+                call_id = tc.get("id")
+                fn = tc.get("function", {})
+                call_name = fn.get("name", "")
+                action = by_name.get(call_name)
                 if action is None:
-                    messages.append(
-                        _tool_message(call.id, f"error: unknown tool {call.name}")
-                    )
+                    messages.append(_tool_message(call_id, f"error: unknown tool {call_name}"))
+                    await checkpoint()
                     continue
                 inv = await self.tools.invoke(
-                    self.agent, action, call.arguments, requested_by=task.user
+                    self.agent, action, _parse_json(fn.get("arguments")),
+                    requested_by=task.user,
                 )
                 if inv.status == "executed":
-                    messages.append(_tool_message(call.id, _result_content(inv.result)))
+                    messages.append(_tool_message(call_id, _result_content(inv.result)))
                 elif inv.status == "pending_approval":
-                    approval_messages.append(inv.message or "approval required")
                     if inv.approval is not None:
-                        approval_ids.append(inv.approval.id)
+                        state.setdefault("approval_ids", []).append(inv.approval.id)
+                    note = inv.message or "approval required"
+                    prev = state.get("final_text")
+                    state["final_text"] = f"{prev}\n{note}" if prev else note
                     messages.append(
-                        _tool_message(call.id, f"held for human approval: {inv.message}")
+                        _tool_message(call_id, f"held for human approval: {inv.message}")
                     )
-                    stop_for_approval = True
                 else:  # forbidden / denied
-                    messages.append(
-                        _tool_message(call.id, f"{inv.status}: {inv.message}")
-                    )
-            if stop_for_approval:
+                    messages.append(_tool_message(call_id, f"{inv.status}: {inv.message}"))
+                await checkpoint()  # (D) commit each tool result / approval hold
+            if state.get("approval_ids"):
+                # M0a: approval ends the turn (M0b adds the continuation post-Phase-C).
                 break
-        else:
-            final_text = (
-                (response.text if response else "")
-                or "I couldn't finish that within the tool-call limit."
-            )
-
-        if approval_messages:
-            final_text = "\n".join(approval_messages)
-
-        accounted = ModelResponse(
-            text=final_text,
-            model=final_model,
-            prompt_tokens=total_pt,
-            completion_tokens=total_ct,
-            cost_usd=total_cost,
-        )
-        return final_text, accounted, approval_ids
+            # Round fully resolved with no approval → loop re-derives the next round.
 
     def _task_outcome(self, response: ModelResponse) -> str:
         per_task = self.agent.spec.budget.per_task_usd
@@ -570,21 +665,3 @@ def _task_from_dict(data: dict) -> Task:
     )
 
 
-def _resp_to_dict(response: ModelResponse) -> dict:
-    return {
-        "text": response.text,
-        "model": response.model,
-        "prompt_tokens": response.prompt_tokens,
-        "completion_tokens": response.completion_tokens,
-        "cost_usd": response.cost_usd,
-    }
-
-
-def _resp_from_dict(data: dict) -> ModelResponse:
-    return ModelResponse(
-        text=data.get("text", ""),
-        model=data.get("model", ""),
-        prompt_tokens=data.get("prompt_tokens", 0),
-        completion_tokens=data.get("completion_tokens", 0),
-        cost_usd=data.get("cost_usd", 0.0),
-    )

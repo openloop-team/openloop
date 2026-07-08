@@ -67,7 +67,10 @@ async def test_plain_chat_runs_through_the_workflow():
     assert inst.completed_steps == ["prepare", "run", "persist"]
     # Turn state persisted: messages + received model output.
     assert inst.state["final_text"] == "hello"
-    assert inst.state["messages"][-1] == {"role": "user", "content": "hi"}
+    # M0a: the log is COMPLETE — the final assistant answer is appended (it used to
+    # be dropped), so a resume/next turn sees the real answer, not a summary.
+    assert inst.state["messages"][-1] == {"role": "assistant", "content": "hello"}
+    assert inst.state["messages"][-2] == {"role": "user", "content": "hi"}
 
 
 async def test_write_tool_call_held_for_approval_via_workflow():
@@ -127,25 +130,148 @@ async def test_turn_is_remembered_once():
     assert any("remember this" in r.text for r in recalled)
 
 
-async def test_crash_before_run_completes_is_abandoned_not_replayed():
-    gateway = CountingGateway()
-    rt, engine, store = _runtime(gateway)
-    # Crashed mid-run: prepare done, run (non-resumable) not yet complete.
+async def test_crash_mid_run_resumes_without_replaying_committed_answer():
+    # M0a: `run` is resumable. A turn that committed its final answer to the log
+    # but crashed before the run step was marked complete RESUMES (no longer
+    # abandoned) and reconstructs the answer from the log — without re-calling the
+    # model. This is the crash window fixed by the terminal check.
+    usage = InMemoryUsageStore()
+    gateway = CountingGateway()  # any call here would be a replay bug
+    rt, engine, store = _runtime(gateway, usage=usage)
     await store.upsert(WorkflowInstance(
-        id="crashed", workflow=rt.workflow_name, status="running",
-        completed_steps=["prepare"],
+        id="midrun", workflow=rt.workflow_name, status="running",
+        completed_steps=["prepare"],  # run not yet complete
         state={
             "task": {"text": "hi", "surface": "slack", "channel": "#dev-platform",
                      "user": "U1"},
-            "model": "m", "messages": [],
+            "model": "m", "scope": scope_key_for(_agent(), "#dev-platform"),
+            "query_embedding": None,
+            # The final answer was committed to the log at (B); final_text was not
+            # yet set when the crash landed.
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "answer"},
+            ],
+            "usage_total": {"model": "m", "prompt_tokens": 3,
+                            "completion_tokens": 2, "cost_usd": 0.01},
         },
     ))
 
     resumed = await engine.resume_incomplete()
 
-    assert "crashed" not in resumed  # not resumed
-    assert (await store.get("crashed")).status == "abandoned"
-    assert gateway.calls == 0  # the model was never re-called
+    assert "midrun" in resumed  # resumed, not abandoned
+    inst = await store.get("midrun")
+    assert inst.status == "completed"
+    assert inst.state["final_text"] == "answer"  # reconstructed from the log
+    assert gateway.calls == 0  # NO model replay
+    assert len(usage.records) == 1  # usage recorded once by the persist tail
+
+
+async def test_resume_after_committed_final_round_at_budget_does_not_recall():
+    # The specific corner: the final answer was produced on the last permitted round
+    # (rounds_used == MAX_TOOL_ITERS) and committed, but final_text wasn't persisted.
+    # The terminal check must fire BEFORE the budget guard so the answer is
+    # reconstructed, not overwritten by the "couldn't finish" fallback.
+    from openloop.runtime.pipeline import MAX_TOOL_ITERS
+    gateway = CountingGateway()
+    rt, engine, store = _runtime(gateway)
+    msgs = [{"role": "user", "content": "hi"}]
+    # MAX_TOOL_ITERS assistant rounds already in the log; the last is a final answer.
+    for i in range(MAX_TOOL_ITERS - 1):
+        msgs.append({"role": "assistant", "content": None,
+                     "tool_calls": [{"id": f"c{i}", "type": "function",
+                                     "function": {"name": "x", "arguments": "{}"}}]})
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": "ok"})
+    msgs.append({"role": "assistant", "content": "the answer"})  # MAX-th round, final
+
+    await store.upsert(WorkflowInstance(
+        id="atbudget", workflow=rt.workflow_name, status="running",
+        completed_steps=["prepare"],
+        state={
+            "task": {"text": "hi", "surface": "slack", "channel": "#dev-platform",
+                     "user": "U1"},
+            "model": "m", "scope": scope_key_for(_agent(), "#dev-platform"),
+            "query_embedding": None, "messages": msgs,
+        },
+    ))
+
+    await engine.resume_incomplete()
+
+    inst = await store.get("atbudget")
+    assert inst.status == "completed"
+    assert inst.state["final_text"] == "the answer"  # reconstructed, not the fallback
+    assert gateway.calls == 0
+
+
+async def test_followup_turn_calls_the_model_not_echo():
+    # THE cursor-scoping bug (harmful): a follow-up turn's messages are prefixed
+    # with prior delivered history ending in the previous turn's assistant answer.
+    # The replay cursor must be TURN-SCOPED — otherwise the terminal check sees the
+    # old answer at turn entry and echoes it without ever calling the model.
+    gateway = ScriptedGateway([ModelResponse(text="fresh answer", model="m")])
+    rt, engine, store = _runtime(gateway)
+    task = Task(
+        text="and then?", surface="slack", channel="#dev-platform", user="U1",
+        history=[{"role": "user", "content": "q1"},
+                 {"role": "assistant", "content": "old answer"}],
+    )
+
+    res = await rt.handle(task)
+
+    assert len(gateway.calls) == 1  # the model WAS called — no echo
+    assert res.text == "fresh answer"
+    assert res.text != "old answer"
+
+
+class _CountingGitHub(FakeGitHub):
+    """FakeGitHub that counts issue reads, to prove no re-execution on resume."""
+
+    def __init__(self):
+        super().__init__()
+        self.reads = 0
+
+    async def get_issue(self, repo, number):
+        self.reads += 1
+        return await super().get_issue(repo, number)
+
+
+async def test_resume_skips_already_executed_tool_call():
+    # A tool round with one call committed and one not: resume executes ONLY the
+    # unresolved call — the committed one is never re-invoked (no double side effect).
+    github = _CountingGitHub()
+    tools = ToolGateway(tools=[GitHubConnector(github)])
+    gateway = ScriptedGateway([ModelResponse(text="done", model="m")])
+    rt, engine, store = _runtime(gateway, tools=tools)
+    await store.upsert(WorkflowInstance(
+        id="toolresume", workflow=rt.workflow_name, status="running",
+        completed_steps=["prepare"],
+        state={
+            "task": {"text": "read issues", "surface": "slack",
+                     "channel": "#dev-platform", "user": "U1"},
+            "model": "m", "scope": scope_key_for(_agent(), "#dev-platform"),
+            "query_embedding": None,
+            "messages": [
+                {"role": "user", "content": "read issues"},
+                {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {
+                        "name": "github_issues_read",
+                        "arguments": '{"repo": "acme/x", "number": 1}'}},
+                    {"id": "c2", "type": "function", "function": {
+                        "name": "github_issues_read",
+                        "arguments": '{"repo": "acme/x", "number": 2}'}},
+                ]},
+                # c1 already executed (committed); c2 is still unresolved.
+                {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+            ],
+        },
+    ))
+
+    await engine.resume_incomplete()
+
+    inst = await store.get("toolresume")
+    assert inst.status == "completed"
+    assert github.reads == 1  # only c2 ran on resume; c1 NOT re-invoked
+    assert inst.state["final_text"] == "done"
 
 
 async def test_crash_after_run_resumes_idempotent_persist_tail():

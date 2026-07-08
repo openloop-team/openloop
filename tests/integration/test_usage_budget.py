@@ -112,8 +112,12 @@ async def test_rate_limited_task_is_refused_before_the_model():
     second = await runtime.handle(_task("two"))
     assert second.model == "throughput-guard"
     assert "rate limit" in second.text.lower()
-    # The model was called once (the admitted task), not twice.
-    assert gateway.last_messages[-1]["content"] == "one"
+    # The model was called for the admitted task ("one") and never for the refused
+    # one ("two"). (The loop appends the final answer to the log, so the last
+    # message is no longer the user turn — assert on membership, not position.)
+    seen = [m.get("content") for m in gateway.last_messages]
+    assert "one" in seen
+    assert "two" not in seen
     # The refusal is visible in the audit trail.
     assert usage.records[-1].outcome == "rate_limited"
     assert usage.records[-1].cost_usd == 0.0
