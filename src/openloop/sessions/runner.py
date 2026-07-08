@@ -32,6 +32,7 @@ import time
 import uuid
 
 from openloop.runtime import Runtime, Task
+from openloop.runtime.pipeline import _result_content
 from openloop.sessions.delivery import SurfaceDelivery
 from openloop.sessions.store import (
     TERMINAL,
@@ -281,7 +282,9 @@ class SessionRunner:
         if session is not None:
             try:
                 if session.status == "waiting":
-                    await self._continue_session(session, inv, approver, message)
+                    await self._continue_session(
+                        session, inv, approver, message, approval_id=approval_id
+                    )
                 elif session.status in TERMINAL and session.final_message_id is None:
                     # A prior continuation flipped the session terminal but a Slack
                     # post failed before the answer landed — re-deliver it from the
@@ -397,7 +400,8 @@ class SessionRunner:
         return await recover(instance_id)
 
     async def _continue_session(
-        self, session: SurfaceSession, inv, approver: str, message: str
+        self, session: SurfaceSession, inv, approver: str, message: str,
+        approval_id: str | None = None,
     ) -> None:
         """Apply an approval outcome without treating non-terminal work as final."""
         fresh = await self.sessions.get(session.id)
@@ -421,6 +425,13 @@ class SessionRunner:
         if inv.status == "executed":
             if session.final_message_id is not None:
                 return
+            # M0b: re-run the model with the approved result folded in, so the reply
+            # is a fresh model answer — not the raw tool summary. Falls back to the
+            # summary if the continuation can't be built (no engine / lost state).
+            if approval_id and await self._continue_with_model(
+                session, approval_id, inv, approver, message
+            ):
+                return
             detail = inv.result.summary if inv.result else (inv.message or "done")
             final_text = detail
         elif inv.status == "denied":
@@ -440,6 +451,64 @@ class SessionRunner:
             logger.exception(
                 "failed to collapse approval card for session %s", session.id
             )
+
+    async def _continue_with_model(
+        self, session: SurfaceSession, approval_id: str, inv, approver: str,
+        message: str,
+    ) -> bool:
+        """Re-run the model with the approved tool result folded in, under the SAME
+        session (M0b). Returns True if it drove a continuation, False if it could
+        not (caller then falls back to delivering the tool summary).
+
+        The continuation is a *new* ``agent_task`` instance under the same
+        ``SurfaceSession`` — a deterministic id (``{session.id}:cont:{approval_id}``)
+        so a re-spawn is idempotent — seeded with the original turn's message log
+        after the approved call's held placeholder is replaced by the real result.
+        The resume-aware loop then sees the round resolved and the next model call
+        produces a fresh answer, delivered under the session's one delivery record.
+        """
+        runtime = self.runtime
+        engine = getattr(runtime, "engine", None)
+        cont = getattr(runtime, "continue_turn", None)
+        if engine is None or cont is None or session.workflow_instance_id is None:
+            return False
+        prior = await engine.store.get(session.workflow_instance_id)
+        if prior is None:
+            return False
+        messages = [dict(m) for m in (prior.state.get("messages") or [])]
+        call_id = (prior.state.get("approval_calls") or {}).get(approval_id)
+        result_content = _result_content(inv.result) if inv.result else "done"
+        folded = False
+        for m in messages:
+            if m.get("role") == "tool" and m.get("tool_call_id") == call_id:
+                m["content"] = result_content  # held placeholder -> real result
+                folded = True
+                break
+        if not folded:
+            return False
+
+        task = Task(
+            text=session.request_text or "",
+            surface=session.target.surface,
+            channel=session.target.channel,
+        )
+        cont_id = f"{session.id}:cont:{approval_id}"
+        response = await cont(task, messages, instance_id=cont_id)
+        # The continuation is a new instance under the same session: repoint recovery
+        # at it, then deliver the fresh answer through the normal path (which re-parks
+        # on a *new* approval if the model asked for another write). Keep the resolved
+        # approval id on the session so the second-click / reconciler repair path can
+        # still map back to it (`_deliver` overwrites it only on a new approval).
+        session.workflow_instance_id = cont_id
+        await self.sessions.upsert(session)
+        await self._deliver(session, response)
+        try:
+            await self._update_approval(session, message, [])
+        except Exception:  # noqa: BLE001 — buttons going stale is cosmetic
+            logger.exception(
+                "failed to collapse approval card for session %s", session.id
+            )
+        return True
 
     async def _on_workflow_terminal(self, instance) -> None:
         approval_id = _approval_id_for_instance(instance)
@@ -505,7 +574,8 @@ class SessionRunner:
             inv = _workflow_invocation(instance)
             approver = request.decided_by or "an approver"
             await self._continue_session(
-                session, inv, approver, resolution_message(inv, approver)
+                session, inv, approver, resolution_message(inv, approver),
+                approval_id=approval_id,
             )
             return True
         return False

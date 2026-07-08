@@ -179,6 +179,9 @@ def _waiting_runner(*, delivery=None):
             tool_call_response(
                 "m", [("c1", "github_issues_write", {"repo": "acme/x", "title": "T"})]
             ),
+            # M0b: after the write is approved, the model is re-run with the result
+            # folded in and produces the fresh, user-facing answer.
+            ModelResponse(text="Opened issue #1 ✅", model="m"),
         ]),
         tools=tools,
         delivery=delivery,
@@ -197,14 +200,37 @@ async def test_approve_continues_session_and_posts_outcome_in_thread():
 
     assert message.startswith("✅ Approved by @maciag.artur")
     assert github.created  # the write executed on approval
-    # The outcome is delivered as the final answer in the original thread.
+    # M0b: the delivered answer is the model's FRESH reply (with the result folded
+    # in), not the raw tool summary, posted in the original thread.
     assert len(delivery.finals) == 1
+    assert delivery.finals[0]["text"] == "Opened issue #1 ✅"
     assert delivery.finals[0]["target"].thread == "100.1"
     # The session is now completed and the approval card was collapsed (no buttons).
     done = await sessions.get(session.id)
     assert done.status == "completed"
     assert done.final_message_id is not None
     assert delivery.approvals[-1]["requests"] == []
+
+
+async def test_approval_reruns_model_with_tool_result_folded_in():
+    # The essence of M0b: on approval the model is re-run, and that continuation
+    # call sees the ACTUAL tool result folded into the held round — not the
+    # "held for human approval" placeholder — so the reply is a fresh model answer.
+    runner, sessions, delivery, github = _waiting_runner()
+    session = await runner.run(_task("open an issue"), _target())
+
+    await runner.resolve_approval(session.approval_ids[0], "@maciag.artur", approve=True)
+
+    calls = runner.runtime.gateway.calls
+    assert len(calls) == 2  # initial turn + continuation
+    tool_msgs = [m for m in calls[1]["messages"] if m.get("role") == "tool"]
+    assert tool_msgs  # the held round is present in the continuation's context
+    assert all("held for human approval" not in m["content"] for m in tool_msgs)
+    # The continuation instance is a new id under the SAME session.
+    done = await sessions.get(session.id)
+    assert done.workflow_instance_id == f"{session.id}:cont:{session.approval_ids[0]}"
+    assert done.status == "completed"
+    assert delivery.finals[0]["text"] == "Opened issue #1 ✅"
 
 
 async def test_deny_continues_session_without_executing():
@@ -268,6 +294,8 @@ async def test_workflow_approval_waits_for_background_terminal_result():
                 [("c1", "coding_worker_pr_write",
                   {"repo": "acme/x", "instruction": "add retries"})],
             ),
+            # M0b continuation: after the PR workflow finishes, the model is re-run.
+            ModelResponse(text="Opened draft PR #1 🚀", model="m"),
         ]),
         tools=tools,
         usage=InMemoryUsageStore(),
@@ -297,7 +325,8 @@ async def test_workflow_approval_waits_for_background_terminal_result():
     completed = await sessions.get(session.id)
     assert completed.status == "completed"
     assert completed.final_message_id is not None
-    assert "opened draft PR #1" in delivery.finals[-1]["text"]
+    # M0b: the final answer is the model's fresh reply, not the raw workflow summary.
+    assert delivery.finals[-1]["text"] == "Opened draft PR #1 🚀"
 
 
 async def test_workflow_progress_is_surfaced_as_transient_status():
@@ -320,6 +349,7 @@ async def test_workflow_progress_is_surfaced_as_transient_status():
                 [("c1", "coding_worker_pr_write",
                   {"repo": "acme/x", "instruction": "add retries"})],
             ),
+            ModelResponse(text="Opened draft PR #1 🚀", model="m"),  # M0b continuation
         ]),
         tools=tools,
         usage=InMemoryUsageStore(),
@@ -346,8 +376,8 @@ async def test_workflow_progress_is_surfaced_as_transient_status():
     assert all(p.startswith("is ") and p.endswith("…") for p in worker_phrases)
     # Deduped: an unchanged phrase never re-hits the API back-to-back.
     assert all(a != b for a, b in zip(phrases, phrases[1:]))
-    # It still delivers the final answer after the progress ticks.
-    assert "opened draft PR #1" in delivery.finals[-1]["text"]
+    # It still delivers the final answer (the M0b model reply) after the ticks.
+    assert delivery.finals[-1]["text"] == "Opened draft PR #1 🚀"
 
 
 async def test_progress_status_is_reasserted_after_refresh_interval():

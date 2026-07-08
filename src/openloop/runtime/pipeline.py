@@ -397,15 +397,53 @@ class Runtime:
         )
         return self._response_from(instance)
 
+    async def continue_turn(
+        self, task: Task, messages: list[dict], *, instance_id: str
+    ) -> ModelResponse:
+        """Re-run the model on a pre-seeded message log (M0b continuation).
+
+        Used after a human approval: the caller folds the approved tool result into
+        the held round and hands the log here. Prepare skips message-building (the
+        log is authoritative) but still enforces budget; the resume-aware loop sees
+        the round now resolved and produces a fresh answer. Idempotent on
+        ``instance_id`` (deterministic per session+approval), so a re-spawn returns
+        the existing continuation instead of re-driving the model.
+        """
+        if self.engine is None:
+            state: dict = {
+                "model": self.agent.model_for(task.kind), "messages": messages,
+            }
+            await self._run_tool_loop(state, task, checkpoint=_noop_checkpoint)
+            return self._final_from_state(state)
+        model = self.agent.model_for(task.kind)
+        scope = scope_key_for(self.agent, task.channel)
+        instance = await self.engine.start(
+            self.workflow_name,
+            instance_id,
+            {
+                "task": _task_to_dict(task), "model": model, "scope": scope,
+                "messages": messages, "query_embedding": None, "continuation": True,
+            },
+        )
+        return self._response_from(instance)
+
     async def _wf_prepare(self, ctx: "WorkflowContext") -> None:
-        task = _task_from_dict(ctx.state["task"])
+        s = ctx.state
+        task = _task_from_dict(s["task"])
+        if s.get("continuation"):
+            # Continuation: model/scope/messages are pre-seeded and authoritative —
+            # only re-enforce the budget guard (a continuation still spends).
+            decision = await check_budget(self.agent, self.usage)
+            if not decision.allowed:
+                s.update({"blocked": True, "block_reason": decision.reason})
+            return
         model, scope, messages, query_embedding, block_reason = await self._prepare(task)
-        ctx.state.update({"model": model, "scope": scope})
+        s.update({"model": model, "scope": scope})
         if block_reason is not None:
-            ctx.state.update({"blocked": True, "block_reason": block_reason})
+            s.update({"blocked": True, "block_reason": block_reason})
             return
         # Persisted turn state: messages (system+history+user), recall vector.
-        ctx.state.update({"messages": messages, "query_embedding": query_embedding})
+        s.update({"messages": messages, "query_embedding": query_embedding})
 
     async def _wf_run(self, ctx: "WorkflowContext") -> None:
         s = ctx.state
@@ -430,8 +468,10 @@ class Runtime:
             return
 
         accounted = self._accounted_from_state(s)
-        # Idempotent writes: flags guard against a resumed persist double-writing.
-        if self.remember and not s.get("remembered"):
+        # Idempotent writes: flags guard against a resumed persist double-writing. A
+        # continuation must NOT re-remember (the original turn already did) but DOES
+        # record its own new model spend.
+        if self.remember and not s.get("remembered") and not s.get("continuation"):
             await self._remember(task, s["scope"], s.get("query_embedding"))
             s["remembered"] = True
             await self.engine.checkpoint(ctx.instance)
@@ -561,6 +601,10 @@ class Runtime:
                 elif inv.status == "pending_approval":
                     if inv.approval is not None:
                         state.setdefault("approval_ids", []).append(inv.approval.id)
+                        # Map approval -> the tool call it gates, so a continuation
+                        # (M0b) can fold the approved result into this exact call's
+                        # held message and re-run the model.
+                        state.setdefault("approval_calls", {})[inv.approval.id] = call_id
                     note = inv.message or "approval required"
                     prev = state.get("final_text")
                     state["final_text"] = f"{prev}\n{note}" if prev else note
