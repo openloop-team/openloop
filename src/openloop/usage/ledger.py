@@ -71,6 +71,9 @@ class WorkerSpendLedger:
     agents: dict[str, Agent]
     default_agent: str
     require_per_task_cap: bool = False
+    # Keep the coding-worker default for compatibility, while allowing another
+    # worker type to remain distinguishable in the shared usage/audit trail.
+    task_kind: str = WORKER_TASK_KIND
 
     def _agent_for(self, agent_name: str | None) -> Agent:
         agent = self.agents.get(agent_name) if agent_name else None
@@ -191,7 +194,7 @@ class WorkerSpendLedger:
                 workspace=agent.metadata.workspace,
                 agent=agent.metadata.name,
                 model=self.model,
-                task_kind=WORKER_TASK_KIND,
+                task_kind=self.task_kind,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cost_usd=cost_usd,

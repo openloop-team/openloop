@@ -106,6 +106,40 @@ class Settings(BaseSettings):
     # Cap on concurrently-kept warm checkouts (LRU-evicted past it).
     coding_worker_warm_capacity: int = 8
 
+    # Sealed analysis worker (Phase 1). It executes model-authored Python over
+    # controller-provisioned data, so unlike the coding worker it NEVER permits
+    # host execution. The worker remains off until an operator supplies the
+    # digest-pinned image produced from docker/analysis.Dockerfile.
+    analysis_worker_enabled: bool = False
+    analysis_worker_backend: str = "builtin"
+    analysis_worker_model: str = "anthropic/claude-sonnet-4-6"
+    # Only ``docker`` is accepted. ``host`` is an explicit unsafe value and
+    # disables the worker rather than weakening the execution boundary.
+    analysis_worker_sandbox: str = "docker"
+    # Must be a digest reference (contains ``@sha256:``); no mutable image tag
+    # is allowed for arbitrary model-authored execution.
+    analysis_worker_sandbox_image: str | None = None
+    # This worker has no adaptive access: its sandbox always stays fully sealed.
+    analysis_worker_sandbox_network: str = "none"
+    # Host path visible to the Docker daemon; required in a containerized deploy
+    # for the same sibling-container bind-mount reason as coding workspaces.
+    analysis_worker_workspace_dir: str | None = None
+    analysis_worker_timeout_seconds: float = 120.0
+    analysis_worker_kill_after_seconds: float = 10.0
+    analysis_worker_memory: str = "512m"
+    analysis_worker_memory_swap: str | None = None
+    analysis_worker_cpus: float = 1.0
+    analysis_worker_pids_limit: int = 128
+    analysis_worker_tmp_size: str = "64m"
+    # Each stdout/stderr stream is retained to this cap (but drained to EOF).
+    analysis_worker_stream_cap_bytes: int = 262_144
+    # Both the best-effort outputs-dir watchdog and the hard report read-out
+    # boundary use this cap. The watchdog only limits overshoot; read-out is the
+    # exfiltration guarantee.
+    analysis_worker_report_max_bytes: int = 1_000_000
+    analysis_worker_output_watch_interval_seconds: float = 2.0
+    analysis_worker_summary_lines: int = 12
+
     # Storage / queue
     database_url: str = (
         "postgresql://openloop:change-me@localhost:5432/openloop_agents"

@@ -19,6 +19,13 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
+from openloop.analysis import (
+    ArtifactStore,
+    InMemoryArtifactStore,
+    InMemoryInputStore,
+    InputStore,
+)
+from openloop.analysis.postgres import PostgresArtifactStore, PostgresInputStore
 from openloop.agents import load_agents
 from openloop.agents.schema import Agent
 from openloop.approvals import ApprovalStore, InMemoryApprovalStore
@@ -58,7 +65,16 @@ from openloop.sandbox import (
     DockerSandbox,
     HostSandbox,
     Sandbox,
+    SandboxLimits,
     SandboxUnavailable,
+    sweep_expired_sandboxes,
+)
+from openloop.tools.analysis_worker import (
+    ANALYSIS_REPORT_WRITE,
+    AnalysisWorker,
+    AnalysisWorkerConnector,
+    BuiltinAnalysisWorker,
+    SealedAnalysisOrchestrator,
 )
 from openloop.tools.coding_worker import (
     CodingWorker,
@@ -152,6 +168,20 @@ def build_thread_record_store(settings: Settings) -> ThreadRecordStore:
     if settings.memory_backend == "postgres":
         return PostgresThreadRecordStore(settings.database_url)
     return InMemoryThreadRecordStore()
+
+
+def build_analysis_input_store(settings: Settings) -> InputStore:
+    """Pick the job-keyed sealed-analysis input store."""
+    if settings.memory_backend == "postgres":
+        return PostgresInputStore(settings.database_url)
+    return InMemoryInputStore()
+
+
+def build_analysis_artifact_store(settings: Settings) -> ArtifactStore:
+    """Pick the job-keyed sealed-analysis artifact store."""
+    if settings.memory_backend == "postgres":
+        return PostgresArtifactStore(settings.database_url)
+    return InMemoryArtifactStore()
 
 
 def _resolve_lock_backend(settings: Settings) -> str:
@@ -283,6 +313,13 @@ def _worker_workspace_root(settings: Settings) -> Path | None:
     return None
 
 
+def _analysis_workspace_root(settings: Settings) -> Path | None:
+    """The host-visible root used for sealed analysis workspaces and its probe."""
+    if settings.analysis_worker_workspace_dir:
+        return Path(settings.analysis_worker_workspace_dir)
+    return None
+
+
 def build_worker_sandbox(settings: Settings) -> "Sandbox | None":
     """Pick where the coding worker's model-influenced execution runs.
 
@@ -313,6 +350,44 @@ def build_worker_sandbox(settings: Settings) -> "Sandbox | None":
         settings.coding_worker_sandbox,
     )
     return None
+
+
+def build_analysis_sandbox(settings: Settings) -> "DockerSandbox | None":
+    """Build the analysis sandbox, rejecting every weaker or mutable variant.
+
+    Model-authored analysis is arbitrary Python, so a host fallback would be
+    controller RCE. The image must be digest-pinned and the only network mode is
+    ``none``; all other configuration failures disable the worker before anyone
+    can approve a job.
+    """
+    if settings.analysis_worker_sandbox != "docker":
+        log.error(
+            "ANALYSIS WORKER DISABLED: ANALYSIS_WORKER_SANDBOX=%r; only docker "
+            "is allowed for model-authored analysis (host is forbidden)",
+            settings.analysis_worker_sandbox,
+        )
+        return None
+    if settings.analysis_worker_sandbox_network != "none":
+        log.error(
+            "ANALYSIS WORKER DISABLED: ANALYSIS_WORKER_SANDBOX_NETWORK=%r; "
+            "sealed analysis requires network=none",
+            settings.analysis_worker_sandbox_network,
+        )
+        return None
+    image = settings.analysis_worker_sandbox_image
+    if not image or "@sha256:" not in image:
+        log.error(
+            "ANALYSIS WORKER DISABLED: ANALYSIS_WORKER_SANDBOX_IMAGE must be "
+            "a digest-pinned image reference (…@sha256:…)",
+        )
+        return None
+    sandbox = DockerSandbox(image, network="none", kind="analysis")
+    try:
+        sandbox.probe_sealed(workspace_root=_analysis_workspace_root(settings))
+    except SandboxUnavailable:
+        log.error("sealed analysis sandbox probe failed", exc_info=True)
+        return None
+    return sandbox
 
 
 def build_warm_workspace_pool(settings: Settings) -> "WarmWorkspacePool | None":
@@ -384,10 +459,61 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
     return None
 
 
+def build_analysis_worker(settings: Settings) -> "AnalysisWorker | None":
+    """Build the only Phase 1 analysis backend, fail-closed on every mismatch."""
+    if settings.analysis_worker_backend != "builtin":
+        log.error(
+            "unknown ANALYSIS_WORKER_BACKEND=%r (expected builtin)",
+            settings.analysis_worker_backend,
+        )
+        return None
+    if (
+        settings.analysis_worker_timeout_seconds <= 0
+        or settings.analysis_worker_kill_after_seconds <= 0
+        or settings.analysis_worker_report_max_bytes <= 0
+        or settings.analysis_worker_stream_cap_bytes <= 0
+        or settings.analysis_worker_output_watch_interval_seconds <= 0
+        or settings.analysis_worker_summary_lines <= 0
+        or settings.analysis_worker_pids_limit <= 0
+        or settings.analysis_worker_cpus <= 0
+        or not settings.analysis_worker_memory
+        or not settings.analysis_worker_tmp_size
+    ):
+        log.error("ANALYSIS WORKER DISABLED: sealed resource limits must be positive")
+        return None
+    sandbox = build_analysis_sandbox(settings)
+    if sandbox is None:
+        return None
+    return BuiltinAnalysisWorker(
+        settings.analysis_worker_model,
+        sandbox,
+        limits=SandboxLimits(
+            timeout_seconds=settings.analysis_worker_timeout_seconds,
+            kill_after_seconds=settings.analysis_worker_kill_after_seconds,
+            memory=settings.analysis_worker_memory,
+            memory_swap=settings.analysis_worker_memory_swap,
+            cpus=settings.analysis_worker_cpus,
+            pids_limit=settings.analysis_worker_pids_limit,
+            tmp_size=settings.analysis_worker_tmp_size,
+            stream_cap_bytes=settings.analysis_worker_stream_cap_bytes,
+        ),
+        output_cap_bytes=settings.analysis_worker_report_max_bytes,
+        output_watch_interval_seconds=settings.analysis_worker_output_watch_interval_seconds,
+    )
+
+
 def _exposes_coding_worker(agent: Agent) -> bool:
     return any(
         t.name == CodingWorkerConnector.name
         and CODING_WORKER_PR_WRITE in t.permissions
+        for t in agent.spec.tools
+    )
+
+
+def _exposes_analysis_worker(agent: Agent) -> bool:
+    return any(
+        t.name == AnalysisWorkerConnector.name
+        and ANALYSIS_REPORT_WRITE in t.permissions
         for t in agent.spec.tools
     )
 
@@ -420,6 +546,25 @@ def _build_worker_ledger(
     )
 
 
+def _build_analysis_ledger(
+    settings: Settings, agents: dict[str, Agent], usage: UsageStore
+) -> WorkerSpendLedger | None:
+    """A separate audit kind, with the same budget gates as other workers."""
+    owner = next(
+        (a for a in agents.values() if _exposes_analysis_worker(a)),
+        next(iter(agents.values()), None),
+    )
+    if owner is None:
+        return None
+    return WorkerSpendLedger(
+        usage=usage,
+        model=settings.analysis_worker_model,
+        agents=agents,
+        default_agent=owner.metadata.name,
+        task_kind="analysis_worker",
+    )
+
+
 def _uncapped_worker_agents(
     agents: dict[str, Agent], ledger: WorkerSpendLedger
 ) -> list[str]:
@@ -447,6 +592,8 @@ def build_tool_gateway(
     checkpoints: CheckpointStore,
     engine: WorkflowEngine,
     usage: UsageStore | None = None,
+    analysis_inputs: InputStore | None = None,
+    analysis_artifacts: ArtifactStore | None = None,
 ) -> ToolGateway:
     """Register native connectors plus an MCP connector per configured server.
 
@@ -545,6 +692,47 @@ def build_tool_gateway(
             "github tool not registered: set GITHUB_TOKEN or GITHUB_APP_*"
         )
 
+    # Phase 1 sealed analysis is independent of GitHub credentials. It stays
+    # disabled until the operator explicitly enables it and the digest-pinned
+    # image + real sealed probe succeed; it never falls back to host execution.
+    if settings.analysis_worker_enabled:
+        worker = build_analysis_worker(settings)
+        ledger = (
+            _build_analysis_ledger(settings, agents, usage)
+            if usage is not None
+            else None
+        )
+        if worker is None or ledger is None:
+            log.error(
+                "ANALYSIS WORKER DISABLED: a usable sealed Docker backend and "
+                "usage ledger are required; it will not run unsandboxed or "
+                "without spend gates."
+            )
+        else:
+            inputs = analysis_inputs or build_analysis_input_store(settings)
+            artifacts = analysis_artifacts or build_analysis_artifact_store(settings)
+            orchestrator = SealedAnalysisOrchestrator(
+                worker,
+                inputs,
+                artifacts,
+                ledger=ledger,
+                workspace_root=_analysis_workspace_root(settings),
+                report_max_bytes=settings.analysis_worker_report_max_bytes,
+                summary_lines=settings.analysis_worker_summary_lines,
+            )
+            gateway.analysis_input_store = inputs  # type: ignore[attr-defined]
+            gateway.analysis_artifact_store = artifacts  # type: ignore[attr-defined]
+            gateway.analysis_sandbox_enabled = True  # type: ignore[attr-defined]
+            gateway.register(AnalysisWorkerConnector(orchestrator))
+            log.info(
+                "registered native tool: analysis "
+                "(backend=builtin, model=%s, sandbox=docker, default_per_task_cap=%s)",
+                settings.analysis_worker_model,
+                ledger.per_task_usd_for(None),
+            )
+    else:
+        log.info("analysis tool not registered: set ANALYSIS_WORKER_ENABLED=1")
+
     mcp_connectors: list[MCPConnector] = []
     seen: set[str] = set()
     for agent in agents.values():
@@ -617,6 +805,8 @@ def create_app() -> FastAPI:
     workflows = build_workflow_store(settings)
     engine = WorkflowEngine(workflows)
     sessions = build_surface_session_store(settings)
+    analysis_inputs = build_analysis_input_store(settings)
+    analysis_artifacts = build_analysis_artifact_store(settings)
     # Phase A: the thread-scoped delivered-transcript store. Captured by the Slack
     # SessionRunner (like `sessions`); repointed in the lifespan on a PG fallback.
     threads = build_thread_record_store(settings)
@@ -631,14 +821,21 @@ def create_app() -> FastAPI:
     # block below (stays None when no Slack surface is bound).
     session_runner = None
     tools = build_tool_gateway(
-        settings, agents, approvals, checkpoints, engine, usage=usage
+        settings,
+        agents,
+        approvals,
+        checkpoints,
+        engine,
+        usage=usage,
+        analysis_inputs=analysis_inputs,
+        analysis_artifacts=analysis_artifacts,
     )
     # The agent that tool/approval endpoints act on (first configured).
     primary_agent: Agent | None = next(iter(agents.values()), None)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        nonlocal coordinator
+        nonlocal coordinator, analysis_inputs, analysis_artifacts
         recovery_task: asyncio.Task | None = None
         warm_sweep_task: asyncio.Task | None = None
         if isinstance(store, PostgresMemoryStore):
@@ -671,6 +868,34 @@ def create_app() -> FastAPI:
                 _repoint_worker_ledger(tools, app.state.usage)
         else:
             log.info("usage backend: in-memory (process-local)")
+
+        if isinstance(analysis_inputs, PostgresInputStore):
+            try:
+                await analysis_inputs.setup()
+                log.info("analysis input backend: postgres")
+            except Exception:
+                log.exception(
+                    "postgres analysis input setup failed — falling back to in-memory"
+                )
+                analysis_inputs = InMemoryInputStore()
+                app.state.analysis_inputs = analysis_inputs
+                _repoint_analysis_stores(tools, inputs=analysis_inputs)
+        else:
+            log.info("analysis input backend: in-memory (process-local)")
+
+        if isinstance(analysis_artifacts, PostgresArtifactStore):
+            try:
+                await analysis_artifacts.setup()
+                log.info("analysis artifact backend: postgres")
+            except Exception:
+                log.exception(
+                    "postgres analysis artifact setup failed — falling back to in-memory"
+                )
+                analysis_artifacts = InMemoryArtifactStore()
+                app.state.analysis_artifacts = analysis_artifacts
+                _repoint_analysis_stores(tools, artifacts=analysis_artifacts)
+        else:
+            log.info("analysis artifact backend: in-memory (process-local)")
 
         if isinstance(approvals, PostgresApprovalStore):
             try:
@@ -815,6 +1040,10 @@ def create_app() -> FastAPI:
             await sessions.close()
         if isinstance(threads, PostgresThreadRecordStore):
             await threads.close()
+        if isinstance(analysis_inputs, PostgresInputStore):
+            await analysis_inputs.close()
+        if isinstance(analysis_artifacts, PostgresArtifactStore):
+            await analysis_artifacts.close()
         if hasattr(coordinator, "close"):  # RedisLock / PostgresLock (not in-process)
             await _safe_close(coordinator)
 
@@ -826,6 +1055,8 @@ def create_app() -> FastAPI:
     app.state.tools = tools
     app.state.sessions = sessions
     app.state.threads = threads
+    app.state.analysis_inputs = analysis_inputs
+    app.state.analysis_artifacts = analysis_artifacts
     app.state.limiter = limiter
 
     # Phase B: bridge the warm-workspace pool's durable handle to the thread
@@ -991,12 +1222,30 @@ def _rebind(app: FastAPI, attr: str, value) -> None:
 
 
 def _repoint_worker_ledger(tools: ToolGateway, usage: UsageStore) -> None:
-    """Point the worker-spend ledger at a fallback usage store."""
-    worker = tools._tools.get("coding_worker")
-    orchestrator = getattr(worker, "orchestrator", None)
-    ledger = getattr(orchestrator, "_ledger", None)
-    if ledger is not None:
-        ledger.usage = usage
+    """Point every registered worker-spend ledger at a fallback usage store."""
+    for name in ("coding_worker", "analysis"):
+        worker = tools._tools.get(name)
+        orchestrator = getattr(worker, "orchestrator", None)
+        ledger = getattr(orchestrator, "_ledger", None)
+        if ledger is not None:
+            ledger.usage = usage
+
+
+def _repoint_analysis_stores(
+    tools: ToolGateway,
+    *,
+    inputs: InputStore | None = None,
+    artifacts: ArtifactStore | None = None,
+) -> None:
+    """Move a wired analysis orchestrator onto an in-memory store fallback."""
+    connector = tools._tools.get("analysis")
+    orchestrator = getattr(connector, "orchestrator", None)
+    if inputs is not None and orchestrator is not None:
+        orchestrator._inputs = inputs
+        tools.analysis_input_store = inputs  # type: ignore[attr-defined]
+    if artifacts is not None and orchestrator is not None:
+        orchestrator._artifacts = artifacts
+        tools.analysis_artifact_store = artifacts  # type: ignore[attr-defined]
 
 
 def _disable_checkpoints(tools: ToolGateway) -> None:
@@ -1051,6 +1300,15 @@ async def run_recovery_pass(coordinator, tools: ToolGateway, session_runner) -> 
             except Exception:
                 log.exception("workflow resume failed")
         await _resume_worker_jobs(tools)
+
+        # Phase 0's layer-3 cleanup is relevant only once sealed analysis is
+        # actually configured. It is safe under any replica count because the
+        # helper reaps only OpenLoop analysis containers past their own stamped
+        # deadline; Docker failures are contained inside the best-effort helper.
+        if getattr(tools, "analysis_sandbox_enabled", False):
+            reaped = await sweep_expired_sandboxes()
+            if reaped:
+                log.info("reaped %d expired sealed analysis sandbox(es)", len(reaped))
 
         # Repair surface-session delivery left mid-flight by a crash — after the
         # engine resume above so each session's workflow is already terminal.

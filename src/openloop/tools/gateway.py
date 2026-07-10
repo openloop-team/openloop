@@ -130,7 +130,13 @@ class ToolGateway:
             # workflow-backed tool can reuse the requesting thread's warm context.
             args = prepare(permission, args, agent, warm_key=warm_key)
 
-        if agent.spec.approvals.requires_approval(action):
+        # Some actions are intrinsically high-risk regardless of an accidental
+        # omission in an agent's config. Phase 1 sealed analysis is one: it can
+        # process provisioned sensitive data and spend model budget.
+        if (
+            agent.spec.approvals.requires_approval(action)
+            or getattr(tool, "requires_approval", False)
+        ):
             request = ApprovalRequest(
                 agent=agent.metadata.name,
                 action=action,
@@ -300,6 +306,14 @@ def _summarize(action: str, args: dict) -> str:
         # It is NOT a review of a generated diff (the draft PR is that gate).
         return (
             f"run coding worker + open draft PR in {args.get('repo', '?')}: "
+            f"{args.get('instruction', '')}"
+        ).strip()
+    if action == "analysis.report:write":
+        # The sealed worker has no external write. Approval covers spend and
+        # the data scope that will be provisioned into its isolated sandbox.
+        return (
+            f"run sealed analysis over input {args.get('input_ref', '?')} "
+            f"(subject to configured spend limits): "
             f"{args.get('instruction', '')}"
         ).strip()
     return f"{action} {args}"
