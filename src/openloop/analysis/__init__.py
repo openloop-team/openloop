@@ -6,8 +6,11 @@ under the same identity.  Tool arguments and workflow state carry only refs.
 """
 
 from openloop.analysis.store import (
+    AnalysisAttempt,
+    AnalysisAttemptStore,
     AnalysisArtifact,
     ArtifactStore,
+    InMemoryAnalysisAttemptStore,
     InMemoryArtifactStore,
     InMemoryInputStore,
     InputFile,
@@ -16,8 +19,11 @@ from openloop.analysis.store import (
 )
 
 __all__ = [
+    "AnalysisAttempt",
+    "AnalysisAttemptStore",
     "AnalysisArtifact",
     "ArtifactStore",
+    "InMemoryAnalysisAttemptStore",
     "InMemoryArtifactStore",
     "InMemoryInputStore",
     "InputFile",

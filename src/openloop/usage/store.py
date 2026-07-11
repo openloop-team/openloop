@@ -19,6 +19,9 @@ class UsageRecord:
     surface: str | None = None
     user: str | None = None
     task_kind: str | None = None
+    # A non-null key makes a charge write idempotent across a checkpoint crash.
+    # Ordinary chat/worker records leave it unset and remain append-only.
+    idempotency_key: str | None = None
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
@@ -34,7 +37,7 @@ def _month_start(now: datetime) -> datetime:
 
 @runtime_checkable
 class UsageStore(Protocol):
-    async def record(self, usage: UsageRecord) -> None: ...
+    async def record(self, usage: UsageRecord) -> bool: ...
 
     async def monthly_total(
         self, scope_key: str, now: datetime | None = None
@@ -52,9 +55,15 @@ class InMemoryUsageStore:
 
     def __init__(self) -> None:
         self.records: list[UsageRecord] = []
+        self._idempotency_keys: set[str] = set()
 
-    async def record(self, usage: UsageRecord) -> None:
+    async def record(self, usage: UsageRecord) -> bool:
+        if usage.idempotency_key:
+            if usage.idempotency_key in self._idempotency_keys:
+                return False
+            self._idempotency_keys.add(usage.idempotency_key)
         self.records.append(usage)
+        return True
 
     async def monthly_total(
         self, scope_key: str, now: datetime | None = None

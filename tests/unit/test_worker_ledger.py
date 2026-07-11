@@ -102,6 +102,32 @@ async def test_settle_records_spend_under_the_agent_scope():
     assert await usage.monthly_total("ws:acme:agent:dev-platform") == 0.12
 
 
+async def test_settle_with_idempotency_key_records_once():
+    usage = InMemoryUsageStore()
+    ledger = _ledger(usage)
+
+    await ledger.settle(
+        job_id="j1",
+        idempotency_key="analysis-attempt-1",
+        cost_usd=0.12,
+        prompt_tokens=100,
+        completion_tokens=50,
+    )
+    # A checkpoint crash can repeat settlement; the stable attempt key keeps
+    # the audit row and monthly total exactly-once.
+    await ledger.settle(
+        job_id="j1",
+        idempotency_key="analysis-attempt-1",
+        cost_usd=0.12,
+        prompt_tokens=100,
+        completion_tokens=50,
+    )
+
+    assert len(usage.records) == 1
+    assert usage.records[0].idempotency_key == "analysis-attempt-1"
+    assert await usage.monthly_total("ws:acme:agent:dev-platform") == 0.12
+
+
 async def test_settle_attributes_to_the_invoking_agent():
     usage = InMemoryUsageStore()
     agents = {

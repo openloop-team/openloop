@@ -20,12 +20,13 @@ import pytest
 
 from openloop.agents import load_agent
 from openloop.approvals.postgres import PostgresApprovalStore
+from openloop.analysis.postgres import PostgresAnalysisAttemptStore
 from openloop.memory.postgres import PostgresMemoryStore
 from openloop.memory.store import MemoryRecord, scope_key_for
 from openloop.runtime import Runtime, Task
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
-from openloop.usage import budget_scope_key
+from openloop.usage import UsageRecord, budget_scope_key
 from openloop.usage.postgres import PostgresUsageStore
 from openloop.testing import (
     FakeEmbedder,
@@ -143,6 +144,79 @@ async def test_happy_path_end_to_end(stores):
     assert "Use Redis Streams for ingestion v1." in texts
     # The requester's message was remembered this turn.
     assert any("open an issue to track" in t for t in texts)
+
+
+async def test_analysis_attempt_and_usage_idempotency_survive_a_new_store():
+    """The accounting checkpoints remain safe across a controller restart."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    attempt_id = f"analysis-attempt-{uuid.uuid4().hex}"
+    scope_key = f"ws:e2e:agent:{attempt_id}"
+    attempts = PostgresAnalysisAttemptStore(DSN)
+    usage = PostgresUsageStore(DSN)
+    await attempts.setup()
+    await usage.setup()
+    try:
+        attempt, created = await attempts.begin(attempt_id, "job-1")
+        assert created and attempt.status == "started"
+        await attempts.charge(
+            attempt_id,
+            cost_usd=0.12,
+            prompt_tokens=100,
+            completion_tokens=20,
+        )
+        assert await usage.record(UsageRecord(
+            scope_key=scope_key,
+            workspace="e2e",
+            agent="e2e",
+            model="analysis-model",
+            task_kind="analysis_worker",
+            idempotency_key=attempt_id,
+            cost_usd=0.12,
+            prompt_tokens=100,
+            completion_tokens=20,
+        ))
+        # The durable usage key turns replayed settlement into a no-op.
+        assert not await usage.record(UsageRecord(
+            scope_key=scope_key,
+            workspace="e2e",
+            agent="e2e",
+            model="analysis-model",
+            task_kind="analysis_worker",
+            idempotency_key=attempt_id,
+            cost_usd=0.12,
+            prompt_tokens=100,
+            completion_tokens=20,
+        ))
+        await attempts.settle(attempt_id)
+
+        restarted_attempts = PostgresAnalysisAttemptStore(DSN)
+        await restarted_attempts.setup()
+        try:
+            restored = await restarted_attempts.get(attempt_id)
+            assert restored is not None
+            assert restored.status == "settled"
+            assert restored.cost_usd == 0.12
+        finally:
+            await restarted_attempts.close()
+    finally:
+        try:
+            pool = attempts._require_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM analysis_attempts WHERE attempt_id = $1", attempt_id
+                )
+        finally:
+            await attempts.close()
+        try:
+            pool = usage._require_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM usage WHERE idempotency_key = $1", attempt_id
+                )
+        finally:
+            await usage.close()
 
 
 async def test_worker_checkpoint_resume_across_real_postgres():

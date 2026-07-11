@@ -8,6 +8,7 @@ import openloop.app as appmod
 from openloop.agents import load_agent
 from openloop.agents.schema import Tool
 from openloop.approvals import InMemoryApprovalStore
+from openloop.analysis import InMemoryAnalysisAttemptStore
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.config import Settings
 from openloop.sandbox import DockerSandbox
@@ -48,6 +49,7 @@ def test_analysis_registers_without_github_when_digest_and_sealed_probe_work(mon
     connector = gateway._tools["analysis"]
     assert isinstance(connector, AnalysisWorkerConnector)
     assert isinstance(connector.orchestrator.worker, BuiltinAnalysisWorker)
+    assert isinstance(connector.orchestrator._attempts, InMemoryAnalysisAttemptStore)
     assert connector.orchestrator._ledger.task_kind == "analysis_worker"
     assert "github" not in gateway._tools
 

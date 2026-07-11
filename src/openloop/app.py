@@ -20,12 +20,18 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from openloop.analysis import (
+    AnalysisAttemptStore,
     ArtifactStore,
+    InMemoryAnalysisAttemptStore,
     InMemoryArtifactStore,
     InMemoryInputStore,
     InputStore,
 )
-from openloop.analysis.postgres import PostgresArtifactStore, PostgresInputStore
+from openloop.analysis.postgres import (
+    PostgresAnalysisAttemptStore,
+    PostgresArtifactStore,
+    PostgresInputStore,
+)
 from openloop.agents import load_agents
 from openloop.agents.schema import Agent
 from openloop.approvals import ApprovalStore, InMemoryApprovalStore
@@ -182,6 +188,13 @@ def build_analysis_artifact_store(settings: Settings) -> ArtifactStore:
     if settings.memory_backend == "postgres":
         return PostgresArtifactStore(settings.database_url)
     return InMemoryArtifactStore()
+
+
+def build_analysis_attempt_store(settings: Settings) -> AnalysisAttemptStore:
+    """Pick the durable spend-attempt state store for sealed analysis."""
+    if settings.memory_backend == "postgres":
+        return PostgresAnalysisAttemptStore(settings.database_url)
+    return InMemoryAnalysisAttemptStore()
 
 
 def _resolve_lock_backend(settings: Settings) -> str:
@@ -594,6 +607,7 @@ def build_tool_gateway(
     usage: UsageStore | None = None,
     analysis_inputs: InputStore | None = None,
     analysis_artifacts: ArtifactStore | None = None,
+    analysis_attempts: AnalysisAttemptStore | None = None,
 ) -> ToolGateway:
     """Register native connectors plus an MCP connector per configured server.
 
@@ -711,10 +725,12 @@ def build_tool_gateway(
         else:
             inputs = analysis_inputs or build_analysis_input_store(settings)
             artifacts = analysis_artifacts or build_analysis_artifact_store(settings)
+            attempts = analysis_attempts or build_analysis_attempt_store(settings)
             orchestrator = SealedAnalysisOrchestrator(
                 worker,
                 inputs,
                 artifacts,
+                attempts=attempts,
                 ledger=ledger,
                 workspace_root=_analysis_workspace_root(settings),
                 report_max_bytes=settings.analysis_worker_report_max_bytes,
@@ -722,6 +738,7 @@ def build_tool_gateway(
             )
             gateway.analysis_input_store = inputs  # type: ignore[attr-defined]
             gateway.analysis_artifact_store = artifacts  # type: ignore[attr-defined]
+            gateway.analysis_attempt_store = attempts  # type: ignore[attr-defined]
             gateway.analysis_sandbox_enabled = True  # type: ignore[attr-defined]
             gateway.register(AnalysisWorkerConnector(orchestrator))
             log.info(
@@ -807,6 +824,7 @@ def create_app() -> FastAPI:
     sessions = build_surface_session_store(settings)
     analysis_inputs = build_analysis_input_store(settings)
     analysis_artifacts = build_analysis_artifact_store(settings)
+    analysis_attempts = build_analysis_attempt_store(settings)
     # Phase A: the thread-scoped delivered-transcript store. Captured by the Slack
     # SessionRunner (like `sessions`); repointed in the lifespan on a PG fallback.
     threads = build_thread_record_store(settings)
@@ -829,13 +847,14 @@ def create_app() -> FastAPI:
         usage=usage,
         analysis_inputs=analysis_inputs,
         analysis_artifacts=analysis_artifacts,
+        analysis_attempts=analysis_attempts,
     )
     # The agent that tool/approval endpoints act on (first configured).
     primary_agent: Agent | None = next(iter(agents.values()), None)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        nonlocal coordinator, analysis_inputs, analysis_artifacts
+        nonlocal coordinator, analysis_inputs, analysis_artifacts, analysis_attempts
         recovery_task: asyncio.Task | None = None
         warm_sweep_task: asyncio.Task | None = None
         if isinstance(store, PostgresMemoryStore):
@@ -896,6 +915,20 @@ def create_app() -> FastAPI:
                 _repoint_analysis_stores(tools, artifacts=analysis_artifacts)
         else:
             log.info("analysis artifact backend: in-memory (process-local)")
+
+        if isinstance(analysis_attempts, PostgresAnalysisAttemptStore):
+            try:
+                await analysis_attempts.setup()
+                log.info("analysis attempt backend: postgres")
+            except Exception:
+                log.exception(
+                    "postgres analysis attempt setup failed — falling back to in-memory"
+                )
+                analysis_attempts = InMemoryAnalysisAttemptStore()
+                app.state.analysis_attempts = analysis_attempts
+                _repoint_analysis_stores(tools, attempts=analysis_attempts)
+        else:
+            log.info("analysis attempt backend: in-memory (process-local)")
 
         if isinstance(approvals, PostgresApprovalStore):
             try:
@@ -1044,6 +1077,8 @@ def create_app() -> FastAPI:
             await analysis_inputs.close()
         if isinstance(analysis_artifacts, PostgresArtifactStore):
             await analysis_artifacts.close()
+        if isinstance(analysis_attempts, PostgresAnalysisAttemptStore):
+            await analysis_attempts.close()
         if hasattr(coordinator, "close"):  # RedisLock / PostgresLock (not in-process)
             await _safe_close(coordinator)
 
@@ -1057,6 +1092,7 @@ def create_app() -> FastAPI:
     app.state.threads = threads
     app.state.analysis_inputs = analysis_inputs
     app.state.analysis_artifacts = analysis_artifacts
+    app.state.analysis_attempts = analysis_attempts
     app.state.limiter = limiter
 
     # Phase B: bridge the warm-workspace pool's durable handle to the thread
@@ -1236,6 +1272,7 @@ def _repoint_analysis_stores(
     *,
     inputs: InputStore | None = None,
     artifacts: ArtifactStore | None = None,
+    attempts: AnalysisAttemptStore | None = None,
 ) -> None:
     """Move a wired analysis orchestrator onto an in-memory store fallback."""
     connector = tools._tools.get("analysis")
@@ -1246,6 +1283,9 @@ def _repoint_analysis_stores(
     if artifacts is not None and orchestrator is not None:
         orchestrator._artifacts = artifacts
         tools.analysis_artifact_store = artifacts  # type: ignore[attr-defined]
+    if attempts is not None and orchestrator is not None:
+        orchestrator._attempts = attempts
+        tools.analysis_attempt_store = attempts  # type: ignore[attr-defined]
 
 
 def _disable_checkpoints(tools: ToolGateway) -> None:

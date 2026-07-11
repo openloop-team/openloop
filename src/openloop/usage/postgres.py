@@ -30,6 +30,7 @@ class PostgresUsageStore:
                     surface           TEXT,
                     "user"            TEXT,
                     task_kind         TEXT,
+                    idempotency_key   TEXT,
                     model             TEXT NOT NULL,
                     prompt_tokens     INTEGER NOT NULL DEFAULT 0,
                     completion_tokens INTEGER NOT NULL DEFAULT 0,
@@ -38,6 +39,13 @@ class PostgresUsageStore:
                     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
                 """
+            )
+            await conn.execute(
+                "ALTER TABLE usage ADD COLUMN IF NOT EXISTS idempotency_key TEXT"
+            )
+            await conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS usage_idempotency_key_idx "
+                "ON usage (idempotency_key)"
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS usage_scope_time_idx "
@@ -54,17 +62,18 @@ class PostgresUsageStore:
             raise RuntimeError("PostgresUsageStore.setup() must be called first")
         return self._pool
 
-    async def record(self, usage: UsageRecord) -> None:
+    async def record(self, usage: UsageRecord) -> bool:
         pool = self._require_pool()
         async with pool.acquire() as conn:
-            await conn.execute(
+            status = await conn.execute(
                 """
                 INSERT INTO usage (
                     scope_key, workspace, agent, channel, surface, "user",
-                    task_kind, model, prompt_tokens, completion_tokens,
-                    cost_usd, outcome, created_at
+                    task_kind, idempotency_key, model, prompt_tokens,
+                    completion_tokens, cost_usd, outcome, created_at
                 )
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                ON CONFLICT (idempotency_key) DO NOTHING
                 """,
                 usage.scope_key,
                 usage.workspace,
@@ -73,6 +82,7 @@ class PostgresUsageStore:
                 usage.surface,
                 usage.user,
                 usage.task_kind,
+                usage.idempotency_key,
                 usage.model,
                 usage.prompt_tokens,
                 usage.completion_tokens,
@@ -80,6 +90,7 @@ class PostgresUsageStore:
                 usage.outcome,
                 usage.created_at,
             )
+        return status.endswith("1")
 
     async def monthly_total(
         self, scope_key: str, now: datetime | None = None
@@ -104,7 +115,7 @@ class PostgresUsageStore:
             rows = await conn.fetch(
                 """
                 SELECT scope_key, workspace, agent, channel, surface, "user",
-                       task_kind, model, prompt_tokens, completion_tokens,
+                       task_kind, idempotency_key, model, prompt_tokens, completion_tokens,
                        cost_usd, outcome, created_at
                 FROM usage
                 ORDER BY created_at DESC
@@ -122,6 +133,7 @@ class PostgresUsageStore:
                 surface=r["surface"],
                 user=r["user"],
                 task_kind=r["task_kind"],
+                idempotency_key=r["idempotency_key"],
                 prompt_tokens=r["prompt_tokens"],
                 completion_tokens=r["completion_tokens"],
                 cost_usd=r["cost_usd"],

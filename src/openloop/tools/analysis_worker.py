@@ -17,7 +17,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from openloop.analysis import ArtifactStore, InputStore
+from openloop.analysis import (
+    AnalysisAttemptStore,
+    ArtifactStore,
+    InMemoryAnalysisAttemptStore,
+    InputStore,
+)
 from openloop.sandbox import (
     Mount,
     ReadOutViolation,
@@ -39,6 +44,7 @@ ANALYSIS_REPORT_WRITE = "report:write"
 _REPORT_NAME = "report.md"
 
 StepCallback = Callable[["AnalysisState"], Awaitable[None]]
+ChargeCallback = Callable[["AnalysisCharge"], Awaitable[None]]
 
 
 @dataclass(slots=True)
@@ -49,10 +55,38 @@ class AnalysisState:
     input_ref: str
     instruction: str
     agent: str | None = None
+    # Minted before approval in Phase 1b; direct harnesses can omit it and the
+    # orchestrator will mint one before the first model call.
+    attempt_id: str | None = None
     completed_steps: list[str] = field(default_factory=list)
     # Reserved for the Phase 3 iterative strategy. It remains transient so no
     # budget setting can be model-supplied through persisted tool args.
     budget_usd: float | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class AnalysisCharge:
+    """Observed provider usage for one successful completion."""
+
+    cost_usd: float
+    prompt_tokens: int
+    completion_tokens: int
+
+    @classmethod
+    def from_response(cls, response) -> "AnalysisCharge":
+        return cls(
+            cost_usd=response.cost_usd,
+            prompt_tokens=response.prompt_tokens,
+            completion_tokens=response.completion_tokens,
+        )
+
+    @classmethod
+    def from_run(cls, run: "AnalysisRun") -> "AnalysisCharge":
+        return cls(
+            cost_usd=run.cost_usd,
+            prompt_tokens=run.prompt_tokens,
+            completion_tokens=run.completion_tokens,
+        )
 
 
 @dataclass(slots=True)
@@ -118,8 +152,9 @@ class AnalysisWorkerFailure(RuntimeError):
     observed spend before reporting the failure, but must not read outputs.
     """
 
-    def __init__(self, message: str, *, response) -> None:
+    def __init__(self, message: str, *, charge: AnalysisCharge) -> None:
         super().__init__(message)
+        self.charge = charge
         self.run = AnalysisRun(
             exit_code=None,
             stdout="",
@@ -129,9 +164,9 @@ class AnalysisWorkerFailure(RuntimeError):
             stdout_truncated=False,
             stderr_truncated=False,
             duration_seconds=0.0,
-            cost_usd=response.cost_usd,
-            prompt_tokens=response.prompt_tokens,
-            completion_tokens=response.completion_tokens,
+            cost_usd=charge.cost_usd,
+            prompt_tokens=charge.prompt_tokens,
+            completion_tokens=charge.completion_tokens,
         )
 
 
@@ -141,6 +176,7 @@ class AnalysisResult:
 
     job_id: str
     input_ref: str
+    attempt_id: str | None = None
     run: AnalysisRun | None = None
     artifact_ref: str | None = None
     prose_summary: str | None = None
@@ -154,6 +190,7 @@ class AnalysisResult:
         data = {
             "job_id": self.job_id,
             "input_ref": self.input_ref,
+            "attempt_id": self.attempt_id,
             "artifact_ref": self.artifact_ref,
             "prose_summary": self.prose_summary,
         }
@@ -178,6 +215,7 @@ class AnalysisWorker(Protocol):
         workspace: Path,
         state: AnalysisState,
         on_step: StepCallback | None = None,
+        on_charge: ChargeCallback | None = None,
     ) -> AnalysisRun: ...
 
 
@@ -235,12 +273,19 @@ class BuiltinAnalysisWorker:
         workspace: Path,
         state: AnalysisState,
         on_step: StepCallback | None = None,
+        on_charge: ChargeCallback | None = None,
     ) -> AnalysisRun:
         script, response = await self._generate(state, workspace / "inputs")
+        charge = AnalysisCharge.from_response(response)
         try:
+            # Accounting happens before any generated-code validation, sandbox
+            # startup, or output read. A later crash/retry sees the durable
+            # attempt + idempotent usage key, never a free completion.
+            if on_charge is not None:
+                await on_charge(charge)
             if not script.strip():
                 raise AnalysisWorkerFailure(
-                    "analysis model returned an empty program", response=response
+                    "analysis model returned an empty program", charge=charge
                 )
             if not script.endswith("\n"):
                 script += "\n"
@@ -274,7 +319,7 @@ class BuiltinAnalysisWorker:
             raise
         except Exception as exc:
             raise AnalysisWorkerFailure(
-                f"analysis execution setup failed: {exc}", response=response
+                f"analysis execution setup failed: {exc}", charge=charge
             ) from exc
 
     async def _generate(self, state: AnalysisState, inputs: Path):
@@ -325,6 +370,7 @@ class SealedAnalysisOrchestrator:
         inputs: InputStore,
         artifacts: ArtifactStore,
         *,
+        attempts: AnalysisAttemptStore | None = None,
         ledger: "WorkerSpendLedger | None" = None,
         workspace_root: Path | None = None,
         report_max_bytes: int = 1_000_000,
@@ -333,6 +379,7 @@ class SealedAnalysisOrchestrator:
         self.worker = worker
         self._inputs = inputs
         self._artifacts = artifacts
+        self._attempts = attempts or InMemoryAnalysisAttemptStore()
         self._ledger = ledger
         self._workspace_root = workspace_root
         self.report_max_bytes = report_max_bytes
@@ -349,21 +396,87 @@ class SealedAnalysisOrchestrator:
             if on_step is not None:
                 await on_step(state)
 
-        async def settle(run: AnalysisRun) -> WorkerBudgetExceeded | None:
-            """Record known model spend once, before any possible read-out."""
-            if self._ledger is None:
-                return None
-            try:
-                await self._ledger.settle(
-                    agent=state.agent,
-                    job_id=state.job_id,
-                    cost_usd=run.cost_usd,
-                    prompt_tokens=run.prompt_tokens,
-                    completion_tokens=run.completion_tokens,
+        charge_accounted = False
+
+        async def account(charge: AnalysisCharge) -> None:
+            """Persist observed usage, settle it idempotently, then mark done."""
+            nonlocal charge_accounted
+            assert state.attempt_id is not None
+            await self._attempts.charge(
+                state.attempt_id,
+                cost_usd=charge.cost_usd,
+                prompt_tokens=charge.prompt_tokens,
+                completion_tokens=charge.completion_tokens,
+            )
+            budget_error: WorkerBudgetExceeded | None = None
+            if self._ledger is not None:
+                try:
+                    await self._ledger.settle(
+                        agent=state.agent,
+                        job_id=state.job_id,
+                        idempotency_key=state.attempt_id,
+                        cost_usd=charge.cost_usd,
+                        prompt_tokens=charge.prompt_tokens,
+                        completion_tokens=charge.completion_tokens,
+                    )
+                except WorkerBudgetExceeded as exc:
+                    # The usage row was written before the cap error. Mark the
+                    # attempt settled, then keep the sandbox/read-out blocked.
+                    budget_error = exc
+            await self._attempts.settle(state.attempt_id)
+            charge_accounted = True
+            if budget_error is not None:
+                raise budget_error
+
+        state.attempt_id = state.attempt_id or uuid.uuid4().hex
+        existing = await self._attempts.get(state.attempt_id)
+        if existing is not None:
+            # A charged checkpoint contains enough provider telemetry to finish
+            # its accounting safely. This is deliberately *not* a computation
+            # retry: no inputs, model, sandbox, or report are touched.
+            if existing.status == "charged":
+                if (
+                    existing.cost_usd is None
+                    or existing.prompt_tokens is None
+                    or existing.completion_tokens is None
+                ):
+                    error = RuntimeError(
+                        f"analysis attempt {existing.attempt_id} is charged "
+                        "without complete usage telemetry"
+                    )
+                    await self._mark_unknown(state, error)
+                    return _failed(
+                        state,
+                        "known analysis spend has incomplete durable telemetry; "
+                        "operator reconciliation is required",
+                    )
+                try:
+                    await account(
+                        AnalysisCharge(
+                            cost_usd=existing.cost_usd,
+                            prompt_tokens=existing.prompt_tokens,
+                            completion_tokens=existing.completion_tokens,
+                        )
+                    )
+                except WorkerBudgetExceeded as budget_error:
+                    return _failed(state, str(budget_error))
+                except Exception as accounting_error:
+                    await self._mark_unknown(state, accounting_error)
+                    return _failed(
+                        state,
+                        "known analysis spend could not be durably accounted: "
+                        f"{accounting_error}",
+                    )
+                return _failed(
+                    state,
+                    f"analysis attempt {existing.attempt_id} was already charged; "
+                    "spend was settled without re-executing computation",
                 )
-            except WorkerBudgetExceeded as exc:
-                return exc
-            return None
+            return _failed(
+                state,
+                f"analysis attempt {existing.attempt_id} is already {existing.status}; "
+                "automatic re-execution is refused pending reconciliation",
+            )
 
         # This gate precedes input-store access and workspace allocation. A
         # monthly refusal must not provision data or start a model call.
@@ -381,6 +494,14 @@ class SealedAnalysisOrchestrator:
                 "no staged input matches this job_id and input_ref",
             )
 
+        attempt, created = await self._attempts.begin(state.attempt_id, state.job_id)
+        if not created:
+            return _failed(
+                state,
+                f"analysis attempt {attempt.attempt_id} is already {attempt.status}; "
+                "automatic re-execution is refused pending reconciliation",
+            )
+
         if self._workspace_root is not None:
             self._workspace_root.mkdir(parents=True, exist_ok=True)
         workspace = Path(
@@ -393,22 +514,45 @@ class SealedAnalysisOrchestrator:
             await step("materialize")
 
             try:
-                run = await self.worker.run(workspace, state, on_step)
+                run = await self.worker.run(workspace, state, on_step, account)
             except AnalysisWorkerFailure as exc:
                 # A completion succeeded, so the provider's observed spend is
                 # real even though local validation or sandbox setup failed.
                 run = exc.run
-                if budget_error := await settle(run):
+                try:
+                    await account(exc.charge)
+                except WorkerBudgetExceeded as budget_error:
                     return _failed(state, str(budget_error), run=run)
-                return _failed(state, f"analysis worker failed before execution: {exc}", run=run)
+                except Exception as accounting_error:
+                    await self._mark_unknown(state, accounting_error)
+                    return _failed(
+                        state,
+                        "known analysis spend could not be durably accounted: "
+                        f"{accounting_error}",
+                        run=run,
+                    )
+                return _failed(
+                    state, f"analysis worker failed before execution: {exc}", run=run
+                )
             except Exception as exc:  # model/backend failures before telemetry
                 return _failed(state, f"analysis worker failed before execution: {exc}")
 
-            # Settlement happens for both success and execution failure; model
-            # spend is real either way. A failed settlement is always terminal
-            # before read-out.
-            if budget_error := await settle(run):
-                return _failed(state, str(budget_error), run=run)
+            # Compatibility for test/backfill workers that have not adopted the
+            # Phase 1b callback yet. BuiltinAnalysisWorker always accounts before
+            # validating or executing the generated program.
+            if not charge_accounted:
+                try:
+                    await account(AnalysisCharge.from_run(run))
+                except WorkerBudgetExceeded as budget_error:
+                    return _failed(state, str(budget_error), run=run)
+                except Exception as accounting_error:
+                    await self._mark_unknown(state, accounting_error)
+                    return _failed(
+                        state,
+                        "known analysis spend could not be durably accounted: "
+                        f"{accounting_error}",
+                        run=run,
+                    )
 
             if run.exit_code != 0:
                 return _failed(state, _execution_error(run), run=run)
@@ -438,12 +582,24 @@ class SealedAnalysisOrchestrator:
             return AnalysisResult(
                 job_id=state.job_id,
                 input_ref=state.input_ref,
+                attempt_id=state.attempt_id,
                 run=run,
                 artifact_ref=artifact_ref,
                 prose_summary=_mechanical_summary(report, self.summary_lines),
             )
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
+
+    async def _mark_unknown(self, state: AnalysisState, error: Exception) -> None:
+        """Best-effort durable signal for operator/provider reconciliation."""
+        if state.attempt_id is None:
+            return
+        try:
+            await self._attempts.mark_unknown(state.attempt_id, str(error))
+        except Exception:
+            # The original accounting-store failure is the actionable error. A
+            # second failure cannot make it safe to continue execution.
+            pass
 
 
 class AnalysisWorkerConnector:
@@ -504,6 +660,7 @@ class AnalysisWorkerConnector:
             return args
         return {
             "job_id": args.get("job_id") or uuid.uuid4().hex,
+            "attempt_id": args.get("attempt_id") or uuid.uuid4().hex,
             "instruction": str(args.get("instruction") or "").strip(),
             "input_ref": (
                 args.get("input_ref") if isinstance(args.get("input_ref"), str) else ""
@@ -519,6 +676,7 @@ class AnalysisWorkerConnector:
         # trusted Agent object would erase the stamped invoking identity and
         # misattribute spend after approval.
         job_id = args.get("job_id") or uuid.uuid4().hex
+        attempt_id = args.get("attempt_id") or uuid.uuid4().hex
         input_ref = args.get("input_ref") if isinstance(args.get("input_ref"), str) else ""
         instruction = str(args.get("instruction") or "").strip()
         agent = args.get("agent") if isinstance(args.get("agent"), str) else None
@@ -527,6 +685,7 @@ class AnalysisWorkerConnector:
             input_ref=input_ref,
             instruction=instruction,
             agent=agent,
+            attempt_id=str(attempt_id),
         )
         if not state.instruction:
             return _tool_failure(_failed(state, "analysis instruction is required"))
@@ -551,6 +710,7 @@ def _failed(
     return AnalysisResult(
         job_id=state.job_id,
         input_ref=state.input_ref,
+        attempt_id=state.attempt_id,
         run=run,
         error=error,
     )

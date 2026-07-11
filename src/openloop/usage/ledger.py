@@ -135,6 +135,7 @@ class WorkerSpendLedger:
         *,
         agent: str | None = None,
         job_id: str,
+        idempotency_key: str | None = None,
         cost_usd: float,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
@@ -154,6 +155,7 @@ class WorkerSpendLedger:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 outcome="blocked",
+                idempotency_key=idempotency_key,
             )
             raise WorkerBudgetExceeded(
                 f"worker job {job_id} spent ${cost_usd:.4f}, but {reason} "
@@ -167,6 +169,7 @@ class WorkerSpendLedger:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             outcome="over_task_budget" if over else "ok",
+            idempotency_key=idempotency_key,
         )
         if over:
             raise WorkerBudgetExceeded(
@@ -187,6 +190,7 @@ class WorkerSpendLedger:
         outcome: str,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        idempotency_key: str | None = None,
     ) -> None:
         await self.usage.record(
             UsageRecord(
@@ -195,6 +199,7 @@ class WorkerSpendLedger:
                 agent=agent.metadata.name,
                 model=self.model,
                 task_kind=self.task_kind,
+                idempotency_key=idempotency_key,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cost_usd=cost_usd,

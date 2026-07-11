@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from openloop.analysis import InMemoryArtifactStore, InMemoryInputStore, InputFile, InputManifest
+from openloop.analysis import (
+    InMemoryAnalysisAttemptStore,
+    InMemoryArtifactStore,
+    InMemoryInputStore,
+    InputFile,
+    InputManifest,
+)
 from openloop.agents import load_agent
 from openloop.agents.schema import Tool
 from openloop.models.gateway import ModelResponse
@@ -95,7 +101,7 @@ class _ReportWorker:
         self.body = body
         self.workspaces = []
 
-    async def run(self, workspace, state, on_step=None):
+    async def run(self, workspace, state, on_step=None, on_charge=None):
         self.workspaces.append(workspace)
         (workspace / "outputs" / "report.md").write_bytes(self.body)
         return self.result
@@ -263,6 +269,7 @@ async def test_empty_generated_program_still_settles_known_completion_spend():
         files=(InputFile("sales.csv", b"x"),),
     ))
     artifacts = InMemoryArtifactStore()
+    attempts = InMemoryAnalysisAttemptStore()
     ledger, usage, agent = _ledger()
     state.agent = agent.metadata.name
     sandbox = _FakeSealedSandbox()
@@ -275,7 +282,7 @@ async def test_empty_generated_program_still_settles_known_completion_spend():
     )
 
     result = await SealedAnalysisOrchestrator(
-        worker, inputs, artifacts, ledger=ledger
+        worker, inputs, artifacts, attempts=attempts, ledger=ledger
     ).run_analysis(state)
 
     assert not result.ok
@@ -286,6 +293,9 @@ async def test_empty_generated_program_still_settles_known_completion_spend():
     assert await artifacts.get("analysis://job-1/report.md") is None
     (record,) = usage.records
     assert (record.cost_usd, record.prompt_tokens, record.completion_tokens) == (0.31, 120, 30)
+    attempt = await attempts.get(result.attempt_id)
+    assert attempt.status == "settled"
+    assert attempt.cost_usd == 0.31
 
 
 async def test_sandbox_setup_failure_still_settles_known_completion_spend():
@@ -316,6 +326,120 @@ async def test_sandbox_setup_failure_still_settles_known_completion_spend():
     assert result.run.cost_usd == 0.19
     assert await artifacts.get("analysis://job-1/report.md") is None
     assert usage.records[0].cost_usd == 0.19
+
+
+async def test_reused_attempt_id_refuses_another_model_execution():
+    inputs = InMemoryInputStore()
+    state = _state()
+    state.attempt_id = "attempt-1"
+    await inputs.stage(InputManifest(
+        job_id=state.job_id,
+        input_ref=state.input_ref,
+        files=(InputFile("sales.csv", b"x"),),
+    ))
+    worker = _ReportWorker()
+    ledger, usage, agent = _ledger()
+    state.agent = agent.metadata.name
+    orchestrator = SealedAnalysisOrchestrator(
+        worker,
+        inputs,
+        InMemoryArtifactStore(),
+        attempts=InMemoryAnalysisAttemptStore(),
+        ledger=ledger,
+    )
+
+    first = await orchestrator.run_analysis(state)
+    # The approved attempt identity, not job identity, controls replay. Reuse it
+    # explicitly here to simulate a retry after a controller crash.
+    retry = await orchestrator.run_analysis(
+        AnalysisState(
+            job_id=state.job_id,
+            input_ref=state.input_ref,
+            instruction=state.instruction,
+            agent=agent.metadata.name,
+            attempt_id=state.attempt_id,
+        )
+    )
+
+    assert first.ok
+    assert not retry.ok
+    assert "automatic re-execution is refused" in retry.error
+    assert len(worker.workspaces) == 1
+    assert len(usage.records) == 1
+
+
+async def test_charged_attempt_reconciles_usage_without_reexecuting_computation():
+    state = _state()
+    state.attempt_id = "attempt-needs-settlement"
+    attempts = InMemoryAnalysisAttemptStore()
+    await attempts.begin(state.attempt_id, state.job_id)
+    await attempts.charge(
+        state.attempt_id,
+        cost_usd=0.25,
+        prompt_tokens=100,
+        completion_tokens=25,
+    )
+    # A spent monthly budget would reject a fresh attempt. Reconciliation still
+    # has to account for this already-observed charge before it returns.
+    ledger, usage, agent = _ledger(monthly=0.0)
+    state.agent = agent.metadata.name
+    worker = _ReportWorker()
+
+    result = await SealedAnalysisOrchestrator(
+        worker,
+        InMemoryInputStore(),
+        InMemoryArtifactStore(),
+        attempts=attempts,
+        ledger=ledger,
+    ).run_analysis(state)
+
+    assert not result.ok
+    assert "spend was settled without re-executing" in result.error
+    assert (await attempts.get(state.attempt_id)).status == "settled"
+    assert len(usage.records) == 1
+    assert usage.records[0].idempotency_key == state.attempt_id
+    assert worker.workspaces == []
+
+
+async def test_accounting_failure_marks_observed_charge_unknown_and_skips_readout():
+    class _BrokenUsageStore(InMemoryUsageStore):
+        async def record(self, usage):
+            raise RuntimeError("usage store unavailable")
+
+    inputs = InMemoryInputStore()
+    state = _state()
+    await inputs.stage(InputManifest(
+        job_id=state.job_id,
+        input_ref=state.input_ref,
+        files=(InputFile("sales.csv", b"x"),),
+    ))
+    agent = load_agent(AGENT_YAML)
+    agent.spec.budget.per_task_usd = 0.50
+    ledger = WorkerSpendLedger(
+        usage=_BrokenUsageStore(),
+        model="analysis-model",
+        agents={agent.metadata.name: agent},
+        default_agent=agent.metadata.name,
+        task_kind="analysis_worker",
+    )
+    state.agent = agent.metadata.name
+    attempts = InMemoryAnalysisAttemptStore()
+    artifacts = InMemoryArtifactStore()
+
+    result = await SealedAnalysisOrchestrator(
+        _ReportWorker(),
+        inputs,
+        artifacts,
+        attempts=attempts,
+        ledger=ledger,
+    ).run_analysis(state)
+
+    assert not result.ok
+    assert "could not be durably accounted" in result.error
+    attempt = await attempts.get(result.attempt_id)
+    assert attempt.status == "unknown"
+    assert attempt.cost_usd == 0.25
+    assert await artifacts.get("analysis://job-1/report.md") is None
 
 
 def test_connector_prepare_args_strips_inline_payload_and_stamps_agent():

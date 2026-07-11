@@ -6,7 +6,7 @@ import base64
 import json
 from datetime import datetime, timezone
 
-from openloop.analysis.store import AnalysisArtifact, InputFile, InputManifest
+from openloop.analysis.store import AnalysisArtifact, AnalysisAttempt, InputFile, InputManifest
 
 
 class PostgresInputStore:
@@ -171,4 +171,202 @@ class PostgresArtifactStore:
             artifact_ref=row["artifact_ref"],
             body=bytes(row["body"]),
             created_at=row["created_at"] or datetime.now(timezone.utc),
+        )
+
+
+class PostgresAnalysisAttemptStore:
+    """Durable analysis attempt accounting, separate from report artifacts."""
+
+    def __init__(self, dsn: str) -> None:
+        self.dsn = dsn
+        self._pool = None
+
+    async def setup(self) -> None:
+        import asyncpg
+
+        self._pool = await asyncpg.create_pool(self.dsn)
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS analysis_attempts (
+                        attempt_id       TEXT PRIMARY KEY,
+                        job_id           TEXT NOT NULL,
+                        status           TEXT NOT NULL,
+                        cost_usd         DOUBLE PRECISION,
+                        prompt_tokens    INTEGER,
+                        completion_tokens INTEGER,
+                        error            TEXT,
+                        created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        charged_at       TIMESTAMPTZ,
+                        settled_at       TIMESTAMPTZ,
+                        updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                    """
+                )
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS analysis_attempts_job_idx "
+                    "ON analysis_attempts (job_id, created_at DESC)"
+                )
+        except BaseException:
+            # The app may replace a setup-failed store before shutdown sees it;
+            # setup therefore owns cleanup of a pool it successfully opened.
+            await self.close()
+            raise
+
+    async def close(self) -> None:
+        if self._pool is not None:
+            await self._pool.close()
+            self._pool = None
+
+    def _require_pool(self):
+        if self._pool is None:
+            raise RuntimeError("PostgresAnalysisAttemptStore.setup() must be called first")
+        return self._pool
+
+    async def begin(self, attempt_id: str, job_id: str) -> tuple[AnalysisAttempt, bool]:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO analysis_attempts (attempt_id, job_id, status)
+                VALUES ($1, $2, 'started')
+                ON CONFLICT (attempt_id) DO NOTHING
+                RETURNING *
+                """,
+                attempt_id,
+                job_id,
+            )
+            if row is not None:
+                return _row_to_attempt(row), True
+            existing = await conn.fetchrow(
+                "SELECT * FROM analysis_attempts WHERE attempt_id = $1", attempt_id
+            )
+        if existing is None:  # defensive: a deleted row raced the conflict read
+            raise RuntimeError(f"analysis attempt {attempt_id} disappeared during begin")
+        return _row_to_attempt(existing), False
+
+    async def get(self, attempt_id: str) -> AnalysisAttempt | None:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM analysis_attempts WHERE attempt_id = $1", attempt_id
+            )
+        return _row_to_attempt(row) if row else None
+
+    async def charge(
+        self,
+        attempt_id: str,
+        *,
+        cost_usd: float,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> AnalysisAttempt:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE analysis_attempts
+                SET status = 'charged', cost_usd = $2, prompt_tokens = $3,
+                    completion_tokens = $4, charged_at = now(), updated_at = now()
+                WHERE attempt_id = $1 AND status = 'started'
+                RETURNING *
+                """,
+                attempt_id,
+                cost_usd,
+                prompt_tokens,
+                completion_tokens,
+            )
+            if row is not None:
+                return _row_to_attempt(row)
+            existing = await conn.fetchrow(
+                "SELECT * FROM analysis_attempts WHERE attempt_id = $1", attempt_id
+            )
+        attempt = _require_attempt(existing, attempt_id)
+        if attempt.status in ("charged", "settled"):
+            _assert_same_charge(attempt, cost_usd, prompt_tokens, completion_tokens)
+            return attempt
+        raise RuntimeError(
+            f"analysis attempt {attempt_id} is {attempt.status}; cannot charge"
+        )
+
+    async def settle(self, attempt_id: str) -> AnalysisAttempt:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE analysis_attempts
+                SET status = 'settled', settled_at = now(), updated_at = now()
+                WHERE attempt_id = $1 AND status = 'charged'
+                RETURNING *
+                """,
+                attempt_id,
+            )
+            if row is not None:
+                return _row_to_attempt(row)
+            existing = await conn.fetchrow(
+                "SELECT * FROM analysis_attempts WHERE attempt_id = $1", attempt_id
+            )
+        attempt = _require_attempt(existing, attempt_id)
+        if attempt.status == "settled":
+            return attempt
+        raise RuntimeError(f"analysis attempt {attempt_id} is {attempt.status}; cannot settle")
+
+    async def mark_unknown(self, attempt_id: str, error: str) -> AnalysisAttempt:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE analysis_attempts
+                SET status = 'unknown', error = $2, updated_at = now()
+                WHERE attempt_id = $1 AND status != 'settled'
+                RETURNING *
+                """,
+                attempt_id,
+                error,
+            )
+            if row is not None:
+                return _row_to_attempt(row)
+            existing = await conn.fetchrow(
+                "SELECT * FROM analysis_attempts WHERE attempt_id = $1", attempt_id
+            )
+        return _require_attempt(existing, attempt_id)
+
+
+def _row_to_attempt(row) -> AnalysisAttempt:
+    now = datetime.now(timezone.utc)
+    return AnalysisAttempt(
+        attempt_id=row["attempt_id"],
+        job_id=row["job_id"],
+        status=row["status"],
+        cost_usd=row["cost_usd"],
+        prompt_tokens=row["prompt_tokens"],
+        completion_tokens=row["completion_tokens"],
+        error=row["error"],
+        created_at=row["created_at"] or now,
+        charged_at=row["charged_at"],
+        settled_at=row["settled_at"],
+        updated_at=row["updated_at"] or now,
+    )
+
+
+def _require_attempt(row, attempt_id: str) -> AnalysisAttempt:
+    if row is None:
+        raise KeyError(f"unknown analysis attempt {attempt_id}")
+    return _row_to_attempt(row)
+
+
+def _assert_same_charge(
+    attempt: AnalysisAttempt,
+    cost_usd: float,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> None:
+    if (
+        attempt.cost_usd != cost_usd
+        or attempt.prompt_tokens != prompt_tokens
+        or attempt.completion_tokens != completion_tokens
+    ):
+        raise RuntimeError(
+            f"analysis attempt {attempt.attempt_id} already has different charge data"
         )

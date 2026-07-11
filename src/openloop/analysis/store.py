@@ -98,6 +98,49 @@ class ArtifactStore(Protocol):
     async def get(self, artifact_ref: str) -> AnalysisArtifact | None: ...
 
 
+@dataclass(slots=True)
+class AnalysisAttempt:
+    """Durable accounting state for one model-authoring attempt.
+
+    ``started`` exists before the model call. ``charged`` means OpenLoop has
+    observed a successful completion and durably retained its usage; ``settled``
+    means the same charge reached the idempotent usage ledger. A later workflow
+    phase can reconcile stalled states without guessing that they were free.
+    """
+
+    attempt_id: str
+    job_id: str
+    status: str = "started"  # started | charged | settled | unknown
+    cost_usd: float | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    error: str | None = None
+    created_at: datetime = field(default_factory=_now)
+    charged_at: datetime | None = None
+    settled_at: datetime | None = None
+    updated_at: datetime = field(default_factory=_now)
+
+
+@runtime_checkable
+class AnalysisAttemptStore(Protocol):
+    async def begin(self, attempt_id: str, job_id: str) -> tuple[AnalysisAttempt, bool]: ...
+
+    async def get(self, attempt_id: str) -> AnalysisAttempt | None: ...
+
+    async def charge(
+        self,
+        attempt_id: str,
+        *,
+        cost_usd: float,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> AnalysisAttempt: ...
+
+    async def settle(self, attempt_id: str) -> AnalysisAttempt: ...
+
+    async def mark_unknown(self, attempt_id: str, error: str) -> AnalysisAttempt: ...
+
+
 class InMemoryInputStore:
     """Process-local staged inputs for development and tests."""
 
@@ -137,3 +180,91 @@ class InMemoryArtifactStore:
 
     async def get(self, artifact_ref: str) -> AnalysisArtifact | None:
         return self._by_ref.get(artifact_ref)
+
+
+class InMemoryAnalysisAttemptStore:
+    """Process-local attempt accounting for development and tests."""
+
+    def __init__(self) -> None:
+        self._by_id: dict[str, AnalysisAttempt] = {}
+
+    async def begin(self, attempt_id: str, job_id: str) -> tuple[AnalysisAttempt, bool]:
+        existing = self._by_id.get(attempt_id)
+        if existing is not None:
+            return existing, False
+        attempt = AnalysisAttempt(attempt_id=attempt_id, job_id=job_id)
+        self._by_id[attempt_id] = attempt
+        return attempt, True
+
+    async def get(self, attempt_id: str) -> AnalysisAttempt | None:
+        return self._by_id.get(attempt_id)
+
+    async def charge(
+        self,
+        attempt_id: str,
+        *,
+        cost_usd: float,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> AnalysisAttempt:
+        attempt = self._require(attempt_id)
+        if attempt.status in ("charged", "settled"):
+            self._assert_same_charge(
+                attempt, cost_usd, prompt_tokens, completion_tokens
+            )
+            return attempt
+        if attempt.status != "started":
+            raise RuntimeError(
+                f"analysis attempt {attempt_id} is {attempt.status}; cannot charge"
+            )
+        attempt.status = "charged"
+        attempt.cost_usd = cost_usd
+        attempt.prompt_tokens = prompt_tokens
+        attempt.completion_tokens = completion_tokens
+        attempt.charged_at = _now()
+        attempt.updated_at = _now()
+        return attempt
+
+    async def settle(self, attempt_id: str) -> AnalysisAttempt:
+        attempt = self._require(attempt_id)
+        if attempt.status == "settled":
+            return attempt
+        if attempt.status != "charged":
+            raise RuntimeError(
+                f"analysis attempt {attempt_id} is {attempt.status}; cannot settle"
+            )
+        attempt.status = "settled"
+        attempt.settled_at = _now()
+        attempt.updated_at = _now()
+        return attempt
+
+    async def mark_unknown(self, attempt_id: str, error: str) -> AnalysisAttempt:
+        attempt = self._require(attempt_id)
+        if attempt.status == "settled":
+            return attempt
+        attempt.status = "unknown"
+        attempt.error = error
+        attempt.updated_at = _now()
+        return attempt
+
+    def _require(self, attempt_id: str) -> AnalysisAttempt:
+        attempt = self._by_id.get(attempt_id)
+        if attempt is None:
+            raise KeyError(f"unknown analysis attempt {attempt_id}")
+        return attempt
+
+    @staticmethod
+    def _assert_same_charge(
+        attempt: AnalysisAttempt,
+        cost_usd: float,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> None:
+        if (
+            attempt.cost_usd != cost_usd
+            or attempt.prompt_tokens != prompt_tokens
+            or attempt.completion_tokens != completion_tokens
+        ):
+            raise RuntimeError(
+                f"analysis attempt {attempt.attempt_id} already has different charge data"
+            )
