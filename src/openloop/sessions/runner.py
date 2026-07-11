@@ -30,7 +30,9 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from typing import TYPE_CHECKING
 
+from openloop.deliverable import Artifact, Deliverable, Prose
 from openloop.runtime import Runtime, Task
 from openloop.runtime.pipeline import _result_content
 from openloop.sessions.delivery import SurfaceDelivery
@@ -46,6 +48,9 @@ from openloop.sessions.threads import (
     thread_scope_key,
 )
 from openloop.workflows.store import TERMINAL as _WORKFLOW_TERMINAL
+
+if TYPE_CHECKING:
+    from openloop.analysis import ArtifactStore
 
 logger = logging.getLogger(__name__)
 
@@ -63,12 +68,45 @@ ERROR_TEXT = "⚠️ This task was interrupted and could not be completed."
 # on context size, not a correctness limit — older turns fall back to recall.
 HISTORY_TURN_LIMIT = 20
 
+# Re-materialization defaults for an artifact final: only the ref is persisted
+# on the session, so a recovery post rebuilds the artifact's naming from these.
+ARTIFACT_TITLE_DEFAULT = "Analysis report"
+ARTIFACT_FILENAME_DEFAULT = "report.md"
+ARTIFACT_SNIPPET_TYPE_DEFAULT = "markdown"
+
 
 def _is_non_terminal_invocation(inv) -> bool:
     if inv.status == "started":
         return True
     data = getattr(getattr(inv, "result", None), "data", {}) or {}
     return data.get("status") in {"running", "waiting"}
+
+
+def _artifact_outcome(inv) -> dict | None:
+    """The result data of a successful artifact-ref outcome, else ``None``.
+
+    A workflow whose terminal result carries ``deliverable="artifact"`` plus an
+    ``artifact_ref`` (the analysis worker's ``store_result``) asks the runner to
+    dereference the ref and deliver the body as an :class:`Artifact` — with no
+    model continuation (the locked bypass-M0b decision: the report is the
+    answer; a second model call would only spend and could distort it).
+    """
+    result = getattr(inv, "result", None)
+    if result is None or not getattr(result, "ok", False):
+        return None
+    data = getattr(result, "data", None) or {}
+    if data.get("deliverable") == "artifact" and data.get("artifact_ref"):
+        return data
+    return None
+
+
+def _prose_of(result: "Deliverable | str") -> str:
+    """The replay-safe prose of a deliverable — what transcripts/history keep."""
+    if isinstance(result, Artifact):
+        return result.summary
+    if isinstance(result, Prose):
+        return result.text
+    return result
 
 
 def _approval_id_for_instance(instance) -> str | None:
@@ -118,10 +156,17 @@ class SessionRunner:
         sessions: SurfaceSessionStore,
         delivery: SurfaceDelivery,
         threads: "ThreadRecordStore | None" = None,
+        artifacts: "ArtifactStore | None" = None,
     ) -> None:
         self.runtime = runtime
         self.sessions = sessions
         self.delivery = delivery
+        # Phase 2 (sealed analysis): report bodies live in a job-keyed artifact
+        # store and sessions/workflows carry only a ref. The runner is the one
+        # place that dereferences a ref into an Artifact deliverable at delivery
+        # time — SurfaceDelivery stays store-unaware; a missing store degrades
+        # to delivering the prose summary.
+        self.artifacts = artifacts
         # Phase A: the thread-scoped delivered-transcript store. When present, a
         # follow-up turn's history is the real conversation (request→answer per
         # delivered turn) rather than the per-session summary scan; when absent the
@@ -445,6 +490,13 @@ class SessionRunner:
         if inv.status == "executed":
             if session.final_message_id is not None:
                 return
+            # An artifact-ref outcome (the analysis report) is delivered straight
+            # from the ref, bypassing the M0b model continuation by design: the
+            # report is the answer, and re-invoking the model would only spend.
+            outcome = _artifact_outcome(inv)
+            if outcome is not None:
+                await self._deliver_artifact_outcome(session, outcome, message)
+                return
             # M0b: re-run the model with the approved result folded in, so the reply
             # is a fresh model answer — not the raw tool summary. Falls back to the
             # summary if the continuation can't be built (no engine / lost state).
@@ -536,6 +588,87 @@ class SessionRunner:
             )
         return True
 
+    async def _deliver_artifact_outcome(
+        self, session: SurfaceSession, data: dict, message: str
+    ) -> None:
+        """Deliver a workflow's report straight from its artifact ref (no M0b).
+
+        The prose summary and the ref are persisted FIRST so a failed post is
+        repairable — every retry path re-materializes from
+        ``result_artifact_ref``. Then the answer is delivered; the approval-card
+        collapse stays best-effort cosmetics, exactly like the text path.
+        """
+        prose = (
+            data.get("prose_summary")
+            or data.get("summary")
+            or "The analysis report is ready."
+        )
+        session.status = "completed"
+        session.result_summary = prose
+        session.result_artifact_ref = data["artifact_ref"]
+        await self.sessions.upsert(session)
+        deliverable = await self._materialize_artifact(
+            data["artifact_ref"],
+            prose,
+            title=data.get("artifact_title") or ARTIFACT_TITLE_DEFAULT,
+            filename=data.get("artifact_filename") or ARTIFACT_FILENAME_DEFAULT,
+            snippet_type=data.get("snippet_type") or ARTIFACT_SNIPPET_TYPE_DEFAULT,
+        )
+        await self._post_final(session, deliverable)
+        try:
+            await self._update_approval(session, message, [])
+        except Exception:  # noqa: BLE001 — buttons going stale is cosmetic
+            logger.exception(
+                "failed to collapse approval card for session %s", session.id
+            )
+
+    async def _materialize_artifact(
+        self, ref: str, prose: str, *, title: str, filename: str, snippet_type: str
+    ) -> Deliverable:
+        """Dereference an artifact ref into a deliverable, degrading to prose.
+
+        The body was written once, by the analysis orchestrator; if no store is
+        wired or it no longer holds the ref (e.g. an in-memory store across a
+        restart), the prose summary still delivers — the answer must never be
+        lost to a hosting failure.
+        """
+        body: bytes | None = None
+        if self.artifacts is not None:
+            try:
+                artifact = await self.artifacts.get(ref)
+            except Exception:  # noqa: BLE001 — degrade to prose, keep the answer
+                logger.warning(
+                    "artifact store lookup failed for %s", ref, exc_info=True
+                )
+                artifact = None
+            if artifact is not None:
+                body = artifact.body
+        if body is None:
+            logger.warning("report artifact %s unavailable; delivering prose", ref)
+            return Prose(
+                text=f"{prose}\n\n_(The full report `{ref}` could not be retrieved.)_"
+            )
+        return Artifact(
+            content=body.decode("utf-8", errors="replace"),
+            title=title,
+            filename=filename,
+            summary=prose,
+            snippet_type=snippet_type,
+        )
+
+    async def _final_deliverable(self, session: SurfaceSession) -> "Deliverable | str":
+        """What a (re-)delivery of this session's final answer should post."""
+        prose = session.result_summary or "(no response)"
+        if session.result_artifact_ref is None:
+            return prose
+        return await self._materialize_artifact(
+            session.result_artifact_ref,
+            prose,
+            title=ARTIFACT_TITLE_DEFAULT,
+            filename=ARTIFACT_FILENAME_DEFAULT,
+            snippet_type=ARTIFACT_SNIPPET_TYPE_DEFAULT,
+        )
+
     async def _on_workflow_terminal(self, instance) -> None:
         approval_id = _approval_id_for_instance(instance)
         if not approval_id:
@@ -622,10 +755,11 @@ class SessionRunner:
             return session
         # This is the retry path: the post may already have landed before its id
         # was persisted, so ask delivery to recover-or-post (recover=True) rather
-        # than blindly re-posting and duplicating the answer.
+        # than blindly re-posting and duplicating the answer. An artifact final is
+        # re-materialized from its persisted ref (degrading to the prose summary).
         if session.status == "completed":
             await self._post_final(
-                session, session.result_summary or "(no response)", recover=True
+                session, await self._final_deliverable(session), recover=True
             )
         elif session.status in ("failed", "abandoned"):
             await self._post_error(session, recover=True)
@@ -702,13 +836,14 @@ class SessionRunner:
         return out
 
     async def _post_final(
-        self, session: SurfaceSession, text: str, *, recover: bool = False
+        self, session: SurfaceSession, result: "Deliverable | str", *,
+        recover: bool = False,
     ) -> None:
         if session.final_message_id is not None:
             return  # already delivered — never post a second final answer
         mid = await self.delivery.post_final(
             session.target,
-            text,
+            result,
             key=self._delivery_key(session, "final"),
             recover=recover,
         )
@@ -717,8 +852,9 @@ class SessionRunner:
         # Post-delivery, commit the turn to the thread's delivered transcript so a
         # later turn replays it as real conversation. Idempotent on the session id,
         # so a redelivery/reconcile never double-appends; only after the answer
-        # actually reached the thread (final_message_id recorded above).
-        await self._record_transcript(session, text)
+        # actually reached the thread (final_message_id recorded above). Only the
+        # replay-safe prose is recorded — an artifact body never enters history.
+        await self._record_transcript(session, _prose_of(result))
 
     async def _record_transcript(self, session: SurfaceSession, answer: str) -> None:
         if self.threads is None or session.target.thread is None:

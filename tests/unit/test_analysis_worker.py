@@ -216,6 +216,46 @@ async def test_monthly_gate_runs_before_input_provisioning():
     assert inputs.gets == 0
 
 
+async def test_empty_instruction_fails_before_any_gate_store_or_spend():
+    # Fail-closed backstop behind the gateway's invoke-time schema validation:
+    # a stale persisted record (approval/workflow written before the seam) or a
+    # future direct caller must not buy a model call with no instruction.
+    inputs = _TrackingInputStore()
+    ledger, usage, agent = _ledger()
+    attempts = InMemoryAnalysisAttemptStore()
+    state = _state()
+    state.instruction = "   "
+    state.agent = agent.metadata.name
+
+    result = await SealedAnalysisOrchestrator(
+        _ReportWorker(), inputs, InMemoryArtifactStore(),
+        attempts=attempts, ledger=ledger,
+    ).run_analysis(state)
+
+    assert not result.ok
+    assert "instruction is required" in result.error
+    assert inputs.gets == 0  # no provisioning
+    assert usage.records == []  # no spend recorded or settled
+    assert await attempts.get(state.attempt_id) is None  # no attempt begun
+
+
+async def test_empty_input_ref_fails_before_input_lookup():
+    inputs = _TrackingInputStore()
+    ledger, usage, agent = _ledger()
+    state = _state()
+    state.input_ref = ""
+    state.agent = agent.metadata.name
+
+    result = await SealedAnalysisOrchestrator(
+        _ReportWorker(), inputs, InMemoryArtifactStore(), ledger=ledger
+    ).run_analysis(state)
+
+    assert not result.ok
+    assert "input_ref is required" in result.error
+    assert inputs.gets == 0
+    assert usage.records == []
+
+
 async def test_over_cap_settlement_blocks_report_readout_and_artifact_write():
     inputs = InMemoryInputStore()
     state = _state()

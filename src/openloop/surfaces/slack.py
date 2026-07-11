@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from typing import TYPE_CHECKING
 
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 from slack_bolt.async_app import AsyncApp
@@ -26,6 +27,9 @@ from openloop.sessions import (
     ThreadRecordStore,
 )
 from openloop.surfaces.approvals import APPROVE_ACTION, DENY_ACTION
+
+if TYPE_CHECKING:
+    from openloop.analysis import ArtifactStore
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +141,7 @@ def build_slack_app(
     bot_token: str,
     signing_secret: str | None = None,
     threads: ThreadRecordStore | None = None,
+    artifacts: "ArtifactStore | None" = None,
 ) -> AsyncApp:
     """Build the Bolt app (mention + approval handlers) bound to a runtime.
 
@@ -151,7 +156,8 @@ def build_slack_app(
         app = AsyncApp(token=bot_token, request_verification_enabled=False)
 
     runner = SessionRunner(
-        runtime, sessions, SlackSurfaceDelivery(app.client), threads=threads
+        runtime, sessions, SlackSurfaceDelivery(app.client), threads=threads,
+        artifacts=artifacts,
     )
     # Exposed so the app lifespan can repoint the runner's session store after a
     # Postgres-setup fallback (mirrors how the workflow engine's store is swapped)

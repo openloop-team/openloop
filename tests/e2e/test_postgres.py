@@ -371,6 +371,9 @@ async def test_surface_session_roundtrip_across_real_postgres():
             progress_message_id="ts-1",
             approval_ids=[approval_id],
             request_text="please do the thing",
+            # Phase 2 (sealed analysis): only the ref is persisted, so a
+            # re-delivery after restart can re-materialize the report.
+            result_artifact_ref="analysis://job-1/report.md",
         ))
 
         # A fresh store (a restart) reads it back by all three keys.
@@ -382,6 +385,7 @@ async def test_surface_session_roundtrip_across_real_postgres():
             assert by_id.target.thread == "100.1"
             assert by_id.approval_ids == [approval_id]
             assert by_id.request_text == "please do the thing"
+            assert by_id.result_artifact_ref == "analysis://job-1/report.md"
             assert (await store2.get_by_event(event_id)).id == session_id
             # The `@>` containment lookup (button → session) resolves the owner.
             assert (await store2.get_by_approval(approval_id)).id == session_id

@@ -105,6 +105,7 @@ from openloop.usage import (
 )
 from openloop.usage.postgres import PostgresUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowStore
+from openloop.workflows.analysis_worker import build_analysis_worker_workflow
 from openloop.workflows.coding_worker import build_coding_worker_workflow
 from openloop.workflows.postgres import PostgresWorkflowStore
 
@@ -741,6 +742,10 @@ def build_tool_gateway(
             gateway.analysis_attempt_store = attempts  # type: ignore[attr-defined]
             gateway.analysis_sandbox_enabled = True  # type: ignore[attr-defined]
             gateway.register(AnalysisWorkerConnector(orchestrator))
+            # Register the sealed run as a durable workflow (approval = wait
+            # node; store_result persists the {artifact_ref, prose_summary}
+            # the session runner delivers from).
+            engine.register(build_analysis_worker_workflow(orchestrator))
             log.info(
                 "registered native tool: analysis "
                 "(backend=builtin, model=%s, sandbox=docker, default_per_task_cap=%s)",
@@ -913,6 +918,10 @@ def create_app() -> FastAPI:
                 analysis_artifacts = InMemoryArtifactStore()
                 app.state.analysis_artifacts = analysis_artifacts
                 _repoint_analysis_stores(tools, artifacts=analysis_artifacts)
+                # The session runner dereferences report refs at delivery time
+                # from this same store — keep it pointed at the live instance.
+                if session_runner is not None:
+                    session_runner.artifacts = analysis_artifacts
         else:
             log.info("analysis artifact backend: in-memory (process-local)")
 
@@ -1127,6 +1136,9 @@ def create_app() -> FastAPI:
             bot_token=settings.slack_bot_token,
             signing_secret=settings.slack_signing_secret or None,
             threads=threads,
+            # Lets the runner dereference an analysis report ref into an
+            # Artifact deliverable at delivery time (Phase 2).
+            artifacts=analysis_artifacts,
         )
         app.state.slack_app = slack_app
         # Captured so the session-store fallback can repoint the runner (above).

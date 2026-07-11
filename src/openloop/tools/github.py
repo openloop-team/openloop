@@ -13,7 +13,11 @@ from typing import Protocol, runtime_checkable
 from openloop.credentials import CredentialResolver, CredentialScope
 from openloop.tools.base import ActionSpec, ToolResult
 
-_REPO = {"type": "string", "description": "owner/repo, e.g. acme/ingestion"}
+_REPO = {
+    "type": "string",
+    "minLength": 1,
+    "description": "owner/repo, e.g. acme/ingestion",
+}
 _NUMBER = {"type": "integer", "description": "issue or PR number"}
 
 # ToolResult.data goes back to the model verbatim, so trim GitHub's verbose
@@ -177,7 +181,7 @@ class GitHubConnector:
                     "type": "object",
                     "properties": {
                         "repo": _REPO,
-                        "title": {"type": "string"},
+                        "title": {"type": "string", "minLength": 1},
                         "body": {"type": "string"},
                     },
                     "required": ["repo", "title"],

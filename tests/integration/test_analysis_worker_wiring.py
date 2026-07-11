@@ -27,13 +27,13 @@ def _agent():
     return agent
 
 
-def _gateway(settings):
+def _gateway(settings, engine=None):
     return appmod.build_tool_gateway(
         settings,
         {"dev-platform": _agent()},
         InMemoryApprovalStore(),
         InMemoryCheckpointStore(),
-        WorkflowEngine(InMemoryWorkflowStore()),
+        engine or WorkflowEngine(InMemoryWorkflowStore()),
         usage=InMemoryUsageStore(),
     )
 
@@ -41,10 +41,11 @@ def _gateway(settings):
 def test_analysis_registers_without_github_when_digest_and_sealed_probe_work(monkeypatch):
     monkeypatch.setattr(DockerSandbox, "probe_sealed", lambda self, workspace_root=None: None)
     monkeypatch.setattr(appmod, "build_github_credentials", lambda settings: None)
+    engine = WorkflowEngine(InMemoryWorkflowStore())
     gateway = _gateway(Settings(
         analysis_worker_enabled=True,
         analysis_worker_sandbox_image=IMAGE,
-    ))
+    ), engine=engine)
 
     connector = gateway._tools["analysis"]
     assert isinstance(connector, AnalysisWorkerConnector)
@@ -52,6 +53,11 @@ def test_analysis_registers_without_github_when_digest_and_sealed_probe_work(mon
     assert isinstance(connector.orchestrator._attempts, InMemoryAnalysisAttemptStore)
     assert connector.orchestrator._ledger.task_kind == "analysis_worker"
     assert "github" not in gateway._tools
+    # Phase 2: the connector declares the durable workflow, and the engine has
+    # it registered — an approval parks/wakes the sealed run instead of a
+    # direct execute().
+    assert connector.workflow == "analysis_worker"
+    assert "analysis_worker" in engine.workflows
 
 
 @pytest.mark.parametrize(

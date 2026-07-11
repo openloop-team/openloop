@@ -94,7 +94,11 @@ class WorkerRunAborted(RuntimeError):
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
 
-_REPO = {"type": "string", "description": "owner/repo, e.g. acme/ingestion"}
+_REPO = {
+    "type": "string",
+    "minLength": 1,
+    "description": "owner/repo, e.g. acme/ingestion",
+}
 CODING_WORKER_TOOL_NAME = "coding_worker"
 CODING_WORKER_PR_WRITE = "pr:write"
 
@@ -317,6 +321,12 @@ class CodingWorkerConnector:
         """
         if permission != CODING_WORKER_PR_WRITE:
             return args
+        # Canonicalize before the gateway validates the prepared args against
+        # the declared schema: a whitespace-only repo/instruction becomes ""
+        # so the schema's minLength actually rejects it.
+        for key in ("repo", "instruction"):
+            if isinstance(args.get(key), str):
+                args = {**args, key: args[key].strip()}
         if not args.get("job_id"):
             args = {**args, "job_id": uuid.uuid4().hex[:12]}
         if agent is not None:
@@ -336,6 +346,7 @@ class CodingWorkerConnector:
                     "repo": _REPO,
                     "instruction": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "what change the worker should make",
                     },
                     "base": {

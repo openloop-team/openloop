@@ -478,6 +478,18 @@ class SealedAnalysisOrchestrator:
                 "automatic re-execution is refused pending reconciliation",
             )
 
+        # Fail-closed backstop behind the gateway's schema validation: args can
+        # also reach this boundary from persisted records (an approval or parked
+        # workflow written before a schema change) or from future direct
+        # callers, and a run without an instruction or an input reference must
+        # never reach the ledger, the input store, or a model. Deliberately
+        # after the attempt reconciliation above — settling already-observed
+        # spend is correct whatever the args look like.
+        if not state.instruction.strip():
+            return _failed(state, "analysis instruction is required")
+        if not state.input_ref.strip():
+            return _failed(state, "input_ref is required")
+
         # This gate precedes input-store access and workspace allocation. A
         # monthly refusal must not provision data or start a model call.
         try:
@@ -609,6 +621,11 @@ class AnalysisWorkerConnector:
     # Product policy for Phase 1: an agent cannot silently opt this action out
     # of human approval. A future spend-only policy may make this per-agent.
     requires_approval = True
+    # Declaring a workflow makes the gateway run this action durably when an
+    # engine is wired (approval = wait node, resolve() emits the event; see the
+    # workflow in openloop.workflows.analysis_worker). Without one, execute()
+    # below is the engine-less fallback through the same orchestrator.
+    workflow = "analysis_worker"
 
     def __init__(self, orchestrator: AnalysisAttemptRunner) -> None:
         self.orchestrator = orchestrator
@@ -629,10 +646,12 @@ class AnalysisWorkerConnector:
                 "properties": {
                     "instruction": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "The analysis question to answer.",
                     },
                     "input_ref": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "Reference to controller-staged input data.",
                     },
                 },

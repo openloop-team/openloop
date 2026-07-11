@@ -41,6 +41,7 @@ class PostgresSurfaceSessionStore:
                     approval_ids         JSONB NOT NULL DEFAULT '[]',
                     request_text         TEXT,
                     result_summary       TEXT,
+                    result_artifact_ref  TEXT,
                     error                TEXT,
                     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -51,6 +52,12 @@ class PostgresSurfaceSessionStore:
             await conn.execute(
                 "ALTER TABLE surface_sessions "
                 "ADD COLUMN IF NOT EXISTS request_text TEXT"
+            )
+            # Migration for tables created before artifact-ref delivery (Phase 2
+            # of the sealed analysis worker).
+            await conn.execute(
+                "ALTER TABLE surface_sessions "
+                "ADD COLUMN IF NOT EXISTS result_artifact_ref TEXT"
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS surface_sessions_status_idx "
@@ -196,9 +203,11 @@ class PostgresSurfaceSessionStore:
                     id, surface, workspace, agent, channel, thread, event_id,
                     status, workflow_instance_id, progress_message_id,
                     final_message_id, approval_ids, request_text, result_summary,
-                    error, updated_at
+                    result_artifact_ref, error, updated_at
                 )
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now())
+                VALUES (
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now()
+                )
                 ON CONFLICT (id) DO UPDATE SET
                     surface = EXCLUDED.surface,
                     workspace = EXCLUDED.workspace,
@@ -213,6 +222,7 @@ class PostgresSurfaceSessionStore:
                     approval_ids = EXCLUDED.approval_ids,
                     request_text = EXCLUDED.request_text,
                     result_summary = EXCLUDED.result_summary,
+                    result_artifact_ref = EXCLUDED.result_artifact_ref,
                     error = EXCLUDED.error,
                     updated_at = now()
                 """,
@@ -230,6 +240,7 @@ class PostgresSurfaceSessionStore:
                 json.dumps(session.approval_ids),
                 session.request_text,
                 session.result_summary,
+                session.result_artifact_ref,
                 session.error,
             )
 
@@ -262,6 +273,7 @@ def _row_to_session(row) -> SurfaceSession:
         approval_ids=json.loads(row["approval_ids"]) if row["approval_ids"] else [],
         request_text=row["request_text"],
         result_summary=row["result_summary"],
+        result_artifact_ref=row["result_artifact_ref"],
         error=row["error"],
         created_at=row["created_at"] or now,
         updated_at=row["updated_at"] or now,

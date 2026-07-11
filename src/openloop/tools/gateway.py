@@ -13,7 +13,13 @@ from openloop.approvals.store import (
     ApprovalStore,
     InMemoryApprovalStore,
 )
-from openloop.tools.base import Invocation, Tool, ToolResult, split_action
+from openloop.tools.base import (
+    Invocation,
+    Tool,
+    ToolResult,
+    split_action,
+    validate_args,
+)
 from openloop.tools.policy import is_allowed
 from openloop.workflows.store import TERMINAL as WORKFLOW_TERMINAL
 
@@ -129,6 +135,20 @@ class ToolGateway:
             # warm_key (Phase B) rides the args across the approval boundary so a
             # workflow-backed tool can reuse the requesting thread's warm context.
             args = prepare(permission, args, agent, warm_key=warm_key)
+
+        # Enforce the action's own declared schema on the prepared args, before
+        # anything durable exists. This is the one validation seam every path
+        # shares — a workflow-backed tool never runs execute(), so per-connector
+        # checks there cannot protect the durable path, and a request that can
+        # never run must not become an approval card a human is asked to decide.
+        problems = validate_args(tool.describe(permission).parameters, args)
+        if problems:
+            detail = "; ".join(problems)
+            logger.info("rejected %s: invalid arguments (%s)", action, detail)
+            return Invocation(
+                status="invalid",
+                message=f"invalid arguments for {action}: {detail}",
+            )
 
         # Some actions are intrinsically high-risk regardless of an accidental
         # omission in an agent's config. Phase 1 sealed analysis is one: it can
