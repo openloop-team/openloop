@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -474,11 +475,17 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
 
 
 def build_analysis_worker(settings: Settings) -> "AnalysisWorker | None":
-    """Build the only Phase 1 analysis backend, fail-closed on every mismatch."""
+    """Build the one builtin analysis backend, fail-closed on every mismatch."""
     if settings.analysis_worker_backend != "builtin":
         log.error(
             "unknown ANALYSIS_WORKER_BACKEND=%r (expected builtin)",
             settings.analysis_worker_backend,
+        )
+        return None
+    if settings.analysis_worker_strategy not in ("single", "iterative"):
+        log.error(
+            "unknown ANALYSIS_WORKER_STRATEGY=%r (expected single|iterative)",
+            settings.analysis_worker_strategy,
         )
         return None
     if (
@@ -490,6 +497,8 @@ def build_analysis_worker(settings: Settings) -> "AnalysisWorker | None":
         or settings.analysis_worker_summary_lines <= 0
         or settings.analysis_worker_pids_limit <= 0
         or settings.analysis_worker_cpus <= 0
+        or settings.analysis_worker_max_iterations <= 0
+        or settings.analysis_worker_exec_feedback_max_chars <= 0
         or not settings.analysis_worker_memory
         or not settings.analysis_worker_tmp_size
     ):
@@ -513,6 +522,9 @@ def build_analysis_worker(settings: Settings) -> "AnalysisWorker | None":
         ),
         output_cap_bytes=settings.analysis_worker_report_max_bytes,
         output_watch_interval_seconds=settings.analysis_worker_output_watch_interval_seconds,
+        strategy=settings.analysis_worker_strategy,
+        max_iterations=settings.analysis_worker_max_iterations,
+        exec_feedback_max_chars=settings.analysis_worker_exec_feedback_max_chars,
     )
 
 
@@ -576,22 +588,29 @@ def _build_analysis_ledger(
         agents=agents,
         default_agent=owner.metadata.name,
         task_kind="analysis_worker",
+        # Opt-in hard posture (mirrors openhands when enabled): refuse any
+        # attempt for a capless agent, keeping stale approved jobs fail-closed
+        # even if config drifts between approval and recovery. Off by default:
+        # iterative spend is structurally bounded (max_iterations completions,
+        # capped feedback growth) and every run is human-approved; capped
+        # agents keep the in-run abort and settle enforcement regardless.
+        require_per_task_cap=settings.analysis_worker_require_per_task_cap,
     )
 
 
 def _uncapped_worker_agents(
-    agents: dict[str, Agent], ledger: WorkerSpendLedger
+    agents: dict[str, Agent],
+    ledger: WorkerSpendLedger,
+    exposes: "Callable[[Agent], bool]" = _exposes_coding_worker,
 ) -> list[str]:
     """Agents whose worker attempts would run without a per-task cap.
 
     With per-invoker attribution the cap enforced is the invoking agent's, so
-    the Phase 4 fail-closed gate for the agentic backend must hold for every
+    the fail-closed gate for an agentic backend/strategy must hold for every
     agent that can start the worker — plus the ledger's fallback attribution
     target, which covers attempts with no agent identity.
     """
-    exposed = {
-        a.metadata.name: a for a in agents.values() if _exposes_coding_worker(a)
-    }
+    exposed = {a.metadata.name: a for a in agents.values() if exposes(a)}
     exposed.setdefault(ledger.default_agent, agents[ledger.default_agent])
     return sorted(
         name for name, a in exposed.items()
@@ -723,6 +742,21 @@ def build_tool_gateway(
                 "usage ledger are required; it will not run unsandboxed or "
                 "without spend gates."
             )
+        elif settings.analysis_worker_require_per_task_cap and (
+            uncapped := _uncapped_worker_agents(
+                agents, ledger, exposes=_exposes_analysis_worker
+            )
+        ):
+            # Opt-in fail-closed gate (the openhands posture): the operator
+            # demanded per-task caps, so the worker must not run for any agent
+            # whose attempts would be uncapped.
+            log.error(
+                "ANALYSIS WORKER DISABLED: "
+                "ANALYSIS_WORKER_REQUIRE_PER_TASK_CAP is set, so every agent "
+                "exposing the analysis tool needs spec.budget.per_task_usd "
+                "(missing on: %s).",
+                ", ".join(uncapped),
+            )
         else:
             inputs = analysis_inputs or build_analysis_input_store(settings)
             artifacts = analysis_artifacts or build_analysis_artifact_store(settings)
@@ -748,7 +782,9 @@ def build_tool_gateway(
             engine.register(build_analysis_worker_workflow(orchestrator))
             log.info(
                 "registered native tool: analysis "
-                "(backend=builtin, model=%s, sandbox=docker, default_per_task_cap=%s)",
+                "(backend=builtin, strategy=%s, model=%s, sandbox=docker, "
+                "default_per_task_cap=%s)",
+                settings.analysis_worker_strategy,
                 settings.analysis_worker_model,
                 ledger.per_task_usd_for(None),
             )

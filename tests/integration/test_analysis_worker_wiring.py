@@ -1,4 +1,4 @@
-"""Fail-closed Phase 1 analysis-worker application wiring."""
+"""Fail-closed analysis-worker application wiring (Phases 1 + 3)."""
 
 from pathlib import Path
 
@@ -27,10 +27,10 @@ def _agent():
     return agent
 
 
-def _gateway(settings, engine=None):
+def _gateway(settings, engine=None, agent=None):
     return appmod.build_tool_gateway(
         settings,
-        {"dev-platform": _agent()},
+        {"dev-platform": agent or _agent()},
         InMemoryApprovalStore(),
         InMemoryCheckpointStore(),
         engine or WorkflowEngine(InMemoryWorkflowStore()),
@@ -50,8 +50,13 @@ def test_analysis_registers_without_github_when_digest_and_sealed_probe_work(mon
     connector = gateway._tools["analysis"]
     assert isinstance(connector, AnalysisWorkerConnector)
     assert isinstance(connector.orchestrator.worker, BuiltinAnalysisWorker)
+    # Iterative is the product default, and the hard cap gate is opt-in —
+    # spend stays bounded by max_iterations, capped feedback growth, human
+    # approval per run, and any caps the invoking agent does carry.
+    assert connector.orchestrator.worker.strategy == "iterative"
     assert isinstance(connector.orchestrator._attempts, InMemoryAnalysisAttemptStore)
     assert connector.orchestrator._ledger.task_kind == "analysis_worker"
+    assert connector.orchestrator._ledger.require_per_task_cap is False
     assert "github" not in gateway._tools
     # Phase 2: the connector declares the durable workflow, and the engine has
     # it registered — an approval parks/wakes the sealed run instead of a
@@ -73,6 +78,14 @@ def test_analysis_registers_without_github_when_digest_and_sealed_probe_work(mon
             ),
             "network=none",
         ),
+        (
+            Settings(
+                analysis_worker_enabled=True,
+                analysis_worker_sandbox_image=IMAGE,
+                analysis_worker_strategy="both",
+            ),
+            "ANALYSIS_WORKER_STRATEGY",
+        ),
     ],
 )
 def test_analysis_unsafe_sandbox_configuration_fails_closed(settings, needle, caplog):
@@ -80,3 +93,68 @@ def test_analysis_unsafe_sandbox_configuration_fails_closed(settings, needle, ca
 
     assert "analysis" not in gateway._tools
     assert needle in caplog.text
+
+
+def test_uncapped_agents_register_by_default_without_the_cap_gate(monkeypatch):
+    # The hard cap requirement is an opt-in posture: with the default config,
+    # capless agents may run iterative analysis (bounded by max_iterations,
+    # capped feedback growth, and per-run human approval).
+    monkeypatch.setattr(DockerSandbox, "probe_sealed", lambda self, workspace_root=None: None)
+    monkeypatch.setattr(appmod, "build_github_credentials", lambda settings: None)
+    agent = _agent()
+    agent.spec.budget.per_task_usd = None
+
+    gateway = _gateway(
+        Settings(
+            analysis_worker_enabled=True,
+            analysis_worker_sandbox_image=IMAGE,
+        ),
+        agent=agent,
+    )
+
+    connector = gateway._tools["analysis"]
+    assert connector.orchestrator.worker.strategy == "iterative"
+    assert connector.orchestrator._ledger.require_per_task_cap is False
+
+
+def test_opt_in_cap_requirement_without_caps_fails_closed(monkeypatch, caplog):
+    # ANALYSIS_WORKER_REQUIRE_PER_TASK_CAP is the openhands-style boot gate:
+    # once the operator demands caps, a capless exposing agent disables the
+    # tool rather than running uncapped.
+    monkeypatch.setattr(DockerSandbox, "probe_sealed", lambda self, workspace_root=None: None)
+    monkeypatch.setattr(appmod, "build_github_credentials", lambda settings: None)
+    agent = _agent()
+    agent.spec.budget.per_task_usd = None
+
+    gateway = _gateway(
+        Settings(
+            analysis_worker_enabled=True,
+            analysis_worker_sandbox_image=IMAGE,
+            analysis_worker_require_per_task_cap=True,
+        ),
+        agent=agent,
+    )
+
+    assert "analysis" not in gateway._tools
+    assert "ANALYSIS_WORKER_REQUIRE_PER_TASK_CAP" in caplog.text
+    assert "dev-platform" in caplog.text
+
+
+def test_opt_in_cap_requirement_with_caps_registers_and_hardens_the_ledger(monkeypatch):
+    monkeypatch.setattr(DockerSandbox, "probe_sealed", lambda self, workspace_root=None: None)
+    monkeypatch.setattr(appmod, "build_github_credentials", lambda settings: None)
+
+    gateway = _gateway(Settings(
+        analysis_worker_enabled=True,
+        analysis_worker_sandbox_image=IMAGE,
+        analysis_worker_require_per_task_cap=True,
+        analysis_worker_max_iterations=6,
+    ))
+
+    connector = gateway._tools["analysis"]
+    worker = connector.orchestrator.worker
+    assert isinstance(worker, BuiltinAnalysisWorker)
+    assert worker.strategy == "iterative"
+    assert worker.max_iterations == 6
+    # Stale approved jobs stay fail-closed if caps drift after approval.
+    assert connector.orchestrator._ledger.require_per_task_cap is True

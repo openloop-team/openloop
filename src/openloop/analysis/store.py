@@ -103,9 +103,12 @@ class AnalysisAttempt:
     """Durable accounting state for one model-authoring attempt.
 
     ``started`` exists before the model call. ``charged`` means OpenLoop has
-    observed a successful completion and durably retained its usage; ``settled``
-    means the same charge reached the idempotent usage ledger. A later workflow
-    phase can reconcile stalled states without guessing that they were free.
+    observed at least one successful completion and durably retained its usage
+    — the totals are **cumulative** and may only grow while charged (the
+    iterative strategy re-charges after every completion); ``settled`` means
+    the final cumulative charge reached the idempotent usage ledger. A later
+    workflow phase can reconcile stalled states without guessing that they
+    were free.
     """
 
     attempt_id: str
@@ -208,12 +211,21 @@ class InMemoryAnalysisAttemptStore:
         completion_tokens: int,
     ) -> AnalysisAttempt:
         attempt = self._require(attempt_id)
-        if attempt.status in ("charged", "settled"):
+        if attempt.status == "settled":
+            # After the ledger settle no new spend may appear — growth here
+            # would be spend that never reaches the idempotent usage row.
             self._assert_same_charge(
                 attempt, cost_usd, prompt_tokens, completion_tokens
             )
             return attempt
-        if attempt.status != "started":
+        if attempt.status == "charged":
+            # Cumulative totals from a later completion in the same run may
+            # only grow (equal = a safe crash replay); a decrease means the
+            # caller lost track of spend and must fail loudly.
+            self._assert_monotonic_charge(
+                attempt, cost_usd, prompt_tokens, completion_tokens
+            )
+        elif attempt.status != "started":
             raise RuntimeError(
                 f"analysis attempt {attempt_id} is {attempt.status}; cannot charge"
             )
@@ -221,7 +233,7 @@ class InMemoryAnalysisAttemptStore:
         attempt.cost_usd = cost_usd
         attempt.prompt_tokens = prompt_tokens
         attempt.completion_tokens = completion_tokens
-        attempt.charged_at = _now()
+        attempt.charged_at = attempt.charged_at or _now()
         attempt.updated_at = _now()
         return attempt
 
@@ -267,4 +279,21 @@ class InMemoryAnalysisAttemptStore:
         ):
             raise RuntimeError(
                 f"analysis attempt {attempt.attempt_id} already has different charge data"
+            )
+
+    @staticmethod
+    def _assert_monotonic_charge(
+        attempt: AnalysisAttempt,
+        cost_usd: float,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> None:
+        if (
+            cost_usd < (attempt.cost_usd or 0.0)
+            or prompt_tokens < (attempt.prompt_tokens or 0)
+            or completion_tokens < (attempt.completion_tokens or 0)
+        ):
+            raise RuntimeError(
+                f"analysis attempt {attempt.attempt_id} already has different "
+                "charge data: cumulative charge would decrease"
             )

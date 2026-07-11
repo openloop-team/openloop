@@ -1,4 +1,8 @@
-"""Phase 1 sealed-analysis worker and orchestration tests (no Docker)."""
+"""Sealed-analysis worker and orchestration tests (no Docker).
+
+Covers the Phase 1 single-shot strategy plus the Phase 3 iterative strategy
+(exec_feedback loop, cumulative charge retention, in-run spend abort).
+"""
 
 from pathlib import Path
 
@@ -26,6 +30,7 @@ from openloop.tools.analysis_worker import (
     SealedAnalysisOrchestrator,
 )
 from openloop.tools import ToolGateway
+from openloop.tools.coding_worker import WorkerRunAborted
 from openloop.usage import InMemoryUsageStore, UsageRecord, WorkerSpendLedger
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
@@ -151,6 +156,7 @@ async def test_builtin_worker_generates_in_controller_and_streams_script_to_seal
         gateway=gateway,
         limits=SandboxLimits(timeout_seconds=30),
         output_cap_bytes=1024,
+        strategy="single",
     )
 
     run = await worker.run(tmp_path, _state())
@@ -319,6 +325,7 @@ async def test_empty_generated_program_still_settles_known_completion_spend():
         gateway=_PaidGateway("", cost=0.31, prompt_tokens=120, completion_tokens=30),
         limits=SandboxLimits(timeout_seconds=30),
         output_cap_bytes=1_024,
+        strategy="single",
     )
 
     result = await SealedAnalysisOrchestrator(
@@ -354,6 +361,7 @@ async def test_sandbox_setup_failure_still_settles_known_completion_spend():
         gateway=_PaidGateway("print('analysis')", cost=0.19),
         limits=SandboxLimits(timeout_seconds=30),
         output_cap_bytes=1_024,
+        strategy="single",
     )
 
     result = await SealedAnalysisOrchestrator(
@@ -541,3 +549,495 @@ async def test_analysis_is_always_held_for_approval_and_keeps_stamped_agent():
     )
     assert completed.result.ok
     assert runner.state.agent == "dev-platform"
+
+
+# --- Phase 3: iterative strategy (exec_feedback under the in-run cap) --------
+
+
+def _response(text, *, cost=0.20, prompt_tokens=100, completion_tokens=25):
+    return ModelResponse(
+        text=text,
+        model="analysis-model",
+        cost_usd=cost,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
+
+
+def _sandbox_result(
+    *,
+    exit_code=0,
+    stdout="",
+    stderr="",
+    stdout_truncated=False,
+    stderr_truncated=False,
+    timed_out=False,
+    killed=False,
+):
+    return SandboxResult(
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        killed=killed,
+        timed_out=timed_out,
+        stdout_truncated=stdout_truncated,
+        stderr_truncated=stderr_truncated,
+        duration_seconds=0.1,
+    )
+
+
+class _SequencedGateway:
+    """Bills a scripted sequence of completions (or raises) per call."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls: list[list[dict]] = []
+
+    async def complete(self, model, messages, **kwargs):
+        self.calls.append([dict(m) for m in messages])
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+class _ScriptedSealedSandbox:
+    """Plays scripted rounds; a round may write the report like a real run.
+
+    Each round is ``(SandboxResult, body)`` or an exception to raise; ``body``
+    is report bytes, a callable given the outputs dir (for planting hostile
+    filesystem shapes), or None. Records whether report.md pre-existed at each
+    round so tests can pin the stale-report discard.
+    """
+
+    def __init__(self, rounds):
+        self._rounds = list(rounds)
+        self.specs = []
+        self.report_existed_at_start: list[bool] = []
+
+    async def run(self, spec):
+        self.specs.append(spec)
+        outputs = spec.mounts[1].source
+        self.report_existed_at_start.append((outputs / "report.md").exists())
+        round_ = self._rounds.pop(0)
+        if isinstance(round_, Exception):
+            raise round_
+        result, body = round_
+        if callable(body):
+            body(outputs)
+        elif body is not None:
+            (outputs / "report.md").write_bytes(body)
+        return result
+
+
+def _iterative_worker(sandbox, gateway, *, max_iterations=3, feedback_chars=500):
+    return BuiltinAnalysisWorker(
+        "analysis-model",
+        sandbox,
+        gateway=gateway,
+        limits=SandboxLimits(timeout_seconds=30),
+        output_cap_bytes=4_096,
+        strategy="iterative",
+        max_iterations=max_iterations,
+        exec_feedback_max_chars=feedback_chars,
+    )
+
+
+def _workspace(tmp_path):
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / "inputs" / "sales.csv").write_text("a,b\n1,2\n")
+    (tmp_path / "outputs").mkdir()
+    return tmp_path
+
+
+async def test_iterative_worker_feeds_exec_feedback_and_stops_on_clean_report(tmp_path):
+    workspace = _workspace(tmp_path)
+    gateway = _SequencedGateway([
+        _response("print(open('/workspace/inputs/sales.csv').read())", cost=0.10),
+        _response("open('/workspace/outputs/report.md','w').write('# done')", cost=0.15),
+    ])
+    sandbox = _ScriptedSealedSandbox([
+        (_sandbox_result(exit_code=1, stdout="columns: a,b", stderr="KeyError: 'c'"), None),
+        (_sandbox_result(exit_code=0), b"# Findings\n"),
+    ])
+    worker = _iterative_worker(sandbox, gateway)
+
+    run = await worker.run(workspace, _state())
+
+    assert run.exit_code == 0
+    assert run.iterations == 2
+    assert run.cost_usd == pytest.approx(0.25)
+    assert run.prompt_tokens == 200
+    assert len(sandbox.specs) == 2
+    # Round 2's prompt carries round 1's program plus its execution feedback.
+    second_call = gateway.calls[1]
+    assert second_call[-2]["role"] == "assistant"
+    assert "sales.csv" in second_call[-2]["content"]
+    feedback = second_call[-1]["content"]
+    assert second_call[-1]["role"] == "user"
+    assert "Round 1 of 3" in feedback
+    assert "exited with code 1" in feedback
+    assert "columns: a,b" in feedback
+    assert "KeyError: 'c'" in feedback
+    assert "report.md does not exist" in feedback
+
+
+async def test_exec_feedback_is_hard_truncated_and_says_so(tmp_path):
+    workspace = _workspace(tmp_path)
+    gateway = _SequencedGateway([
+        _response("print('x' * 999)"),
+        _response("open('/workspace/outputs/report.md','w').write('# r')"),
+    ])
+    sandbox = _ScriptedSealedSandbox([
+        # stderr is short but was already cut at capture time (stream cap):
+        # the model must be told either way.
+        (
+            _sandbox_result(
+                exit_code=1, stdout="x" * 50, stderr="tail lost",
+                stderr_truncated=True,
+            ),
+            None,
+        ),
+        (_sandbox_result(exit_code=0), b"# r\n"),
+    ])
+    worker = _iterative_worker(sandbox, gateway, feedback_chars=10)
+
+    await worker.run(workspace, _state())
+
+    feedback = gateway.calls[1][-1]["content"]
+    assert "x" * 10 in feedback
+    assert "x" * 11 not in feedback
+    stdout_part, stderr_part = feedback.split("--- stderr")
+    assert "output was cut" in stdout_part
+    assert "output was cut" in stderr_part
+
+
+async def test_iterative_worker_discards_a_failed_rounds_report(tmp_path):
+    workspace = _workspace(tmp_path)
+    gateway = _SequencedGateway([
+        _response("round one"), _response("round two"), _response("round three"),
+    ])
+    sandbox = _ScriptedSealedSandbox([
+        # Writes a report but fails: the loop must not accept it, and the next
+        # round must start without it.
+        (_sandbox_result(exit_code=1), b"# partial\n"),
+        # Exits clean but writes nothing: a stale report must not end the loop.
+        (_sandbox_result(exit_code=0), None),
+        (_sandbox_result(exit_code=0), b"# final\n"),
+    ])
+    worker = _iterative_worker(sandbox, gateway)
+
+    run = await worker.run(workspace, _state())
+
+    assert run.iterations == 3
+    assert sandbox.report_existed_at_start == [False, False, False]
+    assert (workspace / "outputs" / "report.md").read_bytes() == b"# final\n"
+    assert "discarded" in gateway.calls[1][-1]["content"]
+    assert "report.md does not exist" in gateway.calls[2][-1]["content"]
+
+
+async def test_iterative_worker_returns_the_last_run_when_rounds_are_exhausted(tmp_path):
+    workspace = _workspace(tmp_path)
+    gateway = _SequencedGateway([_response("one"), _response("two")])
+    sandbox = _ScriptedSealedSandbox([
+        (_sandbox_result(exit_code=1, stderr="boom"), None),
+        (_sandbox_result(exit_code=3, stderr="still boom"), None),
+    ])
+    worker = _iterative_worker(sandbox, gateway, max_iterations=2)
+
+    run = await worker.run(workspace, _state())
+
+    assert run.exit_code == 3
+    assert run.iterations == 2
+    assert run.cost_usd == pytest.approx(0.40)
+    assert len(gateway.calls) == 2
+    assert len(sandbox.specs) == 2
+
+
+async def test_iterative_worker_reports_cumulative_charges_and_stops_at_the_cap(tmp_path):
+    workspace = _workspace(tmp_path)
+    gateway = _SequencedGateway([_response("one"), _response("two")])
+    sandbox = _ScriptedSealedSandbox([(_sandbox_result(exit_code=1), None)])
+    worker = _iterative_worker(sandbox, gateway)
+    state = _state()
+    state.budget_usd = 0.30
+
+    charges = []
+
+    async def on_charge(charge):
+        charges.append((charge.cost_usd, charge.prompt_tokens))
+
+    with pytest.raises(WorkerRunAborted) as aborted:
+        await worker.run(workspace, state, on_charge=on_charge)
+
+    # Both completions were durably reported cumulatively; the second crossed
+    # the cap, so its program never reached the sandbox.
+    assert charges == [(pytest.approx(0.20), 100), (pytest.approx(0.40), 200)]
+    assert len(sandbox.specs) == 1
+    assert aborted.value.cost_usd == pytest.approx(0.40)
+    assert aborted.value.prompt_tokens == 200
+    assert "per-task cap" in aborted.value.reason
+
+
+async def test_iterative_abort_settles_cumulative_spend_and_blocks_readout():
+    inputs = InMemoryInputStore()
+    state = _state()
+    await inputs.stage(InputManifest(
+        job_id=state.job_id, input_ref=state.input_ref,
+        files=(InputFile("sales.csv", b"x"),),
+    ))
+    artifacts = InMemoryArtifactStore()
+    attempts = InMemoryAnalysisAttemptStore()
+    ledger, usage, agent = _ledger(per_task=0.30)
+    state.agent = agent.metadata.name
+    gateway = _SequencedGateway([_response("one"), _response("two")])
+    sandbox = _ScriptedSealedSandbox([(_sandbox_result(exit_code=1), None)])
+    worker = _iterative_worker(sandbox, gateway)
+
+    result = await SealedAnalysisOrchestrator(
+        worker, inputs, artifacts, attempts=attempts, ledger=ledger
+    ).run_analysis(state)
+
+    assert not result.ok
+    assert "per-task budget" in result.error
+    assert result.run.cost_usd == pytest.approx(0.40)
+    assert len(sandbox.specs) == 1
+    assert await artifacts.get("analysis://job-1/report.md") is None
+    (record,) = usage.records
+    assert record.cost_usd == pytest.approx(0.40)
+    assert record.outcome == "over_task_budget"
+    attempt = await attempts.get(result.attempt_id)
+    assert attempt.status == "settled"
+    assert attempt.cost_usd == pytest.approx(0.40)
+
+
+async def test_later_round_model_failure_settles_the_earlier_rounds_spend():
+    # Round 1 was billed and durably retained; round 2's provider call dies.
+    # The failure must carry the cumulative total out so it settles — the
+    # attempt must never be left charged-but-unsettled (a failed workflow
+    # instance is terminal, so nothing would ever reconcile it).
+    inputs = InMemoryInputStore()
+    state = _state()
+    await inputs.stage(InputManifest(
+        job_id=state.job_id, input_ref=state.input_ref,
+        files=(InputFile("sales.csv", b"x"),),
+    ))
+    attempts = InMemoryAnalysisAttemptStore()
+    ledger, usage, agent = _ledger()
+    state.agent = agent.metadata.name
+    gateway = _SequencedGateway([_response("one"), RuntimeError("provider 500")])
+    sandbox = _ScriptedSealedSandbox([(_sandbox_result(exit_code=1), None)])
+    worker = _iterative_worker(sandbox, gateway)
+
+    result = await SealedAnalysisOrchestrator(
+        worker, inputs, InMemoryArtifactStore(), attempts=attempts, ledger=ledger
+    ).run_analysis(state)
+
+    assert not result.ok
+    assert "model call failed after 1 completed round" in result.error
+    (record,) = usage.records
+    assert record.cost_usd == pytest.approx(0.20)
+    attempt = await attempts.get(result.attempt_id)
+    assert attempt.status == "settled"
+    assert attempt.cost_usd == pytest.approx(0.20)
+
+
+async def test_first_round_model_failure_stays_pre_telemetry():
+    # Nothing was billed yet, so the pre-telemetry posture applies (parity
+    # with a single-shot generation failure): no usage row, attempt left
+    # started for reconciliation.
+    inputs = InMemoryInputStore()
+    state = _state()
+    await inputs.stage(InputManifest(
+        job_id=state.job_id, input_ref=state.input_ref,
+        files=(InputFile("sales.csv", b"x"),),
+    ))
+    attempts = InMemoryAnalysisAttemptStore()
+    ledger, usage, agent = _ledger()
+    state.agent = agent.metadata.name
+    gateway = _SequencedGateway([RuntimeError("provider down")])
+    worker = _iterative_worker(_ScriptedSealedSandbox([]), gateway)
+
+    result = await SealedAnalysisOrchestrator(
+        worker, inputs, InMemoryArtifactStore(), attempts=attempts, ledger=ledger
+    ).run_analysis(state)
+
+    assert not result.ok
+    assert "failed before execution" in result.error
+    assert usage.records == []
+    assert (await attempts.get(result.attempt_id)).status == "started"
+
+
+async def test_checkpoint_failure_after_execution_still_settles_spend():
+    # The post-execution on_step (a checkpoint write) can fail too; once this
+    # round's charge is retained, no failure may escape without settling.
+    inputs = InMemoryInputStore()
+    state = _state()
+    await inputs.stage(InputManifest(
+        job_id=state.job_id, input_ref=state.input_ref,
+        files=(InputFile("sales.csv", b"x"),),
+    ))
+    attempts = InMemoryAnalysisAttemptStore()
+    ledger, usage, agent = _ledger()
+    state.agent = agent.metadata.name
+    gateway = _SequencedGateway([_response("one"), _response("two")])
+    sandbox = _ScriptedSealedSandbox([(_sandbox_result(exit_code=1), None)])
+    worker = _iterative_worker(sandbox, gateway)
+
+    async def flaky_checkpoint(astate):
+        if astate.completed_steps[-1] == "execute":
+            raise RuntimeError("checkpoint store unavailable")
+
+    result = await SealedAnalysisOrchestrator(
+        worker, inputs, InMemoryArtifactStore(), attempts=attempts, ledger=ledger
+    ).run_analysis(state, on_step=flaky_checkpoint)
+
+    assert not result.ok
+    (record,) = usage.records
+    assert record.cost_usd == pytest.approx(0.20)
+    assert (await attempts.get(result.attempt_id)).status == "settled"
+
+
+async def test_hostile_report_shapes_left_by_a_round_are_discarded(tmp_path):
+    # A malformed round is one os.makedirs / os.symlink away from leaving a
+    # directory or a symlink at the report path; cleanup must remove either
+    # (never following the symlink) and let the loop keep refining.
+    workspace = _workspace(tmp_path)
+
+    def plant_dir(outputs):
+        (outputs / "report.md").mkdir()
+
+    def plant_symlink(outputs):
+        (outputs / "report.md").symlink_to(outputs.parent / "inputs")
+
+    gateway = _SequencedGateway([
+        _response("one"), _response("two"), _response("three"),
+    ])
+    sandbox = _ScriptedSealedSandbox([
+        (_sandbox_result(exit_code=1), plant_dir),
+        (_sandbox_result(exit_code=1), plant_symlink),
+        (_sandbox_result(exit_code=0), b"# final\n"),
+    ])
+    worker = _iterative_worker(sandbox, gateway)
+
+    run = await worker.run(workspace, _state())
+
+    assert run.exit_code == 0
+    assert run.iterations == 3
+    assert (workspace / "outputs" / "report.md").read_bytes() == b"# final\n"
+    # The symlink target must have survived the discard untouched.
+    assert (workspace / "inputs" / "sales.csv").exists()
+
+
+async def test_uncapped_agent_runs_iterative_to_completion_and_settles():
+    # The default posture: no per-task cap, so the in-run guard never fires
+    # and spend is bounded structurally (max_iterations, capped feedback,
+    # human approval per run). The full cumulative total still settles.
+    inputs = InMemoryInputStore()
+    state = _state()
+    await inputs.stage(InputManifest(
+        job_id=state.job_id, input_ref=state.input_ref,
+        files=(InputFile("sales.csv", b"x"),),
+    ))
+    artifacts = InMemoryArtifactStore()
+    ledger, usage, agent = _ledger(per_task=None)
+    state.agent = agent.metadata.name
+    gateway = _SequencedGateway([_response("one"), _response("two")])
+    sandbox = _ScriptedSealedSandbox([
+        (_sandbox_result(exit_code=1), None),
+        (_sandbox_result(exit_code=0), b"# Findings\n"),
+    ])
+    worker = _iterative_worker(sandbox, gateway)
+
+    result = await SealedAnalysisOrchestrator(
+        worker, inputs, artifacts, ledger=ledger
+    ).run_analysis(state)
+
+    assert result.ok, result.error
+    assert state.budget_usd is None
+    assert result.run.iterations == 2
+    assert result.run.cost_usd == pytest.approx(0.40)
+    (record,) = usage.records
+    assert record.cost_usd == pytest.approx(0.40)
+    assert record.outcome == "ok"
+
+
+async def test_single_shot_over_cap_completion_never_reaches_the_sandbox():
+    inputs = InMemoryInputStore()
+    state = _state()
+    await inputs.stage(InputManifest(
+        job_id=state.job_id, input_ref=state.input_ref,
+        files=(InputFile("sales.csv", b"x"),),
+    ))
+    ledger, usage, agent = _ledger(per_task=0.10)
+    state.agent = agent.metadata.name
+    sandbox = _FakeSealedSandbox()
+    worker = BuiltinAnalysisWorker(
+        "analysis-model",
+        sandbox,
+        gateway=_PaidGateway("print('analysis')", cost=0.25),
+        limits=SandboxLimits(timeout_seconds=30),
+        output_cap_bytes=1_024,
+        strategy="single",
+    )
+
+    result = await SealedAnalysisOrchestrator(
+        worker, inputs, InMemoryArtifactStore(), ledger=ledger
+    ).run_analysis(state)
+
+    assert not result.ok
+    assert "per-task budget" in result.error
+    assert sandbox.specs == []  # the in-run guard fired before execution
+    (record,) = usage.records
+    assert record.cost_usd == 0.25
+    assert record.outcome == "over_task_budget"
+
+
+async def test_iterative_mid_loop_failure_settles_cumulative_spend():
+    class _TrackingAttempts(InMemoryAnalysisAttemptStore):
+        def __init__(self):
+            super().__init__()
+            self.charges: list[float] = []
+
+        async def charge(self, attempt_id, *, cost_usd, prompt_tokens, completion_tokens):
+            self.charges.append(cost_usd)
+            return await super().charge(
+                attempt_id,
+                cost_usd=cost_usd,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+
+    inputs = InMemoryInputStore()
+    state = _state()
+    await inputs.stage(InputManifest(
+        job_id=state.job_id, input_ref=state.input_ref,
+        files=(InputFile("sales.csv", b"x"),),
+    ))
+    attempts = _TrackingAttempts()
+    ledger, usage, agent = _ledger()
+    state.agent = agent.metadata.name
+    gateway = _SequencedGateway([_response("one"), _response("two")])
+    sandbox = _ScriptedSealedSandbox([
+        (_sandbox_result(exit_code=1), None),
+        RuntimeError("docker daemon disconnected"),
+    ])
+    worker = _iterative_worker(sandbox, gateway)
+
+    result = await SealedAnalysisOrchestrator(
+        worker, inputs, InMemoryArtifactStore(), attempts=attempts, ledger=ledger
+    ).run_analysis(state)
+
+    assert not result.ok
+    assert "execution setup failed" in result.error
+    # Round 1 and round 2 each retained the growing cumulative total before
+    # the crash; the final account re-charges the same figure idempotently.
+    assert attempts.charges == [
+        pytest.approx(0.20), pytest.approx(0.40), pytest.approx(0.40),
+    ]
+    (record,) = usage.records
+    assert record.cost_usd == pytest.approx(0.40)
+    assert record.outcome == "ok"
+    attempt = await attempts.get(result.attempt_id)
+    assert attempt.status == "settled"
+    assert attempt.cost_usd == pytest.approx(0.40)

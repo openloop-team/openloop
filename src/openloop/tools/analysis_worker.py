@@ -1,10 +1,19 @@
-"""Single-shot sealed analysis worker (Phase 1).
+"""Sealed analysis worker — single-shot (Phase 1) and iterative (Phase 3).
 
 The model authors a Python program in the trusted controller.  Only execution
 of that program happens in the sealed Docker sandbox; it receives staged input
 through a read-only mount and can write only the output mount.  The
 orchestrator is deliberately the one owner of input materialization, spend
 gates, read-out, and artifact persistence.
+
+Strategies stay internal to :class:`BuiltinAnalysisWorker` (never sibling
+classes).  ``single`` is one completion + one sealed run.  ``iterative`` (the
+default) loops
+generate → execute → feed capped stdout/stderr back to the in-controller model
+(**exec_feedback** — governed by the in-run spend cap and hard truncation,
+never posted to a surface) → refine, bounded by ``max_iterations`` and a
+:class:`~openloop.tools.coding_worker.WorkerRunAborted` raised past the
+per-task cap the orchestrator stamps into ``AnalysisState.budget_usd``.
 """
 
 from __future__ import annotations
@@ -32,6 +41,7 @@ from openloop.sandbox import (
     read_contained,
 )
 from openloop.tools.base import ActionSpec, ToolResult
+from openloop.tools.coding_worker import WorkerRunAborted
 from openloop.usage import WorkerBudgetExceeded
 
 if TYPE_CHECKING:
@@ -59,8 +69,10 @@ class AnalysisState:
     # orchestrator will mint one before the first model call.
     attempt_id: str | None = None
     completed_steps: list[str] = field(default_factory=list)
-    # Reserved for the Phase 3 iterative strategy. It remains transient so no
-    # budget setting can be model-supplied through persisted tool args.
+    # The invoking agent's per-task cap, stamped by the orchestrator before the
+    # worker runs so the worker can stop itself (WorkerRunAborted) instead of
+    # spending past it. It remains transient so no budget setting can be
+    # model-supplied through persisted tool args.
     budget_usd: float | None = None
 
 
@@ -107,6 +119,9 @@ class AnalysisRun:
     cost_usd: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Model completions this run consumed (1 for single-shot; the iterative
+    # strategy reports how many refinement rounds actually ran).
+    iterations: int = 1
 
     @classmethod
     def from_sandbox(cls, result: SandboxResult, *, response) -> "AnalysisRun":
@@ -141,6 +156,7 @@ class AnalysisRun:
             "cost_usd": self.cost_usd,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
+            "iterations": self.iterations,
         }
 
 
@@ -155,19 +171,30 @@ class AnalysisWorkerFailure(RuntimeError):
     def __init__(self, message: str, *, charge: AnalysisCharge) -> None:
         super().__init__(message)
         self.charge = charge
-        self.run = AnalysisRun(
-            exit_code=None,
-            stdout="",
-            stderr="",
-            killed=False,
-            timed_out=False,
-            stdout_truncated=False,
-            stderr_truncated=False,
-            duration_seconds=0.0,
+        self.run = _spend_only_run(
             cost_usd=charge.cost_usd,
             prompt_tokens=charge.prompt_tokens,
             completion_tokens=charge.completion_tokens,
         )
+
+
+def _spend_only_run(
+    *, cost_usd: float, prompt_tokens: int, completion_tokens: int
+) -> AnalysisRun:
+    """Telemetry for an attempt that never produced a sandbox result."""
+    return AnalysisRun(
+        exit_code=None,
+        stdout="",
+        stderr="",
+        killed=False,
+        timed_out=False,
+        stdout_truncated=False,
+        stderr_truncated=False,
+        duration_seconds=0.0,
+        cost_usd=cost_usd,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
 
 
 @dataclass(slots=True)
@@ -237,11 +264,23 @@ class _SealedSandbox(Protocol):
 
 
 class BuiltinAnalysisWorker:
-    """One controller completion plus one sealed Python execution.
+    """Controller-side generation plus sealed Python execution.
 
-    The worker has one Phase 1 strategy: it writes a whole program in one
-    completion and streams it over stdin to ``python -``. Iteration and any
-    model-visible execution feedback are deliberately deferred to Phase 3.
+    ``strategy="iterative"`` (Phase 3, the default) loops generate → execute →
+    **exec_feedback** (capped stdout/stderr shown to the in-controller model)
+    → refine.  The loop ends mechanically — a run that exits 0 with
+    ``outputs/report.md`` present — never on the model's say-so, and is
+    bounded by ``max_iterations`` plus the in-run spend guard.
+
+    ``strategy="single"`` (Phase 1) writes a whole program in one completion
+    and streams it over stdin to ``python -``; captured stdout/stderr stay
+    controller telemetry and are never fed back to the model.
+
+    Both strategies report each completion's cumulative spend through
+    ``on_charge`` **before** doing further work (durable retention), and stop
+    themselves with :class:`WorkerRunAborted` once cumulative spend passes
+    ``state.budget_usd`` — the ledger's post-run settle stays the fail-closed
+    backstop.
     """
 
     def __init__(
@@ -253,13 +292,25 @@ class BuiltinAnalysisWorker:
         limits: SandboxLimits,
         output_cap_bytes: int,
         output_watch_interval_seconds: float = 2.0,
+        strategy: str = "iterative",
+        max_iterations: int = 4,
+        exec_feedback_max_chars: int = 16_384,
     ) -> None:
+        if strategy not in ("single", "iterative"):
+            raise ValueError(f"unknown analysis strategy {strategy!r}")
+        if max_iterations < 1:
+            raise ValueError("max_iterations must be at least 1")
+        if exec_feedback_max_chars < 1:
+            raise ValueError("exec_feedback_max_chars must be positive")
         self.model = model
         self.sandbox = sandbox
         self._gateway = gateway
         self.limits = limits
         self.output_cap_bytes = output_cap_bytes
         self.output_watch_interval_seconds = output_watch_interval_seconds
+        self.strategy = strategy
+        self.max_iterations = max_iterations
+        self.exec_feedback_max_chars = exec_feedback_max_chars
 
     def _completer(self) -> _Completer:
         if self._gateway is None:
@@ -275,14 +326,27 @@ class BuiltinAnalysisWorker:
         on_step: StepCallback | None = None,
         on_charge: ChargeCallback | None = None,
     ) -> AnalysisRun:
+        if self.strategy == "iterative":
+            return await self._run_iterative(workspace, state, on_step, on_charge)
+        return await self._run_single(workspace, state, on_step, on_charge)
+
+    async def _run_single(
+        self,
+        workspace: Path,
+        state: AnalysisState,
+        on_step: StepCallback | None,
+        on_charge: ChargeCallback | None,
+    ) -> AnalysisRun:
         script, response = await self._generate(state, workspace / "inputs")
         charge = AnalysisCharge.from_response(response)
         try:
-            # Accounting happens before any generated-code validation, sandbox
+            # Retention happens before any generated-code validation, sandbox
             # startup, or output read. A later crash/retry sees the durable
-            # attempt + idempotent usage key, never a free completion.
+            # attempt record, never a free completion; the one idempotent
+            # ledger settle is the orchestrator's, after the run.
             if on_charge is not None:
                 await on_charge(charge)
+            self._abort_past_cap(state, charge)
             if not script.strip():
                 raise AnalysisWorkerFailure(
                     "analysis model returned an empty program", charge=charge
@@ -294,40 +358,174 @@ class BuiltinAnalysisWorker:
             if on_step is not None:
                 await on_step(state)
 
-            outputs = workspace / "outputs"
-            result = await self.sandbox.run(
-                SealedSpec(
-                    job_id=state.job_id,
-                    command=("python", "-"),
-                    limits=self.limits,
-                    mounts=(
-                        Mount(workspace / "inputs", "/workspace/inputs", read_only=True),
-                        Mount(outputs, "/workspace/outputs"),
-                    ),
-                    # Generated code is never placed in either mounted directory.
-                    stdin=script,
-                    watch_dir=outputs,
-                    watch_max_bytes=self.output_cap_bytes,
-                    watch_interval_seconds=self.output_watch_interval_seconds,
-                )
-            )
+            result = await self.sandbox.run(self._sealed_spec(state, workspace, script))
             state.completed_steps.append("execute")
             if on_step is not None:
                 await on_step(state)
             return AnalysisRun.from_sandbox(result, response=response)
-        except AnalysisWorkerFailure:
+        except (AnalysisWorkerFailure, WorkerRunAborted):
             raise
         except Exception as exc:
             raise AnalysisWorkerFailure(
                 f"analysis execution setup failed: {exc}", charge=charge
             ) from exc
 
+    async def _run_iterative(
+        self,
+        workspace: Path,
+        state: AnalysisState,
+        on_step: StepCallback | None,
+        on_charge: ChargeCallback | None,
+    ) -> AnalysisRun:
+        report = workspace / "outputs" / _REPORT_NAME
+        messages = self._iterative_prompt(state, workspace / "inputs")
+        cost_usd = 0.0
+        prompt_tokens = 0
+        completion_tokens = 0
+        duration_seconds = 0.0
+        result: SandboxResult | None = None
+        rounds = 0
+        for round_no in range(1, self.max_iterations + 1):
+            rounds = round_no
+            try:
+                response = await self._completer().complete(self.model, messages)
+            except Exception as exc:
+                if round_no == 1:
+                    # No completion has been observed yet: parity with the
+                    # single-shot generation failure — the orchestrator's
+                    # pre-telemetry handler applies, nothing to settle.
+                    raise
+                # Rounds 1..N-1 were billed and durably retained; this failure
+                # must carry that cumulative total out so the orchestrator
+                # settles it instead of leaving the attempt charged forever.
+                raise AnalysisWorkerFailure(
+                    f"analysis model call failed after {round_no - 1} "
+                    f"completed round(s): {exc}",
+                    charge=AnalysisCharge(
+                        cost_usd=cost_usd,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                    ),
+                ) from exc
+            cost_usd += response.cost_usd
+            prompt_tokens += response.prompt_tokens
+            completion_tokens += response.completion_tokens
+            # Every charge is the CUMULATIVE attempt total: the durable attempt
+            # record then always holds exactly what a crash-resume must settle,
+            # and the final ledger settle uses the same figure.
+            charge = AnalysisCharge(
+                cost_usd=cost_usd,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+            script = _strip_code_fence(response.text)
+            try:
+                if on_charge is not None:
+                    await on_charge(charge)
+                # After retention, before more spend or another sealed run: a
+                # cumulative total past the cap can only fail the post-run
+                # settle, so executing this round's program would be waste.
+                self._abort_past_cap(state, charge)
+                if not script.strip():
+                    raise AnalysisWorkerFailure(
+                        "analysis model returned an empty program", charge=charge
+                    )
+                if not script.endswith("\n"):
+                    script += "\n"
+
+                state.completed_steps.append("generate")
+                if on_step is not None:
+                    await on_step(state)
+
+                # A report left by a failed earlier round is discarded so the
+                # loop can only end on a report the succeeding run wrote.
+                _discard_report(report)
+                result = await self.sandbox.run(
+                    self._sealed_spec(state, workspace, script)
+                )
+                duration_seconds += result.duration_seconds
+                state.completed_steps.append("execute")
+                if on_step is not None:
+                    await on_step(state)
+
+                report_written = report.is_file()
+                if result.exit_code == 0 and report_written:
+                    break
+                if round_no < self.max_iterations:
+                    messages.append(
+                        {"role": "assistant", "content": response.text}
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": self._exec_feedback(
+                                result, round_no, report_written
+                            ),
+                        }
+                    )
+            except (AnalysisWorkerFailure, WorkerRunAborted):
+                raise
+            except Exception as exc:
+                # The whole round body is guarded: once this round's charge is
+                # retained, no failure (checkpoint callback included) may
+                # escape without carrying the cumulative total to the settle.
+                raise AnalysisWorkerFailure(
+                    f"analysis execution setup failed: {exc}", charge=charge
+                ) from exc
+        # An exhausted loop returns the last run as-is; the orchestrator's
+        # exit-code and read-out gates produce the truthful failure.
+        assert result is not None  # max_iterations >= 1
+        return AnalysisRun(
+            exit_code=result.exit_code,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            killed=result.killed,
+            timed_out=result.timed_out,
+            stdout_truncated=result.stdout_truncated,
+            stderr_truncated=result.stderr_truncated,
+            duration_seconds=duration_seconds,
+            cost_usd=cost_usd,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            iterations=rounds,
+        )
+
+    def _abort_past_cap(self, state: AnalysisState, charge: AnalysisCharge) -> None:
+        """Stop the run once cumulative spend passes the stamped per-task cap.
+
+        First-hand in-run enforcement (the openhands guard's analog); the
+        orchestrator's post-run ledger settle remains the fail-closed backstop
+        should the stamped cap and the agent's config ever disagree.
+        """
+        if state.budget_usd is not None and charge.cost_usd > state.budget_usd:
+            raise WorkerRunAborted(
+                f"in-run spend ${charge.cost_usd:.4f} reached the "
+                f"${state.budget_usd:.2f} per-task cap",
+                cost_usd=charge.cost_usd,
+                prompt_tokens=charge.prompt_tokens,
+                completion_tokens=charge.completion_tokens,
+            )
+
+    def _sealed_spec(
+        self, state: AnalysisState, workspace: Path, script: str
+    ) -> SealedSpec:
+        outputs = workspace / "outputs"
+        return SealedSpec(
+            job_id=state.job_id,
+            command=("python", "-"),
+            limits=self.limits,
+            mounts=(
+                Mount(workspace / "inputs", "/workspace/inputs", read_only=True),
+                Mount(outputs, "/workspace/outputs"),
+            ),
+            # Generated code is never placed in either mounted directory.
+            stdin=script,
+            watch_dir=outputs,
+            watch_max_bytes=self.output_cap_bytes,
+            watch_interval_seconds=self.output_watch_interval_seconds,
+        )
+
     async def _generate(self, state: AnalysisState, inputs: Path):
-        inventory = []
-        for path in sorted(inputs.iterdir()):
-            if path.is_file():
-                inventory.append(f"- {path.name} ({path.stat().st_size} bytes)")
-        listed_inputs = "\n".join(inventory) or "- (no files staged)"
         response = await self._completer().complete(
             self.model,
             [
@@ -344,16 +542,92 @@ class BuiltinAnalysisWorker:
                         "(Agg backend). Inspect input contents at runtime as needed."
                     ),
                 },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Analysis request:\n{state.instruction}\n\n"
-                        f"Staged input inventory (names and sizes only):\n{listed_inputs}"
-                    ),
-                },
+                {"role": "user", "content": self._request(state, inputs)},
             ],
         )
         return _strip_code_fence(response.text), response
+
+    def _iterative_prompt(self, state: AnalysisState, inputs: Path) -> list[dict]:
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "You are a sealed data-analysis worker operating in a "
+                    "refinement loop. In every round, produce exactly one "
+                    "complete Python program, with no Markdown fences or prose. "
+                    "The program has no network, no credentials, and no package "
+                    "installation. Read only from /workspace/inputs and write "
+                    "only under /workspace/outputs. You may use the preinstalled "
+                    "pandas, numpy, and matplotlib (Agg backend). After each "
+                    "round you are shown the program's exit code and truncated "
+                    "stdout/stderr. Use early rounds to inspect the data (print "
+                    "schemas, samples, aggregates). When the analysis is "
+                    "complete, write the final UTF-8 Markdown report exactly to "
+                    "/workspace/outputs/report.md and exit 0 — the loop ends as "
+                    "soon as a run exits 0 with report.md present, so write "
+                    "report.md only in your final round. A report.md left by a "
+                    "failed run is discarded before the next round. You have "
+                    f"{self.max_iterations} rounds in total."
+                ),
+            },
+            {"role": "user", "content": self._request(state, inputs)},
+        ]
+
+    def _request(self, state: AnalysisState, inputs: Path) -> str:
+        inventory = []
+        for path in sorted(inputs.iterdir()):
+            if path.is_file():
+                inventory.append(f"- {path.name} ({path.stat().st_size} bytes)")
+        listed_inputs = "\n".join(inventory) or "- (no files staged)"
+        return (
+            f"Analysis request:\n{state.instruction}\n\n"
+            f"Staged input inventory (names and sizes only):\n{listed_inputs}"
+        )
+
+    def _exec_feedback(
+        self, result: SandboxResult, round_no: int, report_written: bool
+    ) -> str:
+        """One round's execution feedback for the in-controller model.
+
+        This is the exec_feedback channel: hard-truncated here, bounded
+        overall by the in-run spend guard, and never posted to a surface.
+        The output-was-cut notes are load-bearing — the model must know it is
+        not seeing everything, whether the cut happened at capture time
+        (stream cap) or here (feedback cap).
+        """
+        status = f"exited with code {result.exit_code}"
+        if result.timed_out:
+            status += " (killed at the wall-clock deadline)"
+        elif result.killed:
+            status += " (killed by the sandbox resource watchdog)"
+        report_line = (
+            "report.md was written, but a run must exit 0 for it to be "
+            "accepted; it will be discarded before your next run"
+            if report_written
+            else "/workspace/outputs/report.md does not exist yet"
+        )
+        return "\n\n".join(
+            (
+                f"Round {round_no} of {self.max_iterations}: your program "
+                f"{status}. {report_line}.",
+                self._feedback_stream("stdout", result.stdout, result.stdout_truncated),
+                self._feedback_stream("stderr", result.stderr, result.stderr_truncated),
+                "Respond with the next complete Python program (no fences, no "
+                "prose).",
+            )
+        )
+
+    def _feedback_stream(self, name: str, text: str, capture_truncated: bool) -> str:
+        cut = capture_truncated or len(text) > self.exec_feedback_max_chars
+        shown = text[: self.exec_feedback_max_chars]
+        if not shown:
+            return f"--- {name}: (empty) ---"
+        header = (
+            f"--- {name} (output was cut; this is only the beginning) ---"
+            if cut
+            else f"--- {name} ---"
+        )
+        return f"{header}\n{shown}"
 
 
 class SealedAnalysisOrchestrator:
@@ -396,11 +670,16 @@ class SealedAnalysisOrchestrator:
             if on_step is not None:
                 await on_step(state)
 
-        charge_accounted = False
+        async def record(charge: AnalysisCharge) -> None:
+            """Durably retain the run's cumulative observed usage — no settle.
 
-        async def account(charge: AnalysisCharge) -> None:
-            """Persist observed usage, settle it idempotently, then mark done."""
-            nonlocal charge_accounted
+            The worker calls this after every completion (cumulatively), so a
+            crash at any point leaves the attempt record holding exactly what
+            reconciliation must settle. The ledger settle itself happens once,
+            after the run: the usage store's idempotency key is insert-ignore,
+            so per-completion settles would freeze the audit row at the first
+            iteration's totals.
+            """
             assert state.attempt_id is not None
             await self._attempts.charge(
                 state.attempt_id,
@@ -408,6 +687,10 @@ class SealedAnalysisOrchestrator:
                 prompt_tokens=charge.prompt_tokens,
                 completion_tokens=charge.completion_tokens,
             )
+
+        async def account(charge: AnalysisCharge) -> None:
+            """Persist observed usage, settle it idempotently, then mark done."""
+            await record(charge)
             budget_error: WorkerBudgetExceeded | None = None
             if self._ledger is not None:
                 try:
@@ -424,9 +707,26 @@ class SealedAnalysisOrchestrator:
                     # attempt settled, then keep the sandbox/read-out blocked.
                     budget_error = exc
             await self._attempts.settle(state.attempt_id)
-            charge_accounted = True
             if budget_error is not None:
                 raise budget_error
+
+        async def settle_or_fail(
+            charge: AnalysisCharge, run: AnalysisRun | None = None
+        ) -> AnalysisResult | None:
+            """Account known spend; a failure result if that ends the attempt."""
+            try:
+                await account(charge)
+            except WorkerBudgetExceeded as budget_error:
+                return _failed(state, str(budget_error), run=run)
+            except Exception as accounting_error:
+                await self._mark_unknown(state, accounting_error)
+                return _failed(
+                    state,
+                    "known analysis spend could not be durably accounted: "
+                    f"{accounting_error}",
+                    run=run,
+                )
+            return None
 
         state.attempt_id = state.attempt_id or uuid.uuid4().hex
         existing = await self._attempts.get(state.attempt_id)
@@ -450,23 +750,15 @@ class SealedAnalysisOrchestrator:
                         "known analysis spend has incomplete durable telemetry; "
                         "operator reconciliation is required",
                     )
-                try:
-                    await account(
-                        AnalysisCharge(
-                            cost_usd=existing.cost_usd,
-                            prompt_tokens=existing.prompt_tokens,
-                            completion_tokens=existing.completion_tokens,
-                        )
+                failure = await settle_or_fail(
+                    AnalysisCharge(
+                        cost_usd=existing.cost_usd,
+                        prompt_tokens=existing.prompt_tokens,
+                        completion_tokens=existing.completion_tokens,
                     )
-                except WorkerBudgetExceeded as budget_error:
-                    return _failed(state, str(budget_error))
-                except Exception as accounting_error:
-                    await self._mark_unknown(state, accounting_error)
-                    return _failed(
-                        state,
-                        "known analysis spend could not be durably accounted: "
-                        f"{accounting_error}",
-                    )
+                )
+                if failure is not None:
+                    return failure
                 return _failed(
                     state,
                     f"analysis attempt {existing.attempt_id} was already charged; "
@@ -526,45 +818,45 @@ class SealedAnalysisOrchestrator:
             await step("materialize")
 
             try:
-                run = await self.worker.run(workspace, state, on_step, account)
+                run = await self.worker.run(workspace, state, on_step, record)
+            except WorkerRunAborted as aborted:
+                # The worker stopped itself at the in-run spend ceiling. The
+                # spend accrued before stopping is real: settle it (which
+                # normally raises the per-task cap error this abort predicted),
+                # then keep the attempt failed closed — no read-out.
+                run = _spend_only_run(
+                    cost_usd=aborted.cost_usd,
+                    prompt_tokens=aborted.prompt_tokens,
+                    completion_tokens=aborted.completion_tokens,
+                )
+                failure = await settle_or_fail(
+                    AnalysisCharge.from_run(run), run=run
+                )
+                if failure is not None:
+                    return failure
+                return _failed(
+                    state, f"analysis run aborted: {aborted.reason}", run=run
+                )
             except AnalysisWorkerFailure as exc:
                 # A completion succeeded, so the provider's observed spend is
                 # real even though local validation or sandbox setup failed.
                 run = exc.run
-                try:
-                    await account(exc.charge)
-                except WorkerBudgetExceeded as budget_error:
-                    return _failed(state, str(budget_error), run=run)
-                except Exception as accounting_error:
-                    await self._mark_unknown(state, accounting_error)
-                    return _failed(
-                        state,
-                        "known analysis spend could not be durably accounted: "
-                        f"{accounting_error}",
-                        run=run,
-                    )
+                failure = await settle_or_fail(exc.charge, run=run)
+                if failure is not None:
+                    return failure
                 return _failed(
                     state, f"analysis worker failed before execution: {exc}", run=run
                 )
             except Exception as exc:  # model/backend failures before telemetry
                 return _failed(state, f"analysis worker failed before execution: {exc}")
 
-            # Compatibility for test/backfill workers that have not adopted the
-            # Phase 1b callback yet. BuiltinAnalysisWorker always accounts before
-            # validating or executing the generated program.
-            if not charge_accounted:
-                try:
-                    await account(AnalysisCharge.from_run(run))
-                except WorkerBudgetExceeded as budget_error:
-                    return _failed(state, str(budget_error), run=run)
-                except Exception as accounting_error:
-                    await self._mark_unknown(state, accounting_error)
-                    return _failed(
-                        state,
-                        "known analysis spend could not be durably accounted: "
-                        f"{accounting_error}",
-                        run=run,
-                    )
+            # The one idempotent ledger settle for this attempt (the worker's
+            # on_charge calls only *retained* cumulative telemetry). Runs with
+            # the run's totals whether or not the worker reported mid-run, and
+            # fails the attempt closed before any read-out.
+            failure = await settle_or_fail(AnalysisCharge.from_run(run), run=run)
+            if failure is not None:
+                return failure
 
             if run.exit_code != 0:
                 return _failed(state, _execution_error(run), run=run)
@@ -758,6 +1050,20 @@ def _mechanical_summary(report: str, max_lines: int) -> str:
     lines = report.splitlines()[:max_lines]
     summary = "\n".join(lines).strip()
     return summary or "Analysis completed; the report is available as an artifact."
+
+
+def _discard_report(report: Path) -> None:
+    """Remove whatever model-authored code left at the report path.
+
+    ``unlink`` covers regular files, symlinks, and FIFOs, but raises on a real
+    directory — and a malformed round is one ``os.makedirs`` away from leaving
+    one. A symlink is always unlinked itself, never followed (``rmtree``
+    refuses symlinks-to-directories, so the order here matters).
+    """
+    if report.is_dir() and not report.is_symlink():
+        shutil.rmtree(report)
+    else:
+        report.unlink(missing_ok=True)
 
 
 def _strip_code_fence(script: str) -> str:

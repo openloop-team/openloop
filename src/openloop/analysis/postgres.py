@@ -264,12 +264,22 @@ class PostgresAnalysisAttemptStore:
     ) -> AnalysisAttempt:
         pool = self._require_pool()
         async with pool.acquire() as conn:
+            # A charged attempt accepts only monotonic growth: the iterative
+            # strategy re-charges cumulative totals after every completion, and
+            # an equal replay after a crash is safe. charged_at keeps the first
+            # observation time.
             row = await conn.fetchrow(
                 """
                 UPDATE analysis_attempts
                 SET status = 'charged', cost_usd = $2, prompt_tokens = $3,
-                    completion_tokens = $4, charged_at = now(), updated_at = now()
-                WHERE attempt_id = $1 AND status = 'started'
+                    completion_tokens = $4,
+                    charged_at = COALESCE(charged_at, now()), updated_at = now()
+                WHERE attempt_id = $1
+                  AND (status = 'started'
+                       OR (status = 'charged'
+                           AND cost_usd <= $2
+                           AND prompt_tokens <= $3
+                           AND completion_tokens <= $4))
                 RETURNING *
                 """,
                 attempt_id,
@@ -283,9 +293,16 @@ class PostgresAnalysisAttemptStore:
                 "SELECT * FROM analysis_attempts WHERE attempt_id = $1", attempt_id
             )
         attempt = _require_attempt(existing, attempt_id)
-        if attempt.status in ("charged", "settled"):
+        if attempt.status == "settled":
             _assert_same_charge(attempt, cost_usd, prompt_tokens, completion_tokens)
             return attempt
+        if attempt.status == "charged":
+            # The UPDATE matched neither started nor monotonic-charged, so this
+            # charge would decrease a cumulative total — fail loudly.
+            raise RuntimeError(
+                f"analysis attempt {attempt_id} already has different "
+                "charge data: cumulative charge would decrease"
+            )
         raise RuntimeError(
             f"analysis attempt {attempt_id} is {attempt.status}; cannot charge"
         )

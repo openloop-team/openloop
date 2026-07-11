@@ -166,6 +166,19 @@ async def test_analysis_attempt_and_usage_idempotency_survive_a_new_store():
             prompt_tokens=100,
             completion_tokens=20,
         )
+        # Iterative runs re-charge growing cumulative totals; an equal replay
+        # is a safe crash retry; a decrease means lost track of spend.
+        grown = await attempts.charge(
+            attempt_id, cost_usd=0.24, prompt_tokens=200, completion_tokens=40
+        )
+        assert grown.status == "charged" and grown.cost_usd == 0.24
+        await attempts.charge(
+            attempt_id, cost_usd=0.24, prompt_tokens=200, completion_tokens=40
+        )
+        with pytest.raises(RuntimeError, match="decrease"):
+            await attempts.charge(
+                attempt_id, cost_usd=0.12, prompt_tokens=200, completion_tokens=40
+            )
         assert await usage.record(UsageRecord(
             scope_key=scope_key,
             workspace="e2e",
@@ -173,9 +186,9 @@ async def test_analysis_attempt_and_usage_idempotency_survive_a_new_store():
             model="analysis-model",
             task_kind="analysis_worker",
             idempotency_key=attempt_id,
-            cost_usd=0.12,
-            prompt_tokens=100,
-            completion_tokens=20,
+            cost_usd=0.24,
+            prompt_tokens=200,
+            completion_tokens=40,
         ))
         # The durable usage key turns replayed settlement into a no-op.
         assert not await usage.record(UsageRecord(
@@ -185,9 +198,9 @@ async def test_analysis_attempt_and_usage_idempotency_survive_a_new_store():
             model="analysis-model",
             task_kind="analysis_worker",
             idempotency_key=attempt_id,
-            cost_usd=0.12,
-            prompt_tokens=100,
-            completion_tokens=20,
+            cost_usd=0.24,
+            prompt_tokens=200,
+            completion_tokens=40,
         ))
         await attempts.settle(attempt_id)
 
@@ -197,7 +210,7 @@ async def test_analysis_attempt_and_usage_idempotency_survive_a_new_store():
             restored = await restarted_attempts.get(attempt_id)
             assert restored is not None
             assert restored.status == "settled"
-            assert restored.cost_usd == 0.12
+            assert restored.cost_usd == 0.24
         finally:
             await restarted_attempts.close()
     finally:

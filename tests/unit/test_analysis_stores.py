@@ -88,6 +88,41 @@ async def test_attempt_store_tracks_charge_and_settles_idempotently():
         )
 
 
+async def test_attempt_store_accepts_growing_cumulative_charges_until_settled():
+    store = InMemoryAnalysisAttemptStore()
+    await store.begin("attempt-1", "job-1")
+
+    first = await store.charge(
+        "attempt-1", cost_usd=0.20, prompt_tokens=100, completion_tokens=25
+    )
+    assert first.charged_at is not None
+    # The iterative strategy re-charges the cumulative attempt total after
+    # every completion: growth is legal while charged...
+    grown = await store.charge(
+        "attempt-1", cost_usd=0.40, prompt_tokens=200, completion_tokens=50
+    )
+    assert grown.status == "charged"
+    assert grown.cost_usd == 0.40
+    assert grown.charged_at == first.charged_at  # first observation time kept
+    # ...an equal replay is a safe crash retry...
+    assert (await store.charge(
+        "attempt-1", cost_usd=0.40, prompt_tokens=200, completion_tokens=50
+    )).cost_usd == 0.40
+    # ...but a decrease means the caller lost track of observed spend.
+    with pytest.raises(RuntimeError, match="decrease"):
+        await store.charge(
+            "attempt-1", cost_usd=0.30, prompt_tokens=200, completion_tokens=50
+        )
+
+    await store.settle("attempt-1")
+    # After the ledger settle, growth would be spend that never reaches the
+    # idempotent usage row — refuse anything but the settled figure.
+    with pytest.raises(RuntimeError, match="different charge"):
+        await store.charge(
+            "attempt-1", cost_usd=0.60, prompt_tokens=300, completion_tokens=75
+        )
+
+
 async def test_unknown_attempt_cannot_be_charged():
     store = InMemoryAnalysisAttemptStore()
     await store.begin("attempt-unknown", "job-1")

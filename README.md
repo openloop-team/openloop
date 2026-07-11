@@ -410,7 +410,7 @@ the workflow.
   leader that dies mid-sweep is healed by a survivor. `LOCK_BACKEND=auto` (default)
   uses Postgres advisory locks when the deploy already runs Postgres — no extra
   service — with Redis and process-local backends also available
-- [x] Sealed analysis worker (Phases 0–2) — open-ended, model-authored Python
+- [x] Sealed analysis worker (Phases 0–3) — open-ended, model-authored Python
   over controller-provisioned data in a sealed sandbox: `--network none`, no
   env/credentials, read-only rootfs + inputs, resource caps, and a
   self-enforcing wall-clock deadline (`timeout` as PID 1, controller kill as
@@ -418,7 +418,14 @@ the workflow.
   *before* any read-out; runs as a durable workflow (approval = wait node) and
   the report is delivered to the thread as a hosted artifact straight from a
   job-keyed artifact ref (no second model call) — sessions and thread-history
-  replay keep only the prose summary, never the body.
+  replay keep only the prose summary, never the body. The default iterative
+  strategy loops generate → sealed run → hard-capped execution feedback →
+  refine, with per-completion durable spend retention and an in-run abort at
+  the invoking agent's per-task cap when one is set (spend stays bounded
+  regardless: at most `ANALYSIS_WORKER_MAX_ITERATIONS` completions per
+  human-approved attempt; `ANALYSIS_WORKER_REQUIRE_PER_TASK_CAP=1` opts into
+  the hard require-a-cap boot gate); `ANALYSIS_WORKER_STRATEGY=single` opts
+  down to one completion + one sealed run with no execution feedback.
   `ANALYSIS_WORKER_ENABLED=1` (docker-only, fails closed)
 - [ ] Hardening for full production parity — more surface adapters and an explicit
   model-call replay/caching policy

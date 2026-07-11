@@ -139,6 +139,26 @@ class Settings(BaseSettings):
     analysis_worker_report_max_bytes: int = 1_000_000
     analysis_worker_output_watch_interval_seconds: float = 2.0
     analysis_worker_summary_lines: int = 12
+    # Strategy inside the one builtin backend (strategies never become sibling
+    # backends): "iterative" (default) = generate → run → feed capped
+    # stdout/stderr back to the model → refine (Phase 3); "single" = one
+    # completion + one sealed run (Phase 1). Iterative spend is structurally
+    # bounded even without a dollar cap: at most max_iterations completions
+    # per attempt, prompt growth hard-capped by the exec-feedback limit, and
+    # every run is human-approved.
+    analysis_worker_strategy: str = "iterative"
+    # Optional hard boot gate (the openhands-style posture): when set, every
+    # agent exposing the analysis tool must carry spec.budget.per_task_usd or
+    # the worker is disabled, and stale approved jobs are refused if caps
+    # drift after approval. Off by default — agents that do carry a cap still
+    # get the in-run spend abort and the fail-closed settle either way.
+    analysis_worker_require_per_task_cap: bool = False
+    # Iterative only: model completions (each followed by one sealed run)
+    # allowed per attempt.
+    analysis_worker_max_iterations: int = 4
+    # Iterative only: per-stream cap on the exec_feedback (stdout/stderr) the
+    # in-controller model sees each round. Feedback never posts to a surface.
+    analysis_worker_exec_feedback_max_chars: int = 16_384
 
     # Storage / queue
     database_url: str = (
