@@ -159,6 +159,15 @@ class Settings(BaseSettings):
     # Iterative only: per-stream cap on the exec_feedback (stdout/stderr) the
     # in-controller model sees each round. Feedback never posts to a surface.
     analysis_worker_exec_feedback_max_chars: int = 16_384
+    # Phase 4 provisioning caps. The merged cap is a decrementing budget the
+    # orchestrator checks before every per-source fetch (once spent, no further
+    # fetch starts); the per-source caps additionally bound each download in
+    # flight. Repo-shaped inputs extract into tmpfs inside the sandbox, which
+    # counts against container memory — raise ANALYSIS_WORKER_TMP_SIZE (and
+    # memory) alongside these when provisioning repos.
+    analysis_worker_max_input_bytes: int = 33_554_432  # 32 MiB merged manifest
+    analysis_worker_github_max_bytes: int = 33_554_432  # 32 MiB per tarball
+    analysis_worker_upload_max_bytes: int = 16_777_216  # 16 MiB per upload
 
     # Storage / queue
     database_url: str = (

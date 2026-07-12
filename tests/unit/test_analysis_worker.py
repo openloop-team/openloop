@@ -9,11 +9,13 @@ from pathlib import Path
 import pytest
 
 from openloop.analysis import (
+    ANALYSIS_ARGS_VERSION,
     InMemoryAnalysisAttemptStore,
     InMemoryArtifactStore,
     InMemoryInputStore,
     InputFile,
     InputManifest,
+    StagedProvisioner,
 )
 from openloop.agents import load_agent
 from openloop.agents.schema import Tool
@@ -34,13 +36,15 @@ from openloop.tools.coding_worker import WorkerRunAborted
 from openloop.usage import InMemoryUsageStore, UsageRecord, WorkerSpendLedger
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
+_INPUT_REF = "staged:one"
 
 
 def _state(job_id="job-1"):
     return AnalysisState(
         job_id=job_id,
-        input_ref="upload:one",
         instruction="summarize the sales data",
+        inputs=[{"source": "staged", "input_ref": _INPUT_REF}],
+        args_schema=ANALYSIS_ARGS_VERSION,
     )
 
 
@@ -117,9 +121,9 @@ class _TrackingInputStore(InMemoryInputStore):
         super().__init__()
         self.gets = 0
 
-    async def get(self, job_id, input_ref):
+    async def get(self, input_ref):
         self.gets += 1
-        return await super().get(job_id, input_ref)
+        return await super().get(input_ref)
 
 
 def _ledger(*, per_task=0.50, monthly=None):
@@ -177,14 +181,13 @@ async def test_orchestrator_settles_before_readout_and_persists_only_ref():
     inputs = InMemoryInputStore()
     state = _state()
     await inputs.stage(InputManifest(
-        job_id=state.job_id,
-        input_ref=state.input_ref,
+        input_ref=_INPUT_REF,
         files=(InputFile("sales.csv", b"amount\n42\n"),),
     ))
     artifacts = InMemoryArtifactStore()
     ledger, usage, agent = _ledger()
     worker = _ReportWorker()
-    orchestrator = SealedAnalysisOrchestrator(worker, inputs, artifacts, ledger=ledger)
+    orchestrator = SealedAnalysisOrchestrator(worker, [StagedProvisioner(inputs)], artifacts, ledger=ledger)
     state.agent = agent.metadata.name
 
     result = await orchestrator.run_analysis(state)
@@ -214,7 +217,7 @@ async def test_monthly_gate_runs_before_input_provisioning():
     state = _state()
     state.agent = agent.metadata.name
     result = await SealedAnalysisOrchestrator(
-        _ReportWorker(), inputs, InMemoryArtifactStore(), ledger=ledger
+        _ReportWorker(), [StagedProvisioner(inputs)], InMemoryArtifactStore(), ledger=ledger
     ).run_analysis(state)
 
     assert not result.ok
@@ -234,31 +237,71 @@ async def test_empty_instruction_fails_before_any_gate_store_or_spend():
     state.agent = agent.metadata.name
 
     result = await SealedAnalysisOrchestrator(
-        _ReportWorker(), inputs, InMemoryArtifactStore(),
+        _ReportWorker(), [StagedProvisioner(inputs)], InMemoryArtifactStore(),
         attempts=attempts, ledger=ledger,
     ).run_analysis(state)
 
     assert not result.ok
-    assert "instruction is required" in result.error
+    assert "not executable" in result.error
+    assert "instruction" in result.error
     assert inputs.gets == 0  # no provisioning
     assert usage.records == []  # no spend recorded or settled
     assert await attempts.get(state.attempt_id) is None  # no attempt begun
 
 
-async def test_empty_input_ref_fails_before_input_lookup():
+async def test_empty_inputs_fails_before_input_lookup():
     inputs = _TrackingInputStore()
     ledger, usage, agent = _ledger()
     state = _state()
-    state.input_ref = ""
+    state.inputs = []  # the executable re-parse rejects a request with no inputs
     state.agent = agent.metadata.name
 
     result = await SealedAnalysisOrchestrator(
-        _ReportWorker(), inputs, InMemoryArtifactStore(), ledger=ledger
+        _ReportWorker(), [StagedProvisioner(inputs)], InMemoryArtifactStore(), ledger=ledger
     ).run_analysis(state)
 
     assert not result.ok
-    assert "input_ref is required" in result.error
+    assert "not executable" in result.error
     assert inputs.gets == 0
+    assert usage.records == []
+
+
+async def test_pre_version_record_refuses_before_gate_store_or_spend():
+    # A record written before args versioning (the scalar-input_ref era) has a
+    # NULL args_schema; it must refuse cleanly instead of running over args the
+    # current contract would read differently.
+    inputs = _TrackingInputStore()
+    ledger, usage, agent = _ledger()
+    attempts = InMemoryAnalysisAttemptStore()
+    state = _state()
+    state.args_schema = None
+    state.agent = agent.metadata.name
+
+    result = await SealedAnalysisOrchestrator(
+        _ReportWorker(), [StagedProvisioner(inputs)], InMemoryArtifactStore(),
+        attempts=attempts, ledger=ledger,
+    ).run_analysis(state)
+
+    assert not result.ok
+    assert "predates args schema" in result.error
+    assert inputs.gets == 0
+    assert usage.records == []
+    assert await attempts.get(state.attempt_id) is None
+
+
+async def test_unknown_staged_ref_fails_provisioning_after_gate():
+    inputs = _TrackingInputStore()  # nothing staged
+    ledger, usage, agent = _ledger()
+    state = _state()
+    state.agent = agent.metadata.name
+
+    result = await SealedAnalysisOrchestrator(
+        _ReportWorker(), [StagedProvisioner(inputs)], InMemoryArtifactStore(), ledger=ledger
+    ).run_analysis(state)
+
+    assert not result.ok
+    assert "provisioning failed" in result.error
+    assert inputs.gets == 1  # the lookup ran (and missed)
     assert usage.records == []
 
 
@@ -266,14 +309,14 @@ async def test_over_cap_settlement_blocks_report_readout_and_artifact_write():
     inputs = InMemoryInputStore()
     state = _state()
     await inputs.stage(InputManifest(
-        job_id=state.job_id, input_ref=state.input_ref,
+        input_ref=_INPUT_REF,
         files=(InputFile("sales.csv", b"x"),),
     ))
     artifacts = InMemoryArtifactStore()
     ledger, usage, agent = _ledger(per_task=0.10)
     state.agent = agent.metadata.name
     result = await SealedAnalysisOrchestrator(
-        _ReportWorker(run=_run(cost=0.25)), inputs, artifacts, ledger=ledger
+        _ReportWorker(run=_run(cost=0.25)), [StagedProvisioner(inputs)], artifacts, ledger=ledger
     ).run_analysis(state)
 
     assert not result.ok
@@ -287,7 +330,7 @@ async def test_nonzero_execution_settles_spend_without_reading_report():
     inputs = InMemoryInputStore()
     state = _state()
     await inputs.stage(InputManifest(
-        job_id=state.job_id, input_ref=state.input_ref,
+        input_ref=_INPUT_REF,
         files=(InputFile("sales.csv", b"x"),),
     ))
     artifacts = InMemoryArtifactStore()
@@ -295,7 +338,7 @@ async def test_nonzero_execution_settles_spend_without_reading_report():
     state.agent = agent.metadata.name
     result = await SealedAnalysisOrchestrator(
         _ReportWorker(run=_run(exit_code=7, stderr="sensitive input")),
-        inputs,
+        [StagedProvisioner(inputs)],
         artifacts,
         ledger=ledger,
     ).run_analysis(state)
@@ -311,7 +354,7 @@ async def test_empty_generated_program_still_settles_known_completion_spend():
     inputs = InMemoryInputStore()
     state = _state()
     await inputs.stage(InputManifest(
-        job_id=state.job_id, input_ref=state.input_ref,
+        input_ref=_INPUT_REF,
         files=(InputFile("sales.csv", b"x"),),
     ))
     artifacts = InMemoryArtifactStore()
@@ -329,7 +372,7 @@ async def test_empty_generated_program_still_settles_known_completion_spend():
     )
 
     result = await SealedAnalysisOrchestrator(
-        worker, inputs, artifacts, attempts=attempts, ledger=ledger
+        worker, [StagedProvisioner(inputs)], artifacts, attempts=attempts, ledger=ledger
     ).run_analysis(state)
 
     assert not result.ok
@@ -349,7 +392,7 @@ async def test_sandbox_setup_failure_still_settles_known_completion_spend():
     inputs = InMemoryInputStore()
     state = _state()
     await inputs.stage(InputManifest(
-        job_id=state.job_id, input_ref=state.input_ref,
+        input_ref=_INPUT_REF,
         files=(InputFile("sales.csv", b"x"),),
     ))
     artifacts = InMemoryArtifactStore()
@@ -365,7 +408,7 @@ async def test_sandbox_setup_failure_still_settles_known_completion_spend():
     )
 
     result = await SealedAnalysisOrchestrator(
-        worker, inputs, artifacts, ledger=ledger
+        worker, [StagedProvisioner(inputs)], artifacts, ledger=ledger
     ).run_analysis(state)
 
     assert not result.ok
@@ -381,8 +424,7 @@ async def test_reused_attempt_id_refuses_another_model_execution():
     state = _state()
     state.attempt_id = "attempt-1"
     await inputs.stage(InputManifest(
-        job_id=state.job_id,
-        input_ref=state.input_ref,
+        input_ref=_INPUT_REF,
         files=(InputFile("sales.csv", b"x"),),
     ))
     worker = _ReportWorker()
@@ -390,7 +432,7 @@ async def test_reused_attempt_id_refuses_another_model_execution():
     state.agent = agent.metadata.name
     orchestrator = SealedAnalysisOrchestrator(
         worker,
-        inputs,
+        [StagedProvisioner(inputs)],
         InMemoryArtifactStore(),
         attempts=InMemoryAnalysisAttemptStore(),
         ledger=ledger,
@@ -402,8 +444,9 @@ async def test_reused_attempt_id_refuses_another_model_execution():
     retry = await orchestrator.run_analysis(
         AnalysisState(
             job_id=state.job_id,
-            input_ref=state.input_ref,
             instruction=state.instruction,
+            inputs=list(state.inputs),
+            args_schema=ANALYSIS_ARGS_VERSION,
             agent=agent.metadata.name,
             attempt_id=state.attempt_id,
         )
@@ -435,7 +478,7 @@ async def test_charged_attempt_reconciles_usage_without_reexecuting_computation(
 
     result = await SealedAnalysisOrchestrator(
         worker,
-        InMemoryInputStore(),
+        [StagedProvisioner(InMemoryInputStore())],
         InMemoryArtifactStore(),
         attempts=attempts,
         ledger=ledger,
@@ -457,8 +500,7 @@ async def test_accounting_failure_marks_observed_charge_unknown_and_skips_readou
     inputs = InMemoryInputStore()
     state = _state()
     await inputs.stage(InputManifest(
-        job_id=state.job_id,
-        input_ref=state.input_ref,
+        input_ref=_INPUT_REF,
         files=(InputFile("sales.csv", b"x"),),
     ))
     agent = load_agent(AGENT_YAML)
@@ -476,7 +518,7 @@ async def test_accounting_failure_marks_observed_charge_unknown_and_skips_readou
 
     result = await SealedAnalysisOrchestrator(
         _ReportWorker(),
-        inputs,
+        [StagedProvisioner(inputs)],
         artifacts,
         attempts=attempts,
         ledger=ledger,
@@ -490,24 +532,30 @@ async def test_accounting_failure_marks_observed_charge_unknown_and_skips_readou
     assert await artifacts.get("analysis://job-1/report.md") is None
 
 
-def test_connector_prepare_args_strips_inline_payload_and_stamps_agent():
+def test_connector_prepare_args_mints_identity_and_stamps_agent_and_scope():
+    # prepare_args runs AFTER the gateway's typed parse, so it sees only the
+    # model-facing contract; it mints fresh identity (a caller-supplied job_id
+    # is never honored — a soft binding hole) and stamps the trusted invoking
+    # agent + the request scope from the warm_key.
     connector = AnalysisWorkerConnector(object())
     agent = load_agent(AGENT_YAML)
     args = connector.prepare_args(
         ANALYSIS_REPORT_WRITE,
         {
             "instruction": "summarize",
-            "input_ref": "upload:123",
-            "raw_data": "must never persist",
+            "inputs": [{"source": "staged", "input_ref": "staged:123"}],
+            "job_id": "attacker-chosen",
             "agent": "spoofed",
         },
         agent,
+        warm_key="slack\x1facme\x1fdev-platform\x1fC1\x1fT1",
     )
 
     assert args["agent"] == "dev-platform"
-    assert args["input_ref"] == "upload:123"
-    assert "raw_data" not in args
-    assert args["job_id"]
+    assert args["inputs"] == [{"source": "staged", "input_ref": "staged:123"}]
+    assert args["job_id"] and args["job_id"] != "attacker-chosen"
+    assert args["attempt_id"]
+    assert args["scope_key"] == "slack\x1facme\x1fdev-platform\x1fC1\x1fT1"
 
 
 async def test_analysis_is_always_held_for_approval_and_keeps_stamped_agent():
@@ -519,7 +567,6 @@ async def test_analysis_is_always_held_for_approval_and_keeps_stamped_agent():
             self.state = state
             return AnalysisResult(
                 job_id=state.job_id,
-                input_ref=state.input_ref,
                 run=_run(),
                 artifact_ref=f"analysis://{state.job_id}/report.md",
                 prose_summary="# Done",
@@ -536,11 +583,17 @@ async def test_analysis_is_always_held_for_approval_and_keeps_stamped_agent():
     pending = await gateway.invoke(
         agent,
         "analysis.report:write",
-        {"instruction": "summarize", "input_ref": "upload:1", "inline": "secret"},
+        # `inline` is rejected by the typed parse (extra="forbid"); the model
+        # can never smuggle raw data into the durable record.
+        {
+            "instruction": "summarize",
+            "inputs": [{"source": "staged", "input_ref": "staged:1"}],
+        },
     )
 
     assert pending.status == "pending_approval"
     assert pending.approval.args["agent"] == "dev-platform"
+    assert pending.approval.args_schema == ANALYSIS_ARGS_VERSION
     assert "inline" not in pending.approval.args
     assert "configured spend limits" in pending.approval.summary
 
@@ -783,7 +836,7 @@ async def test_iterative_abort_settles_cumulative_spend_and_blocks_readout():
     inputs = InMemoryInputStore()
     state = _state()
     await inputs.stage(InputManifest(
-        job_id=state.job_id, input_ref=state.input_ref,
+        input_ref=_INPUT_REF,
         files=(InputFile("sales.csv", b"x"),),
     ))
     artifacts = InMemoryArtifactStore()
@@ -795,7 +848,7 @@ async def test_iterative_abort_settles_cumulative_spend_and_blocks_readout():
     worker = _iterative_worker(sandbox, gateway)
 
     result = await SealedAnalysisOrchestrator(
-        worker, inputs, artifacts, attempts=attempts, ledger=ledger
+        worker, [StagedProvisioner(inputs)], artifacts, attempts=attempts, ledger=ledger
     ).run_analysis(state)
 
     assert not result.ok
@@ -819,7 +872,7 @@ async def test_later_round_model_failure_settles_the_earlier_rounds_spend():
     inputs = InMemoryInputStore()
     state = _state()
     await inputs.stage(InputManifest(
-        job_id=state.job_id, input_ref=state.input_ref,
+        input_ref=_INPUT_REF,
         files=(InputFile("sales.csv", b"x"),),
     ))
     attempts = InMemoryAnalysisAttemptStore()
@@ -830,7 +883,7 @@ async def test_later_round_model_failure_settles_the_earlier_rounds_spend():
     worker = _iterative_worker(sandbox, gateway)
 
     result = await SealedAnalysisOrchestrator(
-        worker, inputs, InMemoryArtifactStore(), attempts=attempts, ledger=ledger
+        worker, [StagedProvisioner(inputs)], InMemoryArtifactStore(), attempts=attempts, ledger=ledger
     ).run_analysis(state)
 
     assert not result.ok
@@ -849,7 +902,7 @@ async def test_first_round_model_failure_stays_pre_telemetry():
     inputs = InMemoryInputStore()
     state = _state()
     await inputs.stage(InputManifest(
-        job_id=state.job_id, input_ref=state.input_ref,
+        input_ref=_INPUT_REF,
         files=(InputFile("sales.csv", b"x"),),
     ))
     attempts = InMemoryAnalysisAttemptStore()
@@ -859,7 +912,7 @@ async def test_first_round_model_failure_stays_pre_telemetry():
     worker = _iterative_worker(_ScriptedSealedSandbox([]), gateway)
 
     result = await SealedAnalysisOrchestrator(
-        worker, inputs, InMemoryArtifactStore(), attempts=attempts, ledger=ledger
+        worker, [StagedProvisioner(inputs)], InMemoryArtifactStore(), attempts=attempts, ledger=ledger
     ).run_analysis(state)
 
     assert not result.ok
@@ -874,7 +927,7 @@ async def test_checkpoint_failure_after_execution_still_settles_spend():
     inputs = InMemoryInputStore()
     state = _state()
     await inputs.stage(InputManifest(
-        job_id=state.job_id, input_ref=state.input_ref,
+        input_ref=_INPUT_REF,
         files=(InputFile("sales.csv", b"x"),),
     ))
     attempts = InMemoryAnalysisAttemptStore()
@@ -889,7 +942,7 @@ async def test_checkpoint_failure_after_execution_still_settles_spend():
             raise RuntimeError("checkpoint store unavailable")
 
     result = await SealedAnalysisOrchestrator(
-        worker, inputs, InMemoryArtifactStore(), attempts=attempts, ledger=ledger
+        worker, [StagedProvisioner(inputs)], InMemoryArtifactStore(), attempts=attempts, ledger=ledger
     ).run_analysis(state, on_step=flaky_checkpoint)
 
     assert not result.ok
@@ -936,7 +989,7 @@ async def test_uncapped_agent_runs_iterative_to_completion_and_settles():
     inputs = InMemoryInputStore()
     state = _state()
     await inputs.stage(InputManifest(
-        job_id=state.job_id, input_ref=state.input_ref,
+        input_ref=_INPUT_REF,
         files=(InputFile("sales.csv", b"x"),),
     ))
     artifacts = InMemoryArtifactStore()
@@ -950,7 +1003,7 @@ async def test_uncapped_agent_runs_iterative_to_completion_and_settles():
     worker = _iterative_worker(sandbox, gateway)
 
     result = await SealedAnalysisOrchestrator(
-        worker, inputs, artifacts, ledger=ledger
+        worker, [StagedProvisioner(inputs)], artifacts, ledger=ledger
     ).run_analysis(state)
 
     assert result.ok, result.error
@@ -966,7 +1019,7 @@ async def test_single_shot_over_cap_completion_never_reaches_the_sandbox():
     inputs = InMemoryInputStore()
     state = _state()
     await inputs.stage(InputManifest(
-        job_id=state.job_id, input_ref=state.input_ref,
+        input_ref=_INPUT_REF,
         files=(InputFile("sales.csv", b"x"),),
     ))
     ledger, usage, agent = _ledger(per_task=0.10)
@@ -982,7 +1035,7 @@ async def test_single_shot_over_cap_completion_never_reaches_the_sandbox():
     )
 
     result = await SealedAnalysisOrchestrator(
-        worker, inputs, InMemoryArtifactStore(), ledger=ledger
+        worker, [StagedProvisioner(inputs)], InMemoryArtifactStore(), ledger=ledger
     ).run_analysis(state)
 
     assert not result.ok
@@ -1011,7 +1064,7 @@ async def test_iterative_mid_loop_failure_settles_cumulative_spend():
     inputs = InMemoryInputStore()
     state = _state()
     await inputs.stage(InputManifest(
-        job_id=state.job_id, input_ref=state.input_ref,
+        input_ref=_INPUT_REF,
         files=(InputFile("sales.csv", b"x"),),
     ))
     attempts = _TrackingAttempts()
@@ -1025,7 +1078,7 @@ async def test_iterative_mid_loop_failure_settles_cumulative_spend():
     worker = _iterative_worker(sandbox, gateway)
 
     result = await SealedAnalysisOrchestrator(
-        worker, inputs, InMemoryArtifactStore(), attempts=attempts, ledger=ledger
+        worker, [StagedProvisioner(inputs)], InMemoryArtifactStore(), attempts=attempts, ledger=ledger
     ).run_analysis(state)
 
     assert not result.ok

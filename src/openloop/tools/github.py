@@ -10,15 +10,63 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from openloop.analysis.provision import ProvisionError
 from openloop.credentials import CredentialResolver, CredentialScope
 from openloop.tools.base import ActionSpec, ToolResult
 
-_REPO = {
-    "type": "string",
-    "minLength": 1,
-    "description": "owner/repo, e.g. acme/ingestion",
-}
-_NUMBER = {"type": "integer", "description": "issue or PR number"}
+GITHUB_ARGS_VERSION = 1
+
+_REPO_DESC = "owner/repo, e.g. acme/ingestion"
+
+
+def _stripped(value):
+    return value.strip() if isinstance(value, str) else value
+
+
+class _GithubArgs(BaseModel):
+    """Typed args base (typed-tool-args §3): schemas are generated from these
+    models and the gateway parses raw args through them."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class IssueWriteArgs(_GithubArgs):
+    repo: str = Field(min_length=1, description=_REPO_DESC)
+    title: str = Field(min_length=1)
+    body: str = ""
+
+    _strip = field_validator("repo", "title", mode="before")(_stripped)
+
+
+class IssueReadArgs(_GithubArgs):
+    repo: str = Field(min_length=1, description=_REPO_DESC)
+    # strict so a string like "5" is a type error, not silently coerced —
+    # preserving the pre-typed-args reject-wrong-type contract.
+    number: int = Field(strict=True, description="issue or PR number")
+
+    _strip = field_validator("repo", mode="before")(_stripped)
+
+
+class PullWriteArgs(_GithubArgs):
+    repo: str = Field(min_length=1, description=_REPO_DESC)
+    head: str = Field(description="branch with the changes")
+    base: str | None = Field(default=None, description="branch to merge into")
+    title: str
+    body: str = ""
+    draft: bool = True
+
+    _strip = field_validator("repo", mode="before")(_stripped)
+
+
+class PullReadArgs(_GithubArgs):
+    repo: str = Field(min_length=1, description=_REPO_DESC)
+    # strict so a string like "5" is a type error, not silently coerced —
+    # preserving the pre-typed-args reject-wrong-type contract.
+    number: int = Field(strict=True, description="issue or PR number")
+
+    _strip = field_validator("repo", mode="before")(_stripped)
 
 # ToolResult.data goes back to the model verbatim, so trim GitHub's verbose
 # payloads (nested user/reactions/_links objects) to what the model needs.
@@ -79,6 +127,10 @@ class GitHubClient(Protocol):
     ) -> dict: ...
 
     async def find_pull(self, repo: str, head: str) -> dict | None: ...
+
+    async def get_tarball(
+        self, repo: str, ref: str | None, *, max_bytes: int
+    ) -> bytes: ...
 
 
 class HttpGitHubClient:
@@ -161,6 +213,51 @@ class HttpGitHubClient:
         )
         return pulls[0] if pulls else None
 
+    async def get_tarball(
+        self, repo: str, ref: str | None, *, max_bytes: int
+    ) -> bytes:
+        """Stream a repository archive, capped IN FLIGHT at ``max_bytes``.
+
+        The cap fires during the download — a huge repo must not buy unbounded
+        controller memory before failing. Failure copy is sanitized for
+        approval-adjacent surfaces: the repo name is fine (it came from args),
+        token material and raw URLs are not.
+        """
+        import httpx
+
+        path = f"/repos/{repo}/tarball" + (f"/{ref}" if ref else "")
+        headers = await self._headers()
+        received = bytearray()
+        try:
+            # GitHub answers with a redirect to codeload; httpx must follow it.
+            async with httpx.AsyncClient(
+                timeout=60, follow_redirects=True
+            ) as client:
+                async with client.stream(
+                    "GET", f"{self.base_url}{path}", headers=headers
+                ) as resp:
+                    resp.raise_for_status()
+                    async for chunk in resp.aiter_bytes():
+                        if len(received) + len(chunk) > max_bytes:
+                            raise ProvisionError(
+                                f"repository archive of {repo} exceeds the "
+                                f"{max_bytes}-byte cap"
+                            )
+                        received.extend(chunk)
+        except ProvisionError:
+            raise
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            raise ProvisionError(
+                f"GitHub returned {status} for the {repo} archive "
+                "(unknown repo/ref, or the credential lacks access)"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise ProvisionError(
+                f"fetching the {repo} archive failed: {type(exc).__name__}"
+            ) from exc
+        return bytes(received)
+
 
 class GitHubConnector:
     """Maps permissioned actions onto a :class:`GitHubClient`."""
@@ -174,59 +271,21 @@ class GitHubConnector:
         return {"issues:read", "issues:write", "pulls:read", "pulls:write"}
 
     def describe(self, permission: str) -> ActionSpec:
+        # Schemas are GENERATED from the typed args models the gateway parses
+        # with, so declaration and enforcement cannot drift.
         if permission == "issues:write":
-            return ActionSpec(
-                "Create a new GitHub issue in a repository.",
-                {
-                    "type": "object",
-                    "properties": {
-                        "repo": _REPO,
-                        "title": {"type": "string", "minLength": 1},
-                        "body": {"type": "string"},
-                    },
-                    "required": ["repo", "title"],
-                },
+            return _spec(
+                "Create a new GitHub issue in a repository.", IssueWriteArgs
             )
         if permission == "issues:read":
-            return ActionSpec(
-                "Read a GitHub issue by number.",
-                {
-                    "type": "object",
-                    "properties": {"repo": _REPO, "number": _NUMBER},
-                    "required": ["repo", "number"],
-                },
-            )
+            return _spec("Read a GitHub issue by number.", IssueReadArgs)
         if permission == "pulls:write":
-            return ActionSpec(
+            return _spec(
                 "Open a GitHub pull request from an existing pushed branch.",
-                {
-                    "type": "object",
-                    "properties": {
-                        "repo": _REPO,
-                        "head": {
-                            "type": "string",
-                            "description": "branch with the changes",
-                        },
-                        "base": {
-                            "type": "string",
-                            "description": "branch to merge into",
-                        },
-                        "title": {"type": "string"},
-                        "body": {"type": "string"},
-                        "draft": {"type": "boolean"},
-                    },
-                    "required": ["repo", "head", "title"],
-                },
+                PullWriteArgs,
             )
         # pulls:read
-        return ActionSpec(
-            "Read a GitHub pull request by number.",
-            {
-                "type": "object",
-                "properties": {"repo": _REPO, "number": _NUMBER},
-                "required": ["repo", "number"],
-            },
-        )
+        return _spec("Read a GitHub pull request by number.", PullReadArgs)
 
     async def execute(self, permission: str, args: dict) -> ToolResult:
         if permission == "issues:write":
@@ -267,3 +326,12 @@ class GitHubConnector:
                 data=_trim_pull(pull),
             )
         return ToolResult(ok=False, summary=f"unsupported permission {permission}")
+
+
+def _spec(description: str, model: type[_GithubArgs]) -> ActionSpec:
+    return ActionSpec(
+        description,
+        model.model_json_schema(),
+        model=model,
+        version=GITHUB_ARGS_VERSION,
+    )

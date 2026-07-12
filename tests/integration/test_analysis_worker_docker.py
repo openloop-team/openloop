@@ -11,7 +11,14 @@ import subprocess
 
 import pytest
 
-from openloop.analysis import InMemoryArtifactStore, InMemoryInputStore, InputFile, InputManifest
+from openloop.analysis import (
+    ANALYSIS_ARGS_VERSION,
+    InMemoryArtifactStore,
+    InMemoryInputStore,
+    InputFile,
+    InputManifest,
+    StagedProvisioner,
+)
 from openloop.sandbox import DockerSandbox, SandboxLimits
 from openloop.testing import FakeGateway
 from openloop.tools.analysis_worker import AnalysisState, BuiltinAnalysisWorker, SealedAnalysisOrchestrator
@@ -44,20 +51,20 @@ def _pull_image():
 async def test_single_shot_worker_round_trips_a_sealed_report():
     state = AnalysisState(
         job_id="analysis-live",
-        input_ref="fixture:csv",
         instruction="total the values",
+        inputs=[{"source": "staged", "input_ref": "staged:csv"}],
+        args_schema=ANALYSIS_ARGS_VERSION,
     )
     inputs = InMemoryInputStore()
     await inputs.stage(InputManifest(
-        job_id=state.job_id,
-        input_ref=state.input_ref,
+        input_ref="staged:csv",
         files=(InputFile("values.csv", b"value\n2\n3\n"),),
     ))
     worker = BuiltinAnalysisWorker(
         "m",
         DockerSandbox(IMAGE, kind="analysis"),
         gateway=FakeGateway(
-            "values = [int(line) for line in open('/workspace/inputs/values.csv').read().splitlines()[1:]]\n"
+            "values = [int(line) for line in open('/workspace/inputs/staged__values.csv').read().splitlines()[1:]]\n"
             "open('/workspace/outputs/report.md', 'w').write(f'# Total\\n{sum(values)}\\n')"
         ),
         limits=SandboxLimits(timeout_seconds=30, memory="256m", pids_limit=64),
@@ -65,7 +72,7 @@ async def test_single_shot_worker_round_trips_a_sealed_report():
         strategy="single",
     )
     artifacts = InMemoryArtifactStore()
-    result = await SealedAnalysisOrchestrator(worker, inputs, artifacts).run_analysis(state)
+    result = await SealedAnalysisOrchestrator(worker, [StagedProvisioner(inputs)], artifacts).run_analysis(state)
 
     assert result.ok, result.error
     assert result.prose_summary == "# Total\n5"
@@ -91,21 +98,21 @@ async def test_iterative_worker_refines_after_real_exec_feedback():
     real sealed sandbox producing the feedback the loop feeds back."""
     state = AnalysisState(
         job_id="analysis-live-iter",
-        input_ref="fixture:csv",
         instruction="total the values",
+        inputs=[{"source": "staged", "input_ref": "staged:csv"}],
+        args_schema=ANALYSIS_ARGS_VERSION,
     )
     inputs = InMemoryInputStore()
     await inputs.stage(InputManifest(
-        job_id=state.job_id,
-        input_ref=state.input_ref,
+        input_ref="staged:csv",
         files=(InputFile("values.csv", b"value\n2\n3\n"),),
     ))
     gateway = _SequencedGateway([
         # Exploration round: inspect the input, then fail on purpose so the
         # loop must continue.
-        "print(open('/workspace/inputs/values.csv').read())\n"
+        "print(open('/workspace/inputs/staged__values.csv').read())\n"
         "raise SystemExit(9)",
-        "values = [int(line) for line in open('/workspace/inputs/values.csv').read().splitlines()[1:]]\n"
+        "values = [int(line) for line in open('/workspace/inputs/staged__values.csv').read().splitlines()[1:]]\n"
         "open('/workspace/outputs/report.md', 'w').write(f'# Total\\n{sum(values)}\\n')",
     ])
     worker = BuiltinAnalysisWorker(
@@ -118,7 +125,7 @@ async def test_iterative_worker_refines_after_real_exec_feedback():
         max_iterations=3,
     )
     artifacts = InMemoryArtifactStore()
-    result = await SealedAnalysisOrchestrator(worker, inputs, artifacts).run_analysis(state)
+    result = await SealedAnalysisOrchestrator(worker, [StagedProvisioner(inputs)], artifacts).run_analysis(state)
 
     assert result.ok, result.error
     assert result.run.iterations == 2

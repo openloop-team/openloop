@@ -50,7 +50,7 @@ from openloop.sessions.threads import (
 from openloop.workflows.store import TERMINAL as _WORKFLOW_TERMINAL
 
 if TYPE_CHECKING:
-    from openloop.analysis import ArtifactStore
+    from openloop.analysis import ArtifactStore, UploadStore
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,10 @@ ERROR_TEXT = "⚠️ This task was interrupted and could not be completed."
 # How many prior thread turns to replay as conversation history. A safety bound
 # on context size, not a correctness limit — older turns fall back to recall.
 HISTORY_TURN_LIMIT = 20
+
+# How many of the thread's shared files to list in task context. A bound on
+# context size; the most recent shares win.
+UPLOAD_INVENTORY_LIMIT = 10
 
 # Re-materialization defaults for an artifact final: only the ref is persisted
 # on the session, so a recovery post rebuilds the artifact's naming from these.
@@ -157,6 +161,7 @@ class SessionRunner:
         delivery: SurfaceDelivery,
         threads: "ThreadRecordStore | None" = None,
         artifacts: "ArtifactStore | None" = None,
+        uploads: "UploadStore | None" = None,
     ) -> None:
         self.runtime = runtime
         self.sessions = sessions
@@ -172,6 +177,11 @@ class SessionRunner:
         # delivered turn) rather than the per-session summary scan; when absent the
         # runner falls back to SurfaceSessionStore.thread_history (old path).
         self.threads = threads
+        # Phase 4 (sealed analysis): thread-scoped upload metadata. Two jobs —
+        # the surface records file shares into it, and the runner injects a
+        # bounded shared-file inventory line into task context so the model can
+        # name an upload_ref (without it the upload source is invisible).
+        self.uploads = uploads
         # (phrase, last-sent monotonic) per session: collapse identical bursts,
         # but still re-assert periodically so Slack's transient status doesn't
         # lapse during a long single-phase run.
@@ -234,6 +244,9 @@ class SessionRunner:
         # context, not just semantic recall. Done before handle() so the history
         # is baked into the workflow's persisted turn state (resume-safe).
         await self._apply_thread_history(task, session)
+        # List the thread's shared files so the model can reference them as
+        # analysis upload inputs; also pre-handle() so it persists with the turn.
+        await self._apply_upload_inventory(task, target)
         # TEMP DEBUG (thread-isolation diagnosis): show exactly which thread this
         # turn resolved to and how many prior turns were replayed as history.
         logger.debug(
@@ -454,6 +467,39 @@ class SessionRunner:
                 turns.append({"role": "assistant", "content": s.result_summary})
         if turns:
             task.history = turns
+
+    async def _apply_upload_inventory(
+        self, task: Task, target: SurfaceTarget
+    ) -> None:
+        """Add a bounded shared-file inventory to the task's context notes.
+
+        Names and refs only — never contents (staging is lazy; bytes are
+        fetched from the surface exclusively by the post-approval provisioner).
+        Best-effort: an inventory failure must never block the turn.
+        """
+        if self.uploads is None or target.thread is None:
+            return
+        try:
+            records = await self.uploads.for_scope(
+                thread_scope_key(target), limit=UPLOAD_INVENTORY_LIMIT
+            )
+        except Exception:  # noqa: BLE001 — inventory is context garnish
+            logger.warning(
+                "failed to list shared files for %s", target.thread, exc_info=True
+            )
+            return
+        if not records:
+            return
+        lines = "\n".join(
+            f"- {u.name} (upload_ref {u.upload_ref}, {u.size} bytes)"
+            for u in records
+        )
+        task.context_notes.append(
+            "Files shared in this conversation thread (usable as sealed-"
+            'analysis inputs via {"source": "upload", "upload_ref": ...}; '
+            "names and sizes only, contents are provisioned after approval):\n"
+            + lines
+        )
 
     async def _recover(self, session: SurfaceSession) -> tuple[bool, object]:
         """``(found, response)`` for a session's workflow — see

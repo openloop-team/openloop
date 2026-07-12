@@ -1,4 +1,4 @@
-"""Postgres persistence for Phase 1 sealed-analysis inputs and artifacts."""
+"""Postgres persistence for sealed-analysis inputs, uploads, and artifacts."""
 
 from __future__ import annotations
 
@@ -7,10 +7,11 @@ import json
 from datetime import datetime, timezone
 
 from openloop.analysis.store import AnalysisArtifact, AnalysisAttempt, InputFile, InputManifest
+from openloop.analysis.uploads import UploadRecord
 
 
 class PostgresInputStore:
-    """Durable controller-staged inputs, one manifest per analysis job."""
+    """Durable operator-staged inputs, one manifest per capability ref."""
 
     def __init__(self, dsn: str) -> None:
         self.dsn = dsn
@@ -21,11 +22,14 @@ class PostgresInputStore:
 
         self._pool = await asyncpg.create_pool(self.dsn)
         async with self._pool.acquire() as conn:
+            # Phase 4 rekeyed staging on the capability ref. Staged inputs are
+            # short-lived operator artifacts, so the job-keyed Phase 1 table
+            # is dropped, not migrated — anything in it must be re-staged.
+            await conn.execute("DROP TABLE IF EXISTS analysis_inputs")
             await conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS analysis_inputs (
-                    job_id     TEXT PRIMARY KEY,
-                    input_ref  TEXT NOT NULL,
+                CREATE TABLE IF NOT EXISTS analysis_staged_inputs (
+                    input_ref  TEXT PRIMARY KEY,
                     files      JSONB NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -52,36 +56,32 @@ class PostgresInputStore:
         async with pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO analysis_inputs (job_id, input_ref, files, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, now())
-                ON CONFLICT (job_id) DO UPDATE SET
-                    input_ref = EXCLUDED.input_ref,
+                INSERT INTO analysis_staged_inputs (input_ref, files, created_at, updated_at)
+                VALUES ($1, $2, $3, now())
+                ON CONFLICT (input_ref) DO UPDATE SET
                     files = EXCLUDED.files,
                     updated_at = now()
                 """,
-                manifest.job_id,
                 manifest.input_ref,
                 json.dumps(files),
                 manifest.created_at,
             )
 
-    async def get(self, job_id: str, input_ref: str) -> InputManifest | None:
+    async def get(self, input_ref: str) -> InputManifest | None:
         pool = self._require_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT job_id, input_ref, files, created_at
-                FROM analysis_inputs
-                WHERE job_id = $1 AND input_ref = $2
+                SELECT input_ref, files, created_at
+                FROM analysis_staged_inputs
+                WHERE input_ref = $1
                 """,
-                job_id,
                 input_ref,
             )
         if row is None:
             return None
         files = json.loads(row["files"]) if row["files"] else []
         return InputManifest(
-            job_id=row["job_id"],
             input_ref=row["input_ref"],
             files=tuple(
                 InputFile(
@@ -92,6 +92,111 @@ class PostgresInputStore:
             ),
             created_at=row["created_at"] or datetime.now(timezone.utc),
         )
+
+
+class PostgresUploadStore:
+    """Durable surface-upload metadata (never bytes — staging is lazy)."""
+
+    def __init__(self, dsn: str) -> None:
+        self.dsn = dsn
+        self._pool = None
+
+    async def setup(self) -> None:
+        import asyncpg
+
+        self._pool = await asyncpg.create_pool(self.dsn)
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS analysis_uploads (
+                        upload_ref TEXT PRIMARY KEY,
+                        scope_key  TEXT NOT NULL,
+                        name       TEXT NOT NULL,
+                        size       BIGINT NOT NULL,
+                        shared_by  TEXT,
+                        shared_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                    """
+                )
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS analysis_uploads_scope_idx "
+                    "ON analysis_uploads (scope_key, shared_at)"
+                )
+        except BaseException:
+            await self.close()
+            raise
+
+    async def close(self) -> None:
+        if self._pool is not None:
+            await self._pool.close()
+            self._pool = None
+
+    def _require_pool(self):
+        if self._pool is None:
+            raise RuntimeError("PostgresUploadStore.setup() must be called first")
+        return self._pool
+
+    async def record(self, upload: UploadRecord) -> None:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            # First write wins: a re-delivered file event must not move an
+            # already-recorded upload into a different scope.
+            await conn.execute(
+                """
+                INSERT INTO analysis_uploads
+                    (upload_ref, scope_key, name, size, shared_by, shared_at)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (upload_ref) DO NOTHING
+                """,
+                upload.upload_ref,
+                upload.scope_key,
+                upload.name,
+                upload.size,
+                upload.user,
+                upload.shared_at,
+            )
+
+    async def get(self, upload_ref: str) -> UploadRecord | None:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM analysis_uploads WHERE upload_ref = $1",
+                upload_ref,
+            )
+        return _row_to_upload(row) if row else None
+
+    async def for_scope(
+        self, scope_key: str, *, limit: int = 20
+    ) -> list[UploadRecord]:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT * FROM (
+                    SELECT * FROM analysis_uploads
+                    WHERE scope_key = $1
+                    ORDER BY shared_at DESC
+                    LIMIT $2
+                ) recent
+                ORDER BY shared_at ASC
+                """,
+                scope_key,
+                limit,
+            )
+        return [_row_to_upload(r) for r in rows]
+
+
+def _row_to_upload(row) -> UploadRecord:
+    return UploadRecord(
+        upload_ref=row["upload_ref"],
+        scope_key=row["scope_key"],
+        name=row["name"],
+        size=row["size"],
+        user=row["shared_by"],
+        shared_at=row["shared_at"] or datetime.now(timezone.utc),
+    )
 
 
 class PostgresArtifactStore:

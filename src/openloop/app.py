@@ -23,15 +23,21 @@ from pydantic import BaseModel
 from openloop.analysis import (
     AnalysisAttemptStore,
     ArtifactStore,
+    GithubProvisioner,
     InMemoryAnalysisAttemptStore,
     InMemoryArtifactStore,
     InMemoryInputStore,
+    InMemoryUploadStore,
     InputStore,
+    StagedProvisioner,
+    UploadProvisioner,
+    UploadStore,
 )
 from openloop.analysis.postgres import (
     PostgresAnalysisAttemptStore,
     PostgresArtifactStore,
     PostgresInputStore,
+    PostgresUploadStore,
 )
 from openloop.agents import load_agents
 from openloop.agents.schema import Agent
@@ -179,7 +185,7 @@ def build_thread_record_store(settings: Settings) -> ThreadRecordStore:
 
 
 def build_analysis_input_store(settings: Settings) -> InputStore:
-    """Pick the job-keyed sealed-analysis input store."""
+    """Pick the capability-ref-keyed sealed-analysis staging store."""
     if settings.memory_backend == "postgres":
         return PostgresInputStore(settings.database_url)
     return InMemoryInputStore()
@@ -197,6 +203,13 @@ def build_analysis_attempt_store(settings: Settings) -> AnalysisAttemptStore:
     if settings.memory_backend == "postgres":
         return PostgresAnalysisAttemptStore(settings.database_url)
     return InMemoryAnalysisAttemptStore()
+
+
+def build_analysis_upload_store(settings: Settings) -> UploadStore:
+    """Pick the thread-scoped surface-upload metadata store (Phase 4)."""
+    if settings.memory_backend == "postgres":
+        return PostgresUploadStore(settings.database_url)
+    return InMemoryUploadStore()
 
 
 def _resolve_lock_backend(settings: Settings) -> str:
@@ -499,6 +512,9 @@ def build_analysis_worker(settings: Settings) -> "AnalysisWorker | None":
         or settings.analysis_worker_cpus <= 0
         or settings.analysis_worker_max_iterations <= 0
         or settings.analysis_worker_exec_feedback_max_chars <= 0
+        or settings.analysis_worker_max_input_bytes <= 0
+        or settings.analysis_worker_github_max_bytes <= 0
+        or settings.analysis_worker_upload_max_bytes <= 0
         or not settings.analysis_worker_memory
         or not settings.analysis_worker_tmp_size
     ):
@@ -628,6 +644,7 @@ def build_tool_gateway(
     analysis_inputs: InputStore | None = None,
     analysis_artifacts: ArtifactStore | None = None,
     analysis_attempts: AnalysisAttemptStore | None = None,
+    analysis_uploads: UploadStore | None = None,
 ) -> ToolGateway:
     """Register native connectors plus an MCP connector per configured server.
 
@@ -636,8 +653,12 @@ def build_tool_gateway(
     """
     gateway = ToolGateway(approvals=approvals, engine=engine)
     github_credentials = build_github_credentials(settings)
+    github_client = (
+        HttpGitHubClient(github_credentials)
+        if github_credentials is not None
+        else None
+    )
     if github_credentials is not None:
-        github_client = HttpGitHubClient(github_credentials)
         gateway.register(GitHubConnector(github_client))
         log.info("registered native tool: github")
         # The coding worker runs model-generated edits, so it stays off unless
@@ -761,21 +782,55 @@ def build_tool_gateway(
             inputs = analysis_inputs or build_analysis_input_store(settings)
             artifacts = analysis_artifacts or build_analysis_artifact_store(settings)
             attempts = analysis_attempts or build_analysis_attempt_store(settings)
+            uploads = analysis_uploads or build_analysis_upload_store(settings)
+            # Phase 4: one provisioner per available source. Sources whose
+            # dependency isn't configured are simply not registered — the
+            # connector's invoke-time resolution refuses them before a human
+            # is ever asked to approve.
+            provisioners = [StagedProvisioner(inputs)]
+            available_sources = {"staged"}
+            if settings.slack_bot_token:
+                from openloop.surfaces.slack_files import SlackUploadFetcher
+
+                provisioners.append(
+                    UploadProvisioner(
+                        uploads,
+                        SlackUploadFetcher(settings.slack_bot_token),
+                        max_bytes=settings.analysis_worker_upload_max_bytes,
+                    )
+                )
+                available_sources.add("upload")
+            if github_client is not None:
+                provisioners.append(
+                    GithubProvisioner(
+                        github_client,
+                        max_bytes=settings.analysis_worker_github_max_bytes,
+                    )
+                )
+                available_sources.add("github")
             orchestrator = SealedAnalysisOrchestrator(
                 worker,
-                inputs,
+                provisioners,
                 artifacts,
                 attempts=attempts,
                 ledger=ledger,
                 workspace_root=_analysis_workspace_root(settings),
                 report_max_bytes=settings.analysis_worker_report_max_bytes,
                 summary_lines=settings.analysis_worker_summary_lines,
+                max_input_bytes=settings.analysis_worker_max_input_bytes,
             )
             gateway.analysis_input_store = inputs  # type: ignore[attr-defined]
             gateway.analysis_artifact_store = artifacts  # type: ignore[attr-defined]
             gateway.analysis_attempt_store = attempts  # type: ignore[attr-defined]
+            gateway.analysis_upload_store = uploads  # type: ignore[attr-defined]
             gateway.analysis_sandbox_enabled = True  # type: ignore[attr-defined]
-            gateway.register(AnalysisWorkerConnector(orchestrator))
+            gateway.register(
+                AnalysisWorkerConnector(
+                    orchestrator,
+                    uploads=uploads,
+                    available_sources=available_sources,
+                )
+            )
             # Register the sealed run as a durable workflow (approval = wait
             # node; store_result persists the {artifact_ref, prose_summary}
             # the session runner delivers from).
@@ -783,9 +838,10 @@ def build_tool_gateway(
             log.info(
                 "registered native tool: analysis "
                 "(backend=builtin, strategy=%s, model=%s, sandbox=docker, "
-                "default_per_task_cap=%s)",
+                "sources=%s, default_per_task_cap=%s)",
                 settings.analysis_worker_strategy,
                 settings.analysis_worker_model,
+                ",".join(sorted(available_sources)),
                 ledger.per_task_usd_for(None),
             )
     else:
@@ -866,6 +922,7 @@ def create_app() -> FastAPI:
     analysis_inputs = build_analysis_input_store(settings)
     analysis_artifacts = build_analysis_artifact_store(settings)
     analysis_attempts = build_analysis_attempt_store(settings)
+    analysis_uploads = build_analysis_upload_store(settings)
     # Phase A: the thread-scoped delivered-transcript store. Captured by the Slack
     # SessionRunner (like `sessions`); repointed in the lifespan on a PG fallback.
     threads = build_thread_record_store(settings)
@@ -889,6 +946,7 @@ def create_app() -> FastAPI:
         analysis_inputs=analysis_inputs,
         analysis_artifacts=analysis_artifacts,
         analysis_attempts=analysis_attempts,
+        analysis_uploads=analysis_uploads,
     )
     # The agent that tool/approval endpoints act on (first configured).
     primary_agent: Agent | None = next(iter(agents.values()), None)
@@ -896,6 +954,7 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         nonlocal coordinator, analysis_inputs, analysis_artifacts, analysis_attempts
+        nonlocal analysis_uploads
         recovery_task: asyncio.Task | None = None
         warm_sweep_task: asyncio.Task | None = None
         if isinstance(store, PostgresMemoryStore):
@@ -974,6 +1033,24 @@ def create_app() -> FastAPI:
                 _repoint_analysis_stores(tools, attempts=analysis_attempts)
         else:
             log.info("analysis attempt backend: in-memory (process-local)")
+
+        if isinstance(analysis_uploads, PostgresUploadStore):
+            try:
+                await analysis_uploads.setup()
+                log.info("analysis upload backend: postgres")
+            except Exception:
+                log.exception(
+                    "postgres analysis upload setup failed — falling back to in-memory"
+                )
+                analysis_uploads = InMemoryUploadStore()
+                app.state.analysis_uploads = analysis_uploads
+                _repoint_analysis_stores(tools, uploads=analysis_uploads)
+                # The Slack surface records shares — and the runner reads the
+                # inventory — through this same store; keep them live.
+                if session_runner is not None:
+                    session_runner.uploads = analysis_uploads
+        else:
+            log.info("analysis upload backend: in-memory (process-local)")
 
         if isinstance(approvals, PostgresApprovalStore):
             try:
@@ -1124,6 +1201,8 @@ def create_app() -> FastAPI:
             await analysis_artifacts.close()
         if isinstance(analysis_attempts, PostgresAnalysisAttemptStore):
             await analysis_attempts.close()
+        if isinstance(analysis_uploads, PostgresUploadStore):
+            await analysis_uploads.close()
         if hasattr(coordinator, "close"):  # RedisLock / PostgresLock (not in-process)
             await _safe_close(coordinator)
 
@@ -1138,6 +1217,7 @@ def create_app() -> FastAPI:
     app.state.analysis_inputs = analysis_inputs
     app.state.analysis_artifacts = analysis_artifacts
     app.state.analysis_attempts = analysis_attempts
+    app.state.analysis_uploads = analysis_uploads
     app.state.limiter = limiter
 
     # Phase B: bridge the warm-workspace pool's durable handle to the thread
@@ -1175,6 +1255,9 @@ def create_app() -> FastAPI:
             # Lets the runner dereference an analysis report ref into an
             # Artifact deliverable at delivery time (Phase 2).
             artifacts=analysis_artifacts,
+            # Phase 4: the surface records thread-scoped file shares here and
+            # the runner injects the shared-file inventory from it.
+            uploads=analysis_uploads,
         )
         app.state.slack_app = slack_app
         # Captured so the session-store fallback can repoint the runner (above).
@@ -1321,12 +1404,16 @@ def _repoint_analysis_stores(
     inputs: InputStore | None = None,
     artifacts: ArtifactStore | None = None,
     attempts: AnalysisAttemptStore | None = None,
+    uploads: UploadStore | None = None,
 ) -> None:
     """Move a wired analysis orchestrator onto an in-memory store fallback."""
     connector = tools._tools.get("analysis")
     orchestrator = getattr(connector, "orchestrator", None)
+    provisioners = getattr(orchestrator, "_provisioners", {})
     if inputs is not None and orchestrator is not None:
-        orchestrator._inputs = inputs
+        staged = provisioners.get("staged")
+        if staged is not None:
+            staged.inputs = inputs
         tools.analysis_input_store = inputs  # type: ignore[attr-defined]
     if artifacts is not None and orchestrator is not None:
         orchestrator._artifacts = artifacts
@@ -1334,6 +1421,14 @@ def _repoint_analysis_stores(
     if attempts is not None and orchestrator is not None:
         orchestrator._attempts = attempts
         tools.analysis_attempt_store = attempts  # type: ignore[attr-defined]
+    if uploads is not None and connector is not None:
+        # Both halves of the upload path: the connector's pre-approval
+        # resolution and the provisioner's post-approval scope re-check + fetch.
+        connector.uploads = uploads
+        upload_provisioner = provisioners.get("upload")
+        if upload_provisioner is not None:
+            upload_provisioner.uploads = uploads
+        tools.analysis_upload_store = uploads  # type: ignore[attr-defined]
 
 
 def _disable_checkpoints(tools: ToolGateway) -> None:

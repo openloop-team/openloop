@@ -26,11 +26,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from pydantic import ValidationError
+
 from openloop.analysis import (
+    ANALYSIS_ARGS_VERSION,
     AnalysisAttemptStore,
+    AnalysisReportArgs,
     ArtifactStore,
+    ExecutableAnalysisRequest,
     InMemoryAnalysisAttemptStore,
-    InputStore,
+    ProvisionError,
+    Provisioner,
+    RequestIdentity,
+    UploadStore,
+    materialize_inputs,
+    provision_inputs,
 )
 from openloop.sandbox import (
     Mount,
@@ -40,7 +50,7 @@ from openloop.sandbox import (
     SealedSpec,
     read_contained,
 )
-from openloop.tools.base import ActionSpec, ToolResult
+from openloop.tools.base import ActionSpec, ToolResult, format_validation_error
 from openloop.tools.coding_worker import WorkerRunAborted
 from openloop.usage import WorkerBudgetExceeded
 
@@ -59,12 +69,26 @@ ChargeCallback = Callable[["AnalysisCharge"], Awaitable[None]]
 
 @dataclass(slots=True)
 class AnalysisState:
-    """Replay-safe identity and request metadata for one analysis attempt."""
+    """Replay-safe identity and request metadata for one analysis attempt.
+
+    Identity (job/attempt/agent/scope) is lenient by construction so attempt
+    reconciliation is never blocked; whether ``instruction``/``inputs`` can
+    actually execute is decided by the orchestrator's
+    :class:`~openloop.analysis.ExecutableAnalysisRequest` parse.
+    """
 
     job_id: str
-    input_ref: str
     instruction: str
+    # Raw parsed-and-dumped ``inputs[]`` entries from the durable record; the
+    # orchestrator re-parses them through the current args contract.
+    inputs: list[dict] = field(default_factory=list)
     agent: str | None = None
+    # The full thread-ownership tuple key stamped gateway-side from the
+    # session context; None on scopeless paths (the direct tools API).
+    scope_key: str | None = None
+    # The args-contract version the durable record was written under; None is
+    # the pre-version sentinel and always refuses execution.
+    args_schema: int | None = None
     # Minted before approval in Phase 1b; direct harnesses can omit it and the
     # orchestrator will mint one before the first model call.
     attempt_id: str | None = None
@@ -202,7 +226,6 @@ class AnalysisResult:
     """The orchestrator's outcome; report bytes never appear here."""
 
     job_id: str
-    input_ref: str
     attempt_id: str | None = None
     run: AnalysisRun | None = None
     artifact_ref: str | None = None
@@ -216,7 +239,6 @@ class AnalysisResult:
     def data(self) -> dict:
         data = {
             "job_id": self.job_id,
-            "input_ref": self.input_ref,
             "attempt_id": self.attempt_id,
             "artifact_ref": self.artifact_ref,
             "prose_summary": self.prose_summary,
@@ -633,15 +655,18 @@ class BuiltinAnalysisWorker:
 class SealedAnalysisOrchestrator:
     """The sole provision-in / settle / read-out boundary for analysis.
 
-    No generated code gets an input-store handle, an artifact-store handle, a
+    No generated code gets a provisioner handle, an artifact-store handle, a
     credential, or a network. No report bytes are read until the per-task spend
-    settlement succeeds.
+    settlement succeeds. As the one credentialed boundary it also owns the
+    provisioner seam (Phase 4): each ``inputs[]`` entry is materialized here —
+    after the approval resolves and the monthly gate passes, never earlier —
+    under one merged, incrementally-enforced byte budget.
     """
 
     def __init__(
         self,
         worker: AnalysisWorker,
-        inputs: InputStore,
+        provisioners: "list[Provisioner]",
         artifacts: ArtifactStore,
         *,
         attempts: AnalysisAttemptStore | None = None,
@@ -649,15 +674,19 @@ class SealedAnalysisOrchestrator:
         workspace_root: Path | None = None,
         report_max_bytes: int = 1_000_000,
         summary_lines: int = 12,
+        max_input_bytes: int = 32 * 1024 * 1024,
     ) -> None:
         self.worker = worker
-        self._inputs = inputs
+        self._provisioners: dict[str, Provisioner] = {
+            p.source: p for p in provisioners
+        }
         self._artifacts = artifacts
         self._attempts = attempts or InMemoryAnalysisAttemptStore()
         self._ledger = ledger
         self._workspace_root = workspace_root
         self.report_max_bytes = report_max_bytes
         self.summary_lines = summary_lines
+        self.max_input_bytes = max_input_bytes
 
     def per_task_usd_for(self, agent: str | None) -> float | None:
         return self._ledger.per_task_usd_for(agent) if self._ledger else None
@@ -770,20 +799,35 @@ class SealedAnalysisOrchestrator:
                 "automatic re-execution is refused pending reconciliation",
             )
 
-        # Fail-closed backstop behind the gateway's schema validation: args can
-        # also reach this boundary from persisted records (an approval or parked
-        # workflow written before a schema change) or from future direct
-        # callers, and a run without an instruction or an input reference must
-        # never reach the ledger, the input store, or a model. Deliberately
-        # after the attempt reconciliation above — settling already-observed
-        # spend is correct whatever the args look like.
-        if not state.instruction.strip():
-            return _failed(state, "analysis instruction is required")
-        if not state.input_ref.strip():
-            return _failed(state, "input_ref is required")
+        # The spend-boundary parse (typed-tool-args §3.5), replacing the old
+        # hand-written instruction/input_ref guard: args can also reach this
+        # boundary from persisted records (an approval or parked workflow
+        # written before a schema change) or from future direct callers, and a
+        # request that cannot execute must never reach the ledger, a
+        # provisioner, or a model. Deliberately after the attempt
+        # reconciliation above — settling already-observed spend is correct
+        # whatever the args look like. The version gate refuses records
+        # written under any other contract, including the NULL pre-version
+        # sentinel, instead of running over misinterpreted args.
+        if state.args_schema != ANALYSIS_ARGS_VERSION:
+            return _failed(
+                state,
+                "this analysis record predates args schema "
+                f"v{ANALYSIS_ARGS_VERSION}; please request the analysis again",
+            )
+        try:
+            request = ExecutableAnalysisRequest.model_validate(
+                {"instruction": state.instruction, "inputs": state.inputs}
+            )
+        except ValidationError as exc:
+            return _failed(
+                state,
+                "analysis request is not executable: "
+                f"{format_validation_error(exc)}",
+            )
 
-        # This gate precedes input-store access and workspace allocation. A
-        # monthly refusal must not provision data or start a model call.
+        # This gate precedes provisioning and workspace allocation. A monthly
+        # refusal must not fetch data or start a model call.
         try:
             if self._ledger is not None:
                 await self._ledger.check_monthly(state.agent, job_id=state.job_id)
@@ -791,12 +835,22 @@ class SealedAnalysisOrchestrator:
         except WorkerBudgetExceeded as exc:
             return _failed(state, str(exc))
 
-        manifest = await self._inputs.get(state.job_id, state.input_ref)
-        if manifest is None:
-            return _failed(
-                state,
-                "no staged input matches this job_id and input_ref",
+        # Provision each source through the seam, under one merged byte budget
+        # decremented before every fetch. Pre-model-call, so a crash-resume
+        # that re-provisions is safe; every failure is terminal and sanitized.
+        try:
+            files = await provision_inputs(
+                self._provisioners,
+                request.inputs,
+                RequestIdentity(
+                    job_id=state.job_id,
+                    scope_key=state.scope_key,
+                    agent=state.agent,
+                ),
+                max_total_bytes=self.max_input_bytes,
             )
+        except ProvisionError as exc:
+            return _failed(state, f"analysis input provisioning failed: {exc}")
 
         attempt, created = await self._attempts.begin(state.attempt_id, state.job_id)
         if not created:
@@ -813,7 +867,7 @@ class SealedAnalysisOrchestrator:
         )
         run: AnalysisRun | None = None
         try:
-            manifest.materialize(workspace / "inputs")
+            materialize_inputs(files, workspace / "inputs")
             (workspace / "outputs").mkdir()
             await step("materialize")
 
@@ -885,7 +939,6 @@ class SealedAnalysisOrchestrator:
             await step("store_artifact")
             return AnalysisResult(
                 job_id=state.job_id,
-                input_ref=state.input_ref,
                 attempt_id=state.attempt_id,
                 run=run,
                 artifact_ref=artifact_ref,
@@ -919,8 +972,18 @@ class AnalysisWorkerConnector:
     # below is the engine-less fallback through the same orchestrator.
     workflow = "analysis_worker"
 
-    def __init__(self, orchestrator: AnalysisAttemptRunner) -> None:
+    def __init__(
+        self,
+        orchestrator: AnalysisAttemptRunner,
+        *,
+        uploads: "UploadStore | None" = None,
+        available_sources: "set[str] | None" = None,
+    ) -> None:
         self.orchestrator = orchestrator
+        # Local metadata for the pre-approval resolution step. None means the
+        # deployment has no upload surface at all.
+        self.uploads = uploads
+        self.available_sources = available_sources or {"staged"}
 
     def supported_permissions(self) -> set[str]:
         return {ANALYSIS_REPORT_WRITE}
@@ -928,28 +991,19 @@ class AnalysisWorkerConnector:
     def describe(self, permission: str) -> ActionSpec:
         if permission != ANALYSIS_REPORT_WRITE:
             raise ValueError(f"unsupported analysis permission {permission!r}")
+        # The schema is GENERATED from the args model the gateway parses with,
+        # so what the model sees IS what parsing enforces — including the
+        # discriminated inputs union the subset validator cannot express.
         return ActionSpec(
             description=(
-                "Run sealed analysis over a pre-staged input reference and return "
-                "a report artifact reference. Requires human approval."
+                "Run sealed analysis over provisioned inputs — operator-staged "
+                "references, files shared in this conversation thread, or a "
+                "GitHub repository archive — and return a report artifact "
+                "reference. Requires human approval."
             ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "instruction": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "The analysis question to answer.",
-                    },
-                    "input_ref": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Reference to controller-staged input data.",
-                    },
-                },
-                "required": ["instruction", "input_ref"],
-                "additionalProperties": False,
-            },
+            parameters=AnalysisReportArgs.model_json_schema(),
+            model=AnalysisReportArgs,
+            version=ANALYSIS_ARGS_VERSION,
         )
 
     def prepare_args(
@@ -960,24 +1014,79 @@ class AnalysisWorkerConnector:
         *,
         warm_key: str | None = None,
     ) -> dict:
-        """Mint identity and strip anything other than Phase 1 safe fields.
+        """Mint identity on the parsed args — nothing here is caller-suppliable.
 
-        Creating a fresh dict is a backstop against direct API callers smuggling
-        raw data into the approval/workflow record through unknown fields.
-        ``warm_key`` is intentionally irrelevant: Phase 1 has no durable
-        workspace reuse and must not retain provisioned data between runs.
+        Runs AFTER the gateway's typed parse, so ``args`` holds exactly the
+        model-facing contract; building a fresh dict is the backstop against
+        anything else riding into the durable record. ``job_id``/``attempt_id``
+        are always freshly minted (an args-supplied job_id used to be a soft
+        binding hole; staged access is a capability ref now, so job identity
+        is purely run identity). ``warm_key`` is the requesting thread's
+        ownership-tuple key (`thread_scope_key`), stamped as the request scope
+        that upload provisioning is checked against — model-supplied scope
+        would void upload scoping, and scopeless paths stamp None.
         """
         if permission != ANALYSIS_REPORT_WRITE:
             return args
         return {
-            "job_id": args.get("job_id") or uuid.uuid4().hex,
-            "attempt_id": args.get("attempt_id") or uuid.uuid4().hex,
-            "instruction": str(args.get("instruction") or "").strip(),
-            "input_ref": (
-                args.get("input_ref") if isinstance(args.get("input_ref"), str) else ""
-            ),
+            "instruction": str(args.get("instruction") or ""),
+            "inputs": list(args.get("inputs") or []),
+            "job_id": uuid.uuid4().hex,
+            "attempt_id": uuid.uuid4().hex,
             "agent": agent.metadata.name if agent is not None else None,
+            "scope_key": warm_key,
         }
+
+    async def resolve_args(
+        self, permission: str, args: dict
+    ) -> tuple[dict, str | None]:
+        """Pre-approval, LOCAL-ONLY resolution of upload references.
+
+        A DB read, never a surface fetch — approve-before-work holds. Verifies
+        each upload against the trusted thread scope stamped in
+        ``prepare_args`` and stamps display metadata (``upload_meta``) so the
+        approval card can truthfully name the file; the model only ever knew
+        the opaque ref. A violation refuses at invoke time — a human is never
+        asked to approve a request policy forbids. The provisioner re-checks
+        scope post-approval (TOCTOU).
+        """
+        if permission != ANALYSIS_REPORT_WRITE:
+            return args, None
+        inputs = args.get("inputs") or []
+        for entry in inputs:
+            source = entry.get("source") if isinstance(entry, dict) else None
+            if source not in self.available_sources:
+                return args, (
+                    f"input source {source!r} is not available in this "
+                    "deployment"
+                )
+        upload_meta: dict[str, dict] = {}
+        scope = args.get("scope_key")
+        for entry in inputs:
+            if entry.get("source") != "upload":
+                continue
+            if self.uploads is None:
+                return args, "upload inputs are not available in this deployment"
+            if not scope:
+                # /tools/invoke and other scopeless paths stamp no surface
+                # scope; the direct API provisions via `staged`, never uploads.
+                return args, (
+                    "upload inputs are only usable from the conversation "
+                    "thread the file was shared in"
+                )
+            ref = entry.get("upload_ref") or ""
+            record = await self.uploads.get(ref)
+            # Unknown ref and wrong thread share one message: whether a file
+            # id exists in another thread must not leak here.
+            if record is None or record.scope_key != scope:
+                return args, (
+                    f"no shared file {ref!r} is available in this "
+                    "conversation thread"
+                )
+            upload_meta[ref] = {"name": record.name, "size": record.size}
+        if upload_meta:
+            args = {**args, "upload_meta": upload_meta}
+        return args, None
 
     async def execute(self, permission: str, args: dict) -> ToolResult:
         if permission != ANALYSIS_REPORT_WRITE:
@@ -986,22 +1095,7 @@ class AnalysisWorkerConnector:
         # approval request. Do not call it again here: doing so without the
         # trusted Agent object would erase the stamped invoking identity and
         # misattribute spend after approval.
-        job_id = args.get("job_id") or uuid.uuid4().hex
-        attempt_id = args.get("attempt_id") or uuid.uuid4().hex
-        input_ref = args.get("input_ref") if isinstance(args.get("input_ref"), str) else ""
-        instruction = str(args.get("instruction") or "").strip()
-        agent = args.get("agent") if isinstance(args.get("agent"), str) else None
-        state = AnalysisState(
-            job_id=str(job_id),
-            input_ref=input_ref,
-            instruction=instruction,
-            agent=agent,
-            attempt_id=str(attempt_id),
-        )
-        if not state.instruction:
-            return _tool_failure(_failed(state, "analysis instruction is required"))
-        if not state.input_ref:
-            return _tool_failure(_failed(state, "input_ref is required"))
+        state = _state_from_record(args)
         try:
             result = await self.orchestrator.run_analysis(state)
         except Exception as exc:  # connector boundary: never leak an exception past approval
@@ -1015,12 +1109,31 @@ class AnalysisWorkerConnector:
         )
 
 
+def _state_from_record(record: dict) -> AnalysisState:
+    """Identity-lenient state from a persisted record (approval args or
+    workflow state).
+
+    Never raises on garbage — attempt reconciliation must be reachable for any
+    record shape; executability is the orchestrator's re-parse."""
+    inputs = record.get("inputs")
+    scope_key = record.get("scope_key")
+    args_schema = record.get("args_schema")
+    return AnalysisState(
+        job_id=str(record.get("job_id") or uuid.uuid4().hex),
+        instruction=str(record.get("instruction") or ""),
+        inputs=list(inputs) if isinstance(inputs, list) else [],
+        agent=record.get("agent") if isinstance(record.get("agent"), str) else None,
+        scope_key=scope_key if isinstance(scope_key, str) else None,
+        args_schema=args_schema if isinstance(args_schema, int) else None,
+        attempt_id=str(record.get("attempt_id") or uuid.uuid4().hex),
+    )
+
+
 def _failed(
     state: AnalysisState, error: str, *, run: AnalysisRun | None = None
 ) -> AnalysisResult:
     return AnalysisResult(
         job_id=state.job_id,
-        input_ref=state.input_ref,
         attempt_id=state.attempt_id,
         run=run,
         error=error,

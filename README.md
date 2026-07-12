@@ -256,8 +256,9 @@ once, then run the socket:
 1. **Enable Socket Mode** and generate an app-level token with the
    `connections:write` scope → this is your `SLACK_APP_TOKEN` (`xapp-…`).
 2. **Add bot OAuth scopes** (OAuth & Permissions → Bot Token Scopes):
-   `chat:write`, `app_mentions:read`, `channels:history`, and `files:write`
-   (long answers, diffs, and logs are delivered as hosted snippets). For private
+   `chat:write`, `app_mentions:read`, `channels:history`, `files:read`, and
+   `files:write` (`files:read` lazily provisions approved thread uploads into
+   sealed analysis; long answers, diffs, and logs use hosted snippets). For private
    channels and DMs, also add `groups:history`, `im:history`, `mpim:history`.
 3. **Subscribe to bot events** (Event Subscriptions → Subscribe to bot events) —
    Slack only delivers events you subscribe to:
@@ -344,7 +345,7 @@ reinstall to get an `xoxp-…` token:
 
 ```bash
 export E2E_LIVE=1
-export SLACK_BOT_TOKEN=xoxb-…         # chat:write, app_mentions:read, channels:history
+export SLACK_BOT_TOKEN=xoxb-…         # plus files:read/files:write for analysis artifacts
 export SLACK_APP_TOKEN=xapp-…         # connections:write, Socket Mode enabled
 export E2E_SLACK_USER_TOKEN=xoxp-…    # user-token chat:write — posts the mention
 export E2E_SLACK_CHANNEL=C0…          # a channel the bot and that user are both in
@@ -410,7 +411,7 @@ the workflow.
   leader that dies mid-sweep is healed by a survivor. `LOCK_BACKEND=auto` (default)
   uses Postgres advisory locks when the deploy already runs Postgres — no extra
   service — with Redis and process-local backends also available
-- [x] Sealed analysis worker (Phases 0–3) — open-ended, model-authored Python
+- [x] Sealed analysis worker (Phases 0–4) — open-ended, model-authored Python
   over controller-provisioned data in a sealed sandbox: `--network none`, no
   env/credentials, read-only rootfs + inputs, resource caps, and a
   self-enforcing wall-clock deadline (`timeout` as PID 1, controller kill as
@@ -425,7 +426,12 @@ the workflow.
   regardless: at most `ANALYSIS_WORKER_MAX_ITERATIONS` completions per
   human-approved attempt; `ANALYSIS_WORKER_REQUIRE_PER_TASK_CAP=1` opts into
   the hard require-a-cap boot gate); `ANALYSIS_WORKER_STRATEGY=single` opts
-  down to one completion + one sealed run with no execution feedback.
+  down to one completion + one sealed run with no execution feedback. Phase 4
+  adds typed/versioned native-tool args and a post-approval provisioner seam:
+  manifests can merge capability-token staged inputs, thread-scoped Slack
+  uploads fetched lazily after approval, and credentialed GitHub archives under
+  one incrementally enforced byte budget; the sealed worker still sees only
+  flat, read-only input files and never receives a credential or network.
   `ANALYSIS_WORKER_ENABLED=1` (docker-only, fails closed)
 - [ ] Hardening for full production parity — more surface adapters and an explicit
   model-call replay/caching policy

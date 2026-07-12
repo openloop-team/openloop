@@ -26,6 +26,11 @@ class ApprovalRequest:
     requested_by: str | None = None
     status: str = "pending"  # pending | approved | denied
     decided_by: str | None = None
+    # The per-action args-contract version the args were parsed under
+    # (ActionSpec.version), stamped at creation. None is the pre-version
+    # sentinel: a version-checking consumer must refuse it, so a record written
+    # before versioning existed can never be mislabeled current.
+    args_schema: int | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)

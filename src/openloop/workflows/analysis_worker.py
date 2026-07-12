@@ -72,11 +72,19 @@ def build_analysis_worker_workflow(orchestrator: AnalysisAttemptRunner) -> Workf
         s = ctx.state
         state = AnalysisState(
             job_id=s["job_id"],
-            input_ref=s.get("input_ref") or "",
             instruction=s.get("instruction") or "",
+            # Parsed-and-dumped inputs[] entries; the orchestrator re-parses
+            # them through the current args contract before any spend.
+            inputs=s.get("inputs") or [],
             # The invoking agent, stamped into the approval args by
             # prepare_args — the ledger attributes spend to it.
             agent=s.get("agent"),
+            # The trusted thread-ownership scope upload provisioning re-checks.
+            scope_key=s.get("scope_key"),
+            # The args-contract version the record was written under; a parked
+            # instance from before versioning lacks the key (None) and is
+            # refused by the orchestrator instead of run over misread args.
+            args_schema=s.get("args_schema"),
             # Minted before approval; the durable attempt key that makes a
             # re-driven step accounting-safe instead of a free re-execution.
             attempt_id=s.get("attempt_id"),
@@ -106,7 +114,6 @@ def build_analysis_worker_workflow(orchestrator: AnalysisAttemptRunner) -> Workf
         ctx.instance.result = {
             "job_id": s["job_id"],
             "status": "reported",
-            "input_ref": s.get("input_ref"),
             "attempt_id": s.get("attempt_id"),
             # The session runner recognizes this shape, dereferences the ref
             # from the artifact store, and posts the report as an Artifact

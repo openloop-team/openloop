@@ -48,8 +48,9 @@ _ARGS = {
     "job_id": "job-1",
     "attempt_id": "attempt-1",
     "instruction": "summarize the sales data",
-    "input_ref": "upload:one",
+    "inputs": [{"source": "staged", "input_ref": "staged:one"}],
     "agent": "dev-platform",
+    "args_schema": 1,
 }
 
 
@@ -141,8 +142,11 @@ async def test_stale_record_with_empty_instruction_fails_closed_at_run_time():
         async def run(self, workspace, state, on_step=None, on_charge=None):
             raise AssertionError("a run without an instruction must never execute")
 
+    from openloop.analysis import StagedProvisioner
+
     orch = SealedAnalysisOrchestrator(
-        _NeverRunsWorker(), InMemoryInputStore(), InMemoryArtifactStore()
+        _NeverRunsWorker(), [StagedProvisioner(InMemoryInputStore())],
+        InMemoryArtifactStore(),
     )
     engine = _engine(orch)
     await engine.start(
@@ -152,7 +156,7 @@ async def test_stale_record_with_empty_instruction_fails_closed_at_run_time():
     done = await engine.send_event("job-stale", "await_approval", {})
 
     assert done.status == "failed"
-    assert "instruction is required" in done.error
+    assert "not executable" in done.error
 
 
 async def test_gateway_approval_event_drives_analysis_workflow():
@@ -164,7 +168,8 @@ async def test_gateway_approval_event_drives_analysis_workflow():
     inv = await tools.invoke(
         agent,
         "analysis.report:write",
-        {"instruction": "summarize the sales data", "input_ref": "upload:one"},
+        {"instruction": "summarize the sales data",
+         "inputs": [{"source": "staged", "input_ref": "staged:one"}]},
     )
 
     assert inv.status == "pending_approval"
@@ -192,7 +197,8 @@ async def test_denied_approval_cancels_parked_analysis_workflow():
     inv = await tools.invoke(
         _agent(),
         "analysis.report:write",
-        {"instruction": "summarize the sales data", "input_ref": "upload:one"},
+        {"instruction": "summarize the sales data",
+         "inputs": [{"source": "staged", "input_ref": "staged:one"}]},
     )
     job_id = inv.approval.args["job_id"]
 

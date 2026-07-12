@@ -43,6 +43,13 @@ class PostgresApprovalStore:
                 )
                 """
             )
+            # Migration for rows created before args-contract versioning
+            # (same idiom as surface_threads' later columns). NULL doubles as
+            # the pre-version sentinel version-checking consumers refuse.
+            await conn.execute(
+                "ALTER TABLE approvals "
+                "ADD COLUMN IF NOT EXISTS args_schema INTEGER"
+            )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS approvals_status_idx "
                 "ON approvals (status, agent)"
@@ -65,9 +72,10 @@ class PostgresApprovalStore:
                 """
                 INSERT INTO approvals (
                     id, agent, action, tool, permission, args, approvers,
-                    summary, requested_by, status, decided_by, created_at
+                    summary, requested_by, status, decided_by, args_schema,
+                    created_at
                 )
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                 """,
                 request.id,
                 request.agent,
@@ -80,6 +88,7 @@ class PostgresApprovalStore:
                 request.requested_by,
                 request.status,
                 request.decided_by,
+                request.args_schema,
                 request.created_at,
             )
 
@@ -131,5 +140,6 @@ def _row_to_request(row) -> ApprovalRequest:
         requested_by=row["requested_by"],
         status=row["status"],
         decided_by=row["decided_by"],
+        args_schema=row["args_schema"],
         created_at=row["created_at"] or datetime.now(timezone.utc),
     )

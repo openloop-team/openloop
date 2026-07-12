@@ -17,10 +17,21 @@ class ToolResult:
 
 @dataclass(slots=True)
 class ActionSpec:
-    """Describes an action to the model: a description + JSON-schema args."""
+    """Describes an action to the model: a description + JSON-schema args.
+
+    A typed action (docs/typed-tool-args.md §3) additionally names the pydantic
+    ``model`` its ``parameters`` were GENERATED from — the gateway then parses
+    raw args through it before anything durable exists — and the integer
+    ``version`` of that args contract, stamped onto durable records so a
+    consumer can refuse a record written under an older contract. Both stay
+    ``None`` for untyped actions (MCP passthrough), which keep the permissive
+    subset validation of :func:`validate_args`.
+    """
 
     description: str
     parameters: dict
+    model: type | None = None
+    version: int | None = None
 
 
 @dataclass(slots=True)
@@ -55,6 +66,21 @@ def split_action(action: str) -> tuple[str, str]:
     if not tool or not permission:
         raise ValueError(f"malformed action {action!r}; expected '<tool>.<perm>'")
     return tool, permission
+
+
+def format_validation_error(exc) -> str:
+    """One human/model-readable line from a pydantic ``ValidationError``.
+
+    Keeps the field path so the model can correct the exact argument, and drops
+    pydantic's ``url``/input echoes — raw input values must not round-trip into
+    an error message that gets persisted or shown to an approver.
+    """
+    problems = []
+    for error in exc.errors(include_url=False, include_input=False):
+        loc = ".".join(str(part) for part in error.get("loc", ()))
+        msg = error.get("msg", "invalid value")
+        problems.append(f"{loc}: {msg}" if loc else msg)
+    return "; ".join(problems) or "invalid arguments"
 
 
 # The JSON-schema primitive types our validator understands. Anything else

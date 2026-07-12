@@ -53,7 +53,7 @@ def test_stage_files_builds_manifest_and_prints_the_invocation(
     (tmp_path / "regions.csv").write_text("region\nwest\n")
 
     rc = main([
-        "analysis", "stage", "--job-id", "job-9", "--input-ref", "upload:q2",
+        "analysis", "stage",
         str(tmp_path / "sales.csv"), str(tmp_path / "regions.csv"),
     ])
 
@@ -61,13 +61,16 @@ def test_stage_files_builds_manifest_and_prints_the_invocation(
     (store,) = fake_store.instances
     assert store.setup_called and store.closed
     (manifest,) = store.staged
-    assert manifest.job_id == "job-9"
-    assert manifest.input_ref == "upload:q2"
+    # The capability ref is generated (high-entropy), not operator-chosen.
+    assert manifest.input_ref.startswith("staged:")
+    assert len(manifest.input_ref) > len("staged:") + 20
     assert [f.name for f in manifest.files] == ["sales.csv", "regions.csv"]
     out = capsys.readouterr().out
-    # The follow-up invocation is ready to paste, carrying both identifiers.
-    assert '"input_ref": "upload:q2"' in out
-    assert '"job_id": "job-9"' in out
+    # The follow-up invocation is ready to paste with the generated ref in the
+    # new inputs shape, and no job_id (a caller can't bind one).
+    assert f'"input_ref": "{manifest.input_ref}"' in out
+    assert '"source": "staged"' in out
+    assert '"job_id"' not in out
     assert "analysis.report:write" in out
 
 
@@ -85,12 +88,12 @@ def test_stage_archive_stages_one_tarball_of_committed_content(
     (tmp_path / "uncommitted.txt").write_text("not in HEAD\n")
 
     rc = main([
-        "analysis", "stage", "--job-id", "job-1", "--input-ref", "repo:demo",
-        "--archive", str(tmp_path),
+        "analysis", "stage", "--archive", str(tmp_path),
     ])
 
     assert rc == 0
     (manifest,) = fake_store.instances[0].staged
+    assert manifest.input_ref.startswith("staged:")
     (file,) = manifest.files
     assert file.name == f"{tmp_path.name}.tar"
     members = tarfile.open(fileobj=io.BytesIO(file.content)).getnames()
@@ -106,7 +109,7 @@ def test_stage_refuses_the_process_local_backend(monkeypatch, tmp_path, capsys):
     (tmp_path / "data.csv").write_text("x\n")
 
     rc = main([
-        "analysis", "stage", "--job-id", "j", "--input-ref", "r",
+        "analysis", "stage",
         str(tmp_path / "data.csv"),
     ])
 
@@ -115,7 +118,7 @@ def test_stage_refuses_the_process_local_backend(monkeypatch, tmp_path, capsys):
 
 
 def test_stage_with_nothing_to_stage_errors(capsys):
-    rc = main(["analysis", "stage", "--job-id", "j", "--input-ref", "r"])
+    rc = main(["analysis", "stage"])
 
     assert rc == 1
     assert "nothing to stage" in capsys.readouterr().err
@@ -128,7 +131,7 @@ def test_stage_rejects_duplicate_bare_names(tmp_path, fake_store, capsys):
     (tmp_path / "b" / "data.csv").write_text("y\n")
 
     rc = main([
-        "analysis", "stage", "--job-id", "j", "--input-ref", "r",
+        "analysis", "stage",
         str(tmp_path / "a" / "data.csv"), str(tmp_path / "b" / "data.csv"),
     ])
 
@@ -139,7 +142,7 @@ def test_stage_rejects_duplicate_bare_names(tmp_path, fake_store, capsys):
 
 def test_stage_missing_file_errors(tmp_path, fake_store, capsys):
     rc = main([
-        "analysis", "stage", "--job-id", "j", "--input-ref", "r",
+        "analysis", "stage",
         str(tmp_path / "absent.csv"),
     ])
 

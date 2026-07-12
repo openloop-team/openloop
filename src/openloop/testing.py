@@ -228,7 +228,6 @@ class FakeAnalysisOrchestrator:
         if self.error is not None:
             return AnalysisResult(
                 job_id=state.job_id,
-                input_ref=state.input_ref,
                 attempt_id=state.attempt_id,
                 error=self.error,
             )
@@ -252,7 +251,6 @@ class FakeAnalysisOrchestrator:
         )
         return AnalysisResult(
             job_id=state.job_id,
-            input_ref=state.input_ref,
             attempt_id=state.attempt_id,
             run=run,
             artifact_ref=ref,

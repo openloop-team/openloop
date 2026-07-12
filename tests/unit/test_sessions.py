@@ -438,7 +438,9 @@ def _analysis_runner(*, orch=None, threads=None, responses=None):
                     "m",
                     [("c1", "analysis_report_write",
                       {"instruction": "summarize the sales data",
-                       "input_ref": "upload:one"})],
+                       "inputs": [
+                           {"source": "staged", "input_ref": "staged:one"}
+                       ]})],
                 ),
             ]
         ),
@@ -516,7 +518,9 @@ async def test_analysis_failure_continues_via_model_like_any_tool_failure():
                 "m",
                 [("c1", "analysis_report_write",
                   {"instruction": "summarize the sales data",
-                   "input_ref": "upload:one"})],
+                   "inputs": [
+                       {"source": "staged", "input_ref": "staged:one"}
+                   ]})],
             ),
             ModelResponse(text="The analysis could not run: no staged input.", model="m"),
         ],

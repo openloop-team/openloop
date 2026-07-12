@@ -53,6 +53,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
 from openloop.checkpoints.store import CheckpointStore, WorkerCheckpoint
 from openloop.credentials import CredentialResolver, CredentialScope
 from openloop.tools.base import ActionSpec, ToolResult
@@ -94,13 +96,34 @@ class WorkerRunAborted(RuntimeError):
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
 
-_REPO = {
-    "type": "string",
-    "minLength": 1,
-    "description": "owner/repo, e.g. acme/ingestion",
-}
 CODING_WORKER_TOOL_NAME = "coding_worker"
 CODING_WORKER_PR_WRITE = "pr:write"
+CODING_WORKER_ARGS_VERSION = 1
+
+
+class CodingWorkerPrArgs(BaseModel):
+    """Model-facing args for ``coding_worker.pr:write`` (typed-tool-args §3).
+
+    The declared schema is generated from this model and the gateway parses
+    raw args through it, so normalization (strip) and constraints live in one
+    artifact. Identity (job_id, agent, warm_key) is gateway-stamped after the
+    parse and never appears here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    repo: str = Field(min_length=1, description="owner/repo, e.g. acme/ingestion")
+    instruction: str = Field(
+        min_length=1, description="what change the worker should make"
+    )
+    base: str | None = Field(
+        default=None, description="branch to open the PR against (default main)"
+    )
+
+    @field_validator("repo", "instruction", mode="before")
+    @classmethod
+    def _strip(cls, value):
+        return value.strip() if isinstance(value, str) else value
 
 # Named steps one attempt walks through. The orchestrator owns the git-side
 # steps (clone, branch, commit, push); the worker reports its own ("edit").
@@ -321,12 +344,9 @@ class CodingWorkerConnector:
         """
         if permission != CODING_WORKER_PR_WRITE:
             return args
-        # Canonicalize before the gateway validates the prepared args against
-        # the declared schema: a whitespace-only repo/instruction becomes ""
-        # so the schema's minLength actually rejects it.
-        for key in ("repo", "instruction"):
-            if isinstance(args.get(key), str):
-                args = {**args, key: args[key].strip()}
+        # Normalization (strip) now lives in CodingWorkerPrArgs' validators —
+        # the gateway parses raw args through it before calling here, so this
+        # method only stamps identity.
         if not args.get("job_id"):
             args = {**args, "job_id": uuid.uuid4().hex[:12]}
         if agent is not None:
@@ -336,26 +356,15 @@ class CodingWorkerConnector:
         return args
 
     def describe(self, permission: str) -> ActionSpec:
+        # Generated from the args model the gateway parses with — declaration
+        # and enforcement cannot drift.
         return ActionSpec(
             "Run the coding worker on an instruction and open a draft pull "
             "request with its changes. This starts the worker and opens a draft "
             "PR for review; it does not merge.",
-            {
-                "type": "object",
-                "properties": {
-                    "repo": _REPO,
-                    "instruction": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "what change the worker should make",
-                    },
-                    "base": {
-                        "type": "string",
-                        "description": "branch to open the PR against (default main)",
-                    },
-                },
-                "required": ["repo", "instruction"],
-            },
+            CodingWorkerPrArgs.model_json_schema(),
+            model=CodingWorkerPrArgs,
+            version=CODING_WORKER_ARGS_VERSION,
         )
 
     async def execute(self, permission: str, args: dict) -> ToolResult:

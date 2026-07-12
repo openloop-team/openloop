@@ -185,8 +185,13 @@ class Task:
     history: list[dict[str, str]] = field(default_factory=list)
     # The requesting thread's durable scope key (Phase B). Set by the session
     # runner for threaded turns; threaded down to a workflow-backed tool so it can
-    # reuse the thread's warm execution context. None for non-threaded turns.
+    # reuse the thread's warm execution context — and, since Phase 4, stamped by
+    # the gateway as the trusted request scope upload provisioning is checked
+    # against. None for non-threaded turns.
     thread_key: str | None = None
+    # Trusted surrounding context the surface/runner supplies (e.g. the
+    # thread's shared-file inventory), rendered as one system message.
+    context_notes: list[str] = field(default_factory=list)
 
 
 class Runtime:
@@ -246,6 +251,10 @@ class Runtime:
                         "(most relevant first):\n" + bullets
                     ),
                 }
+            )
+        if task.context_notes:
+            messages.append(
+                {"role": "system", "content": "\n\n".join(task.context_notes)}
             )
         messages.extend(task.history)
         messages.append({"role": "user", "content": task.text})
@@ -700,6 +709,11 @@ def _task_to_dict(task: Task) -> dict:
         "user": task.user,
         "kind": task.kind,
         "history": task.history,
+        # thread_key must survive the durable round-trip: the workflow path
+        # re-hydrates the task before running the tool loop, and the gateway's
+        # warm-context reuse AND the analysis upload scope stamp both ride it.
+        "thread_key": task.thread_key,
+        "context_notes": task.context_notes,
     }
 
 
@@ -711,6 +725,8 @@ def _task_from_dict(data: dict) -> Task:
         user=data.get("user"),
         kind=data.get("kind"),
         history=data.get("history", []),
+        thread_key=data.get("thread_key"),
+        context_notes=data.get("context_notes", []),
     )
 
 

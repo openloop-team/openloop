@@ -8,24 +8,25 @@ from openloop.analysis import (
     InMemoryInputStore,
     InputFile,
     InputManifest,
+    materialize_inputs,
 )
 
 
-async def test_input_manifest_is_job_and_ref_scoped_and_materializes(tmp_path):
+async def test_input_manifest_is_ref_scoped_and_materializes(tmp_path):
     store = InMemoryInputStore()
     manifest = InputManifest(
-        job_id="job-1",
-        input_ref="upload:abc",
+        input_ref="staged:abc",
         files=(InputFile("sales.csv", b"amount\n42\n"),),
     )
     await store.stage(manifest)
 
-    assert await store.get("job-1", "other") is None
-    restored = await store.get("job-1", "upload:abc")
+    # Lookup is job-agnostic — possession of the ref is the authorization.
+    assert await store.get("staged:other") is None
+    restored = await store.get("staged:abc")
     assert restored == manifest
 
     destination = tmp_path / "inputs"
-    restored.materialize(destination)
+    materialize_inputs(restored.files, destination)
     assert (destination / "sales.csv").read_bytes() == b"amount\n42\n"
 
 
