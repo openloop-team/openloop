@@ -8,20 +8,14 @@ from datetime import datetime, timezone
 
 from openloop.analysis.store import AnalysisArtifact, AnalysisAttempt, InputFile, InputManifest
 from openloop.analysis.uploads import UploadRecord
+from openloop.postgres import BorrowedPostgresStore
 
 
-class PostgresInputStore:
+class PostgresInputStore(BorrowedPostgresStore):
     """Durable operator-staged inputs, one manifest per capability ref."""
 
-    def __init__(self, dsn: str) -> None:
-        self.dsn = dsn
-        self._pool = None
-
-    async def setup(self) -> None:
-        import asyncpg
-
-        self._pool = await asyncpg.create_pool(self.dsn)
-        async with self._pool.acquire() as conn:
+    async def setup(self, pool) -> None:
+        async with self._setup_connection(pool) as conn:
             # Phase 4 rekeyed staging on the capability ref. Staged inputs are
             # short-lived operator artifacts, so the job-keyed Phase 1 table
             # is dropped, not migrated — anything in it must be re-staged.
@@ -36,16 +30,6 @@ class PostgresInputStore:
                 )
                 """
             )
-
-    async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
-
-    def _require_pool(self):
-        if self._pool is None:
-            raise RuntimeError("PostgresInputStore.setup() must be called first")
-        return self._pool
 
     async def stage(self, manifest: InputManifest) -> None:
         pool = self._require_pool()
@@ -94,19 +78,12 @@ class PostgresInputStore:
         )
 
 
-class PostgresUploadStore:
+class PostgresUploadStore(BorrowedPostgresStore):
     """Durable surface-upload metadata (never bytes — staging is lazy)."""
 
-    def __init__(self, dsn: str) -> None:
-        self.dsn = dsn
-        self._pool = None
-
-    async def setup(self) -> None:
-        import asyncpg
-
-        self._pool = await asyncpg.create_pool(self.dsn)
+    async def setup(self, pool) -> None:
         try:
-            async with self._pool.acquire() as conn:
+            async with self._setup_connection(pool) as conn:
                 await conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS analysis_uploads (
@@ -127,16 +104,6 @@ class PostgresUploadStore:
         except BaseException:
             await self.close()
             raise
-
-    async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
-
-    def _require_pool(self):
-        if self._pool is None:
-            raise RuntimeError("PostgresUploadStore.setup() must be called first")
-        return self._pool
 
     async def record(self, upload: UploadRecord) -> None:
         pool = self._require_pool()
@@ -199,24 +166,17 @@ def _row_to_upload(row) -> UploadRecord:
     )
 
 
-class PostgresArtifactStore:
+class PostgresArtifactStore(BorrowedPostgresStore):
     """Durable report artifacts, overwritten idempotently by job identity."""
 
     _REF_PREFIX = "analysis://"
-
-    def __init__(self, dsn: str) -> None:
-        self.dsn = dsn
-        self._pool = None
 
     @classmethod
     def ref_for(cls, job_id: str) -> str:
         return f"{cls._REF_PREFIX}{job_id}/report.md"
 
-    async def setup(self) -> None:
-        import asyncpg
-
-        self._pool = await asyncpg.create_pool(self.dsn)
-        async with self._pool.acquire() as conn:
+    async def setup(self, pool) -> None:
+        async with self._setup_connection(pool) as conn:
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS analysis_artifacts (
@@ -228,16 +188,6 @@ class PostgresArtifactStore:
                 )
                 """
             )
-
-    async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
-
-    def _require_pool(self):
-        if self._pool is None:
-            raise RuntimeError("PostgresArtifactStore.setup() must be called first")
-        return self._pool
 
     async def put(self, job_id: str, body: bytes) -> str:
         pool = self._require_pool()
@@ -279,19 +229,12 @@ class PostgresArtifactStore:
         )
 
 
-class PostgresAnalysisAttemptStore:
+class PostgresAnalysisAttemptStore(BorrowedPostgresStore):
     """Durable analysis attempt accounting, separate from report artifacts."""
 
-    def __init__(self, dsn: str) -> None:
-        self.dsn = dsn
-        self._pool = None
-
-    async def setup(self) -> None:
-        import asyncpg
-
-        self._pool = await asyncpg.create_pool(self.dsn)
+    async def setup(self, pool) -> None:
         try:
-            async with self._pool.acquire() as conn:
+            async with self._setup_connection(pool) as conn:
                 await conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS analysis_attempts (
@@ -315,19 +258,9 @@ class PostgresAnalysisAttemptStore:
                 )
         except BaseException:
             # The app may replace a setup-failed store before shutdown sees it;
-            # setup therefore owns cleanup of a pool it successfully opened.
+            # detach from the borrowed pool immediately.
             await self.close()
             raise
-
-    async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
-
-    def _require_pool(self):
-        if self._pool is None:
-            raise RuntimeError("PostgresAnalysisAttemptStore.setup() must be called first")
-        return self._pool
 
     async def begin(self, attempt_id: str, job_id: str) -> tuple[AnalysisAttempt, bool]:
         pool = self._require_pool()

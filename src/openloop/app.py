@@ -61,6 +61,7 @@ from openloop.coordination import (
 )
 from openloop.memory import Embedder, InMemoryStore, LiteLLMEmbedder, MemoryStore
 from openloop.memory.postgres import PostgresMemoryStore
+from openloop.postgres import create_pool
 from openloop.runtime import Runtime
 from openloop.sessions import (
     InMemorySurfaceSessionStore,
@@ -136,79 +137,77 @@ def build_embedder(settings: Settings) -> Embedder | None:
 def build_memory_store(settings: Settings) -> MemoryStore:
     """Pick a memory backend. Postgres setup happens at startup."""
     if settings.memory_backend == "postgres":
-        return PostgresMemoryStore(
-            settings.database_url, embedding_dim=settings.embedding_dim
-        )
+        return PostgresMemoryStore(embedding_dim=settings.embedding_dim)
     return InMemoryStore()
 
 
 def build_usage_store(settings: Settings) -> UsageStore:
     """Pick a usage/audit backend. Postgres setup happens at startup."""
     if settings.memory_backend == "postgres":
-        return PostgresUsageStore(settings.database_url)
+        return PostgresUsageStore()
     return InMemoryUsageStore()
 
 
 def build_approval_store(settings: Settings) -> ApprovalStore:
     """Pick an approval backend. Postgres setup happens at startup."""
     if settings.memory_backend == "postgres":
-        return PostgresApprovalStore(settings.database_url)
+        return PostgresApprovalStore()
     return InMemoryApprovalStore()
 
 
 def build_checkpoint_store(settings: Settings) -> CheckpointStore:
     """Pick a worker-checkpoint backend. Postgres setup happens at startup."""
     if settings.memory_backend == "postgres":
-        return PostgresCheckpointStore(settings.database_url)
+        return PostgresCheckpointStore()
     return InMemoryCheckpointStore()
 
 
 def build_workflow_store(settings: Settings) -> WorkflowStore:
     """Pick a workflow-instance backend. Postgres setup happens at startup."""
     if settings.memory_backend == "postgres":
-        return PostgresWorkflowStore(settings.database_url)
+        return PostgresWorkflowStore()
     return InMemoryWorkflowStore()
 
 
 def build_surface_session_store(settings: Settings) -> SurfaceSessionStore:
     """Pick a surface-session backend (Phase D). Postgres setup at startup."""
     if settings.memory_backend == "postgres":
-        return PostgresSurfaceSessionStore(settings.database_url)
+        return PostgresSurfaceSessionStore()
     return InMemorySurfaceSessionStore()
 
 
 def build_thread_record_store(settings: Settings) -> ThreadRecordStore:
     """Pick a thread-record backend (Phase A). Postgres setup at startup."""
     if settings.memory_backend == "postgres":
-        return PostgresThreadRecordStore(settings.database_url)
+        return PostgresThreadRecordStore()
     return InMemoryThreadRecordStore()
 
 
 def build_analysis_input_store(settings: Settings) -> InputStore:
     """Pick the capability-ref-keyed sealed-analysis staging store."""
     if settings.memory_backend == "postgres":
-        return PostgresInputStore(settings.database_url)
+        return PostgresInputStore()
     return InMemoryInputStore()
 
 
 def build_analysis_artifact_store(settings: Settings) -> ArtifactStore:
     """Pick the job-keyed sealed-analysis artifact store."""
     if settings.memory_backend == "postgres":
-        return PostgresArtifactStore(settings.database_url)
+        return PostgresArtifactStore()
     return InMemoryArtifactStore()
 
 
 def build_analysis_attempt_store(settings: Settings) -> AnalysisAttemptStore:
     """Pick the durable spend-attempt state store for sealed analysis."""
     if settings.memory_backend == "postgres":
-        return PostgresAnalysisAttemptStore(settings.database_url)
+        return PostgresAnalysisAttemptStore()
     return InMemoryAnalysisAttemptStore()
 
 
 def build_analysis_upload_store(settings: Settings) -> UploadStore:
     """Pick the thread-scoped surface-upload metadata store (Phase 4)."""
     if settings.memory_backend == "postgres":
-        return PostgresUploadStore(settings.database_url)
+        return PostgresUploadStore()
     return InMemoryUploadStore()
 
 
@@ -957,27 +956,50 @@ def create_app() -> FastAPI:
         nonlocal analysis_uploads
         recovery_task: asyncio.Task | None = None
         warm_sweep_task: asyncio.Task | None = None
-        if isinstance(store, PostgresMemoryStore):
+        postgres_pool = None
+        if settings.memory_backend == "postgres":
             try:
-                await store.setup()
-                log.info("memory backend: postgres (pgvector)")
+                postgres_pool = await create_pool(
+                    settings.database_url,
+                    min_size=settings.postgres_pool_min_size,
+                    max_size=settings.postgres_pool_max_size,
+                )
+                log.info(
+                    "postgres shared pool ready (min=%d, max=%d)",
+                    settings.postgres_pool_min_size,
+                    settings.postgres_pool_max_size,
+                )
             except Exception:
                 log.exception(
-                    "postgres memory setup failed — falling back to in-memory"
+                    "postgres shared pool setup failed — durable stores will "
+                    "use their process-local fallbacks"
                 )
+        app.state.postgres_pool = postgres_pool
+
+        async def setup_postgres_store(instance, label: str) -> bool:
+            """Set up one store on the shared pool without private retries."""
+            if postgres_pool is None:
+                return False
+            try:
+                await instance.setup(postgres_pool)
+            except Exception:
+                log.exception("postgres %s setup failed", label)
+                return False
+            return True
+
+        if isinstance(store, PostgresMemoryStore):
+            if await setup_postgres_store(store, "memory"):
+                log.info("memory backend: postgres (pgvector)")
+            else:
                 app.state.memory = InMemoryStore()
                 _rebind(app, "memory", app.state.memory)
         else:
             log.info("memory backend: in-memory (process-local)")
 
         if isinstance(usage, PostgresUsageStore):
-            try:
-                await usage.setup()
+            if await setup_postgres_store(usage, "usage"):
                 log.info("usage backend: postgres")
-            except Exception:
-                log.exception(
-                    "postgres usage setup failed — falling back to in-memory"
-                )
+            else:
                 app.state.usage = InMemoryUsageStore()
                 _rebind(app, "usage", app.state.usage)
                 # The worker-spend ledger captured the Postgres store by
@@ -989,13 +1011,9 @@ def create_app() -> FastAPI:
             log.info("usage backend: in-memory (process-local)")
 
         if isinstance(analysis_inputs, PostgresInputStore):
-            try:
-                await analysis_inputs.setup()
+            if await setup_postgres_store(analysis_inputs, "analysis input"):
                 log.info("analysis input backend: postgres")
-            except Exception:
-                log.exception(
-                    "postgres analysis input setup failed — falling back to in-memory"
-                )
+            else:
                 analysis_inputs = InMemoryInputStore()
                 app.state.analysis_inputs = analysis_inputs
                 _repoint_analysis_stores(tools, inputs=analysis_inputs)
@@ -1003,13 +1021,9 @@ def create_app() -> FastAPI:
             log.info("analysis input backend: in-memory (process-local)")
 
         if isinstance(analysis_artifacts, PostgresArtifactStore):
-            try:
-                await analysis_artifacts.setup()
+            if await setup_postgres_store(analysis_artifacts, "analysis artifact"):
                 log.info("analysis artifact backend: postgres")
-            except Exception:
-                log.exception(
-                    "postgres analysis artifact setup failed — falling back to in-memory"
-                )
+            else:
                 analysis_artifacts = InMemoryArtifactStore()
                 app.state.analysis_artifacts = analysis_artifacts
                 _repoint_analysis_stores(tools, artifacts=analysis_artifacts)
@@ -1021,13 +1035,9 @@ def create_app() -> FastAPI:
             log.info("analysis artifact backend: in-memory (process-local)")
 
         if isinstance(analysis_attempts, PostgresAnalysisAttemptStore):
-            try:
-                await analysis_attempts.setup()
+            if await setup_postgres_store(analysis_attempts, "analysis attempt"):
                 log.info("analysis attempt backend: postgres")
-            except Exception:
-                log.exception(
-                    "postgres analysis attempt setup failed — falling back to in-memory"
-                )
+            else:
                 analysis_attempts = InMemoryAnalysisAttemptStore()
                 app.state.analysis_attempts = analysis_attempts
                 _repoint_analysis_stores(tools, attempts=analysis_attempts)
@@ -1035,13 +1045,9 @@ def create_app() -> FastAPI:
             log.info("analysis attempt backend: in-memory (process-local)")
 
         if isinstance(analysis_uploads, PostgresUploadStore):
-            try:
-                await analysis_uploads.setup()
+            if await setup_postgres_store(analysis_uploads, "analysis upload"):
                 log.info("analysis upload backend: postgres")
-            except Exception:
-                log.exception(
-                    "postgres analysis upload setup failed — falling back to in-memory"
-                )
+            else:
                 analysis_uploads = InMemoryUploadStore()
                 app.state.analysis_uploads = analysis_uploads
                 _repoint_analysis_stores(tools, uploads=analysis_uploads)
@@ -1053,37 +1059,25 @@ def create_app() -> FastAPI:
             log.info("analysis upload backend: in-memory (process-local)")
 
         if isinstance(approvals, PostgresApprovalStore):
-            try:
-                await approvals.setup()
+            if await setup_postgres_store(approvals, "approval"):
                 log.info("approval backend: postgres")
-            except Exception:
-                log.exception(
-                    "postgres approval setup failed — falling back to in-memory"
-                )
+            else:
                 tools.approvals = InMemoryApprovalStore()
         else:
             log.info("approval backend: in-memory (process-local)")
 
         if isinstance(checkpoints, PostgresCheckpointStore):
-            try:
-                await checkpoints.setup()
+            if await setup_postgres_store(checkpoints, "checkpoint"):
                 log.info("checkpoint backend: postgres")
-            except Exception:
-                log.exception(
-                    "postgres checkpoint setup failed — worker resume disabled"
-                )
+            else:
                 _disable_checkpoints(tools)
         else:
             log.info("checkpoint backend: in-memory (process-local)")
 
         if isinstance(workflows, PostgresWorkflowStore):
-            try:
-                await workflows.setup()
+            if await setup_postgres_store(workflows, "workflow"):
                 log.info("workflow backend: postgres")
-            except Exception:
-                log.exception(
-                    "postgres workflow setup failed — falling back to in-memory"
-                )
+            else:
                 # Swap the shared engine's store so BOTH the gateway and the
                 # already-constructed runtime keep working (process-local, not
                 # crash-durable) rather than hitting an un-setup pool.
@@ -1092,14 +1086,9 @@ def create_app() -> FastAPI:
             log.info("workflow backend: in-memory (process-local)")
 
         if isinstance(sessions, PostgresSurfaceSessionStore):
-            try:
-                await sessions.setup()
+            if await setup_postgres_store(sessions, "surface session"):
                 log.info("surface-session backend: postgres")
-            except Exception:
-                log.exception(
-                    "postgres surface-session setup failed — falling back "
-                    "to in-memory"
-                )
+            else:
                 # Repoint BOTH the app state and the already-built Slack runner
                 # (which captured the Postgres store) at one shared in-memory
                 # fallback, so mentions don't hit an un-setup pool in the
@@ -1112,18 +1101,23 @@ def create_app() -> FastAPI:
             log.info("surface-session backend: in-memory (process-local)")
 
         if isinstance(threads, PostgresThreadRecordStore):
-            try:
-                await threads.setup()
+            thread_store_ready = await setup_postgres_store(threads, "thread record")
+            if thread_store_ready:
                 # A crashed drain leader leaves its active-turn claim set; clear
                 # stale claims at startup so threads aren't wedged (single-replica).
-                cleared = await threads.reset_active_claims()
-                if cleared:
-                    log.info("cleared %d stale thread claim(s) at startup", cleared)
+                try:
+                    cleared = await threads.reset_active_claims()
+                    if cleared:
+                        log.info(
+                            "cleared %d stale thread claim(s) at startup", cleared
+                        )
+                except Exception:
+                    log.exception("postgres thread record recovery setup failed")
+                    await threads.close()
+                    thread_store_ready = False
+            if thread_store_ready:
                 log.info("thread-record backend: postgres")
-            except Exception:
-                log.exception(
-                    "postgres thread-record setup failed — falling back to in-memory"
-                )
+            else:
                 fallback_threads = InMemoryThreadRecordStore()
                 app.state.threads = fallback_threads
                 if session_runner is not None:
@@ -1168,43 +1162,49 @@ def create_app() -> FastAPI:
                     connector.name,
                 )
 
-        yield
-
-        if recovery_task is not None:
-            recovery_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await recovery_task
-        if warm_sweep_task is not None:
-            warm_sweep_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await warm_sweep_task
-        warm_pool = getattr(tools, "warm_pool", None)
-        if warm_pool is not None:
-            await warm_pool.shutdown()
-        if isinstance(store, PostgresMemoryStore):
-            await store.close()
-        if isinstance(usage, PostgresUsageStore):
-            await usage.close()
-        if isinstance(approvals, PostgresApprovalStore):
-            await approvals.close()
-        if isinstance(checkpoints, PostgresCheckpointStore):
-            await checkpoints.close()
-        if isinstance(workflows, PostgresWorkflowStore):
-            await workflows.close()
-        if isinstance(sessions, PostgresSurfaceSessionStore):
-            await sessions.close()
-        if isinstance(threads, PostgresThreadRecordStore):
-            await threads.close()
-        if isinstance(analysis_inputs, PostgresInputStore):
-            await analysis_inputs.close()
-        if isinstance(analysis_artifacts, PostgresArtifactStore):
-            await analysis_artifacts.close()
-        if isinstance(analysis_attempts, PostgresAnalysisAttemptStore):
-            await analysis_attempts.close()
-        if isinstance(analysis_uploads, PostgresUploadStore):
-            await analysis_uploads.close()
-        if hasattr(coordinator, "close"):  # RedisLock / PostgresLock (not in-process)
-            await _safe_close(coordinator)
+        try:
+            yield
+        finally:
+            try:
+                if recovery_task is not None:
+                    recovery_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await recovery_task
+                if warm_sweep_task is not None:
+                    warm_sweep_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await warm_sweep_task
+                warm_pool = getattr(tools, "warm_pool", None)
+                if warm_pool is not None:
+                    await warm_pool.shutdown()
+                if isinstance(store, PostgresMemoryStore):
+                    await store.close()
+                if isinstance(usage, PostgresUsageStore):
+                    await usage.close()
+                if isinstance(approvals, PostgresApprovalStore):
+                    await approvals.close()
+                if isinstance(checkpoints, PostgresCheckpointStore):
+                    await checkpoints.close()
+                if isinstance(workflows, PostgresWorkflowStore):
+                    await workflows.close()
+                if isinstance(sessions, PostgresSurfaceSessionStore):
+                    await sessions.close()
+                if isinstance(threads, PostgresThreadRecordStore):
+                    await threads.close()
+                if isinstance(analysis_inputs, PostgresInputStore):
+                    await analysis_inputs.close()
+                if isinstance(analysis_artifacts, PostgresArtifactStore):
+                    await analysis_artifacts.close()
+                if isinstance(analysis_attempts, PostgresAnalysisAttemptStore):
+                    await analysis_attempts.close()
+                if isinstance(analysis_uploads, PostgresUploadStore):
+                    await analysis_uploads.close()
+            finally:
+                if postgres_pool is not None:
+                    await _safe_close(postgres_pool)
+                    app.state.postgres_pool = None
+                if hasattr(coordinator, "close"):
+                    await _safe_close(coordinator)
 
     app = FastAPI(title="OpenLoop", version="0.0.1", lifespan=lifespan)
     app.state.settings = settings
@@ -1218,6 +1218,7 @@ def create_app() -> FastAPI:
     app.state.analysis_artifacts = analysis_artifacts
     app.state.analysis_attempts = analysis_attempts
     app.state.analysis_uploads = analysis_uploads
+    app.state.postgres_pool = None
     app.state.limiter = limiter
 
     # Phase B: bridge the warm-workspace pool's durable handle to the thread
@@ -1536,11 +1537,11 @@ async def _warm_sweep_loop(pool: WarmWorkspacePool, *, interval: float) -> None:
 
 
 async def _safe_close(closeable) -> None:
-    """Best-effort close of a coordination client; never raise from teardown."""
+    """Best-effort close of an application resource; never raise at teardown."""
     try:
         await closeable.close()
     except Exception:
-        log.warning("failed to close coordination client", exc_info=True)
+        log.warning("failed to close application resource", exc_info=True)
 
 
 async def _resume_worker_jobs(tools: ToolGateway) -> None:

@@ -6,6 +6,9 @@ slice needs is wired up here; more lands as the runtime grows.
 
 from __future__ import annotations
 
+from typing import Self
+
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -184,6 +187,11 @@ class Settings(BaseSettings):
     database_url: str = (
         "postgresql://openloop:change-me@localhost:5432/openloop_agents"
     )
+    # One ordinary-query pool per runtime process. The Postgres coordination
+    # backend intentionally owns a separate small pool because advisory locks
+    # hold connections for the lifetime of a lease.
+    postgres_pool_min_size: int = Field(default=1, ge=0)
+    postgres_pool_max_size: int = Field(default=10, ge=1)
     redis_url: str = "redis://localhost:6379/0"
 
     # Cross-process coordination for multi-replica deploys — which lock backend
@@ -215,6 +223,15 @@ class Settings(BaseSettings):
     embeddings_enabled: bool = True
     embedding_model: str = "openai/text-embedding-3-small"
     embedding_dim: int = 1536
+
+    @model_validator(mode="after")
+    def _validate_postgres_pool_size(self) -> Self:
+        if self.postgres_pool_min_size > self.postgres_pool_max_size:
+            raise ValueError(
+                "postgres_pool_min_size must be less than or equal to "
+                "postgres_pool_max_size"
+            )
+        return self
 
     @property
     def github_app_configured(self) -> bool:

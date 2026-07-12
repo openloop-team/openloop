@@ -46,13 +46,13 @@ def test_session_store_postgres_fallback_repoints_slack_runner(monkeypatch):
     )
 
     class FailingPgSessions(PostgresSurfaceSessionStore):
-        async def setup(self):
+        async def setup(self, pool):
             raise RuntimeError("no postgres")
 
     monkeypatch.setattr(
         appmod,
         "build_surface_session_store",
-        lambda s: FailingPgSessions(s.database_url),
+        lambda s: FailingPgSessions(),
     )
 
     app = appmod.create_app()

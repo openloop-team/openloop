@@ -14,18 +14,35 @@ from openloop.config import Settings
 def fake_store(monkeypatch):
     """Swap the durable input store for a recorder and force the pg backend."""
 
+    class _FakePool:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    pool = _FakePool()
+
+    async def create_pool(dsn, *, min_size, max_size):
+        assert dsn == "postgresql://unused-in-tests"
+        assert (min_size, max_size) == (1, 10)
+        return pool
+
+    monkeypatch.setattr("openloop.postgres.create_pool", create_pool)
+
     class _FakeInputStore:
         instances = []
 
-        def __init__(self, dsn):
-            self.dsn = dsn
+        def __init__(self):
             self.staged = []
             self.setup_called = False
             self.closed = False
+            self.pool = None
             _FakeInputStore.instances.append(self)
 
-        async def setup(self):
+        async def setup(self, borrowed_pool):
             self.setup_called = True
+            self.pool = borrowed_pool
 
         async def stage(self, manifest):
             self.staged.append(manifest)
@@ -60,6 +77,7 @@ def test_stage_files_builds_manifest_and_prints_the_invocation(
     assert rc == 0
     (store,) = fake_store.instances
     assert store.setup_called and store.closed
+    assert store.pool is not None and store.pool.closed
     (manifest,) = store.staged
     # The capability ref is generated (high-entropy), not operator-chosen.
     assert manifest.input_ref.startswith("staged:")

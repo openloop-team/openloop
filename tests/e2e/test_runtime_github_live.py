@@ -86,10 +86,11 @@ def _build_agent(model: str) -> Agent:
 
 
 async def _maybe_postgres_stores():
-    """Return (memory, usage, approvals) on a reachable DATABASE_URL, else None."""
+    """Return ((memory, usage, approvals), pool) when Postgres is reachable."""
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         return None
+    pool = None
     try:
         import asyncpg
 
@@ -99,14 +100,17 @@ async def _maybe_postgres_stores():
 
         conn = await asyncpg.connect(dsn, timeout=3)
         await conn.close()
-        memory = PostgresMemoryStore(dsn, embedding_dim=1536)
-        usage = PostgresUsageStore(dsn)
-        approvals = PostgresApprovalStore(dsn)
-        await memory.setup()
-        await usage.setup()
-        await approvals.setup()
-        return memory, usage, approvals
+        pool = await asyncpg.create_pool(dsn, min_size=1, max_size=10)
+        memory = PostgresMemoryStore(embedding_dim=1536)
+        usage = PostgresUsageStore()
+        approvals = PostgresApprovalStore()
+        await memory.setup(pool)
+        await usage.setup(pool)
+        await approvals.setup(pool)
+        return (memory, usage, approvals), pool
     except Exception:
+        if pool is not None:
+            await pool.close()
         return None
 
 
@@ -115,7 +119,8 @@ async def test_live_end_to_end():
     token = os.environ["GITHUB_TOKEN"]
     model = _model()
 
-    stores = await _maybe_postgres_stores()
+    postgres = await _maybe_postgres_stores()
+    stores, pool = postgres if postgres else (None, None)
     memory, usage, approvals = stores or (
         InMemoryStore(), InMemoryUsageStore(), InMemoryApprovalStore()
     )
@@ -172,3 +177,5 @@ async def test_live_end_to_end():
         if stores:
             for store in stores:
                 await store.close()
+        if pool is not None:
+            await pool.close()

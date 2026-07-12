@@ -102,9 +102,17 @@ def _cmd_analysis_stage(args: argparse.Namespace) -> int:
         return 1
     from openloop.analysis.postgres import PostgresInputStore
 
-    store = PostgresInputStore(settings.database_url)
+    store = PostgresInputStore()
     try:
-        asyncio.run(_stage_manifest(store, manifest))
+        asyncio.run(
+            _stage_manifest(
+                store,
+                manifest,
+                dsn=settings.database_url,
+                min_size=settings.postgres_pool_min_size,
+                max_size=settings.postgres_pool_max_size,
+            )
+        )
     except Exception as exc:  # noqa: BLE001 — operator-facing tool, no traceback spam
         print(f"error: staging failed: {exc}", file=sys.stderr)
         return 1
@@ -137,17 +145,19 @@ def _cmd_analysis_stage(args: argparse.Namespace) -> int:
     return 0
 
 
-async def _stage_manifest(store, manifest) -> None:
-    """Stage through a possibly-durable store, owning its setup/teardown."""
-    setup = getattr(store, "setup", None)
-    if setup is not None:
-        await setup()
+async def _stage_manifest(
+    store, manifest, *, dsn: str, min_size: int, max_size: int
+) -> None:
+    """Stage through a durable store, owning one process-scoped pool."""
+    from openloop.postgres import create_pool
+
+    pool = await create_pool(dsn, min_size=min_size, max_size=max_size)
     try:
+        await store.setup(pool)
         await store.stage(manifest)
     finally:
-        close = getattr(store, "close", None)
-        if close is not None:
-            await close()
+        await store.close()
+        await pool.close()
 
 
 def main(argv: list[str] | None = None) -> int:

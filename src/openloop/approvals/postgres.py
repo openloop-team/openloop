@@ -11,20 +11,14 @@ import json
 from datetime import datetime, timezone
 
 from openloop.approvals.store import ApprovalRequest
+from openloop.postgres import BorrowedPostgresStore
 
 
-class PostgresApprovalStore:
+class PostgresApprovalStore(BorrowedPostgresStore):
     """pgvector image not required — plain Postgres is enough for approvals."""
 
-    def __init__(self, dsn: str) -> None:
-        self.dsn = dsn
-        self._pool = None  # asyncpg.Pool, created in setup()
-
-    async def setup(self) -> None:
-        import asyncpg
-
-        self._pool = await asyncpg.create_pool(self.dsn)
-        async with self._pool.acquire() as conn:
+    async def setup(self, pool) -> None:
+        async with self._setup_connection(pool) as conn:
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS approvals (
@@ -54,16 +48,6 @@ class PostgresApprovalStore:
                 "CREATE INDEX IF NOT EXISTS approvals_status_idx "
                 "ON approvals (status, agent)"
             )
-
-    async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
-
-    def _require_pool(self):
-        if self._pool is None:
-            raise RuntimeError("PostgresApprovalStore.setup() must be called first")
-        return self._pool
 
     async def create(self, request: ApprovalRequest) -> None:
         pool = self._require_pool()

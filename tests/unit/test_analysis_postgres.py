@@ -1,8 +1,5 @@
 """Unit coverage for sealed-analysis Postgres failure boundaries."""
 
-import sys
-from types import SimpleNamespace
-
 import pytest
 
 from openloop.analysis.postgres import PostgresAnalysisAttemptStore
@@ -31,28 +28,18 @@ class _Pool:
         self.closed = True
 
 
-async def test_setup_closes_a_pool_when_schema_creation_fails(monkeypatch):
+async def test_setup_detaches_without_closing_borrowed_pool_on_schema_failure():
     class _FailingConnection:
         async def execute(self, query):
             raise RuntimeError("schema permission denied")
 
     pool = _Pool(_FailingConnection())
-
-    async def create_pool(dsn):
-        assert dsn == "postgresql://test"
-        return pool
-
-    monkeypatch.setitem(
-        sys.modules,
-        "asyncpg",
-        SimpleNamespace(create_pool=create_pool),
-    )
-    store = PostgresAnalysisAttemptStore("postgresql://test")
+    store = PostgresAnalysisAttemptStore()
 
     with pytest.raises(RuntimeError, match="schema permission denied"):
-        await store.setup()
+        await store.setup(pool)
 
-    assert pool.closed
+    assert not pool.closed
     assert store._pool is None
 
 
@@ -75,7 +62,7 @@ async def test_unknown_attempt_cannot_be_charged():
                 "updated_at": None,
             }
 
-    store = PostgresAnalysisAttemptStore("postgresql://test")
+    store = PostgresAnalysisAttemptStore()
     store._pool = _Pool(_UnknownAttemptConnection())
 
     with pytest.raises(RuntimeError, match="is unknown; cannot charge"):

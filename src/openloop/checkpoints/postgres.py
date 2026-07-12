@@ -11,18 +11,12 @@ import json
 from datetime import datetime, timezone
 
 from openloop.checkpoints.store import WorkerCheckpoint
+from openloop.postgres import BorrowedPostgresStore
 
 
-class PostgresCheckpointStore:
-    def __init__(self, dsn: str) -> None:
-        self.dsn = dsn
-        self._pool = None  # asyncpg.Pool, created in setup()
-
-    async def setup(self) -> None:
-        import asyncpg
-
-        self._pool = await asyncpg.create_pool(self.dsn)
-        async with self._pool.acquire() as conn:
+class PostgresCheckpointStore(BorrowedPostgresStore):
+    async def setup(self, pool) -> None:
+        async with self._setup_connection(pool) as conn:
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS worker_checkpoints (
@@ -48,16 +42,6 @@ class PostgresCheckpointStore:
                 "CREATE INDEX IF NOT EXISTS worker_checkpoints_updated_idx "
                 "ON worker_checkpoints (updated_at DESC)"
             )
-
-    async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
-
-    def _require_pool(self):
-        if self._pool is None:
-            raise RuntimeError("PostgresCheckpointStore.setup() must be called first")
-        return self._pool
 
     async def get(self, job_id: str) -> WorkerCheckpoint | None:
         pool = self._require_pool()

@@ -11,6 +11,7 @@ import json
 from datetime import datetime, timezone
 
 from openloop.memory.store import MemoryRecord
+from openloop.postgres import BorrowedPostgresStore
 
 # text-embedding-3-small is 1536-dim; change alongside the embedder.
 DEFAULT_EMBEDDING_DIM = 1536
@@ -21,22 +22,16 @@ def _vec_literal(embedding: list[float]) -> str:
     return "[" + ",".join(repr(float(x)) for x in embedding) + "]"
 
 
-class PostgresMemoryStore:
+class PostgresMemoryStore(BorrowedPostgresStore):
     """pgvector-backed :class:`~openloop.memory.store.MemoryStore`."""
 
-    def __init__(
-        self, dsn: str, *, embedding_dim: int = DEFAULT_EMBEDDING_DIM
-    ) -> None:
-        self.dsn = dsn
+    def __init__(self, *, embedding_dim: int = DEFAULT_EMBEDDING_DIM) -> None:
+        super().__init__()
         self.embedding_dim = embedding_dim
-        self._pool = None  # asyncpg.Pool, created in setup()
 
-    async def setup(self) -> None:
-        """Create the connection pool, extension, table, and index."""
-        import asyncpg
-
-        self._pool = await asyncpg.create_pool(self.dsn)
-        async with self._pool.acquire() as conn:
+    async def setup(self, pool) -> None:
+        """Bind a caller-owned pool and create the extension, table, and index."""
+        async with self._setup_connection(pool) as conn:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
             await conn.execute(
                 f"""
@@ -55,16 +50,6 @@ class PostgresMemoryStore:
                 "CREATE INDEX IF NOT EXISTS memories_scope_idx "
                 "ON memories (scope_key, created_at DESC)"
             )
-
-    async def close(self) -> None:
-        if self._pool is not None:
-            await self._pool.close()
-            self._pool = None
-
-    def _require_pool(self):
-        if self._pool is None:
-            raise RuntimeError("PostgresMemoryStore.setup() must be called first")
-        return self._pool
 
     async def remember(self, record: MemoryRecord) -> None:
         pool = self._require_pool()

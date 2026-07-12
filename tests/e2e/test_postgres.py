@@ -60,17 +60,28 @@ async def _reachable() -> bool:
 
 
 @pytest.fixture
-async def stores():
+async def postgres_pool():
     if not await _reachable():
         pytest.skip(f"no Postgres reachable at {DSN}")
+    import asyncpg
+
+    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=10)
+    try:
+        yield pool
+    finally:
+        await pool.close()
+
+
+@pytest.fixture
+async def stores(postgres_pool):
     # Unique table-free isolation isn't possible (shared tables), so scope keys
     # are made unique per run instead.
-    memory = PostgresMemoryStore(DSN, embedding_dim=EMBED_DIM)
-    usage = PostgresUsageStore(DSN)
-    approvals = PostgresApprovalStore(DSN)
-    await memory.setup()
-    await usage.setup()
-    await approvals.setup()
+    memory = PostgresMemoryStore(embedding_dim=EMBED_DIM)
+    usage = PostgresUsageStore()
+    approvals = PostgresApprovalStore()
+    await memory.setup(postgres_pool)
+    await usage.setup(postgres_pool)
+    await approvals.setup(postgres_pool)
     try:
         yield memory, usage, approvals
     finally:
@@ -146,17 +157,19 @@ async def test_happy_path_end_to_end(stores):
     assert any("open an issue to track" in t for t in texts)
 
 
-async def test_analysis_attempt_and_usage_idempotency_survive_a_new_store():
+async def test_analysis_attempt_and_usage_idempotency_survive_a_new_store(
+    postgres_pool,
+):
     """The accounting checkpoints remain safe across a controller restart."""
     if not await _reachable():
         pytest.skip(f"no Postgres reachable at {DSN}")
 
     attempt_id = f"analysis-attempt-{uuid.uuid4().hex}"
     scope_key = f"ws:e2e:agent:{attempt_id}"
-    attempts = PostgresAnalysisAttemptStore(DSN)
-    usage = PostgresUsageStore(DSN)
-    await attempts.setup()
-    await usage.setup()
+    attempts = PostgresAnalysisAttemptStore()
+    usage = PostgresUsageStore()
+    await attempts.setup(postgres_pool)
+    await usage.setup(postgres_pool)
     try:
         attempt, created = await attempts.begin(attempt_id, "job-1")
         assert created and attempt.status == "started"
@@ -204,8 +217,8 @@ async def test_analysis_attempt_and_usage_idempotency_survive_a_new_store():
         ))
         await attempts.settle(attempt_id)
 
-        restarted_attempts = PostgresAnalysisAttemptStore(DSN)
-        await restarted_attempts.setup()
+        restarted_attempts = PostgresAnalysisAttemptStore()
+        await restarted_attempts.setup(postgres_pool)
         try:
             restored = await restarted_attempts.get(attempt_id)
             assert restored is not None
@@ -232,7 +245,7 @@ async def test_analysis_attempt_and_usage_idempotency_survive_a_new_store():
             await usage.close()
 
 
-async def test_worker_checkpoint_resume_across_real_postgres():
+async def test_worker_checkpoint_resume_across_real_postgres(postgres_pool):
     """A worker job persisted to Postgres resumes on a fresh store instance."""
     if not await _reachable():
         pytest.skip(f"no Postgres reachable at {DSN}")
@@ -270,8 +283,8 @@ async def test_worker_checkpoint_resume_across_real_postgres():
                 raise RuntimeError("blip")
             return await super().create_pull(*a, **k)
 
-    store = PostgresCheckpointStore(DSN)
-    await store.setup()
+    store = PostgresCheckpointStore()
+    await store.setup(postgres_pool)
     try:
         args = {"repo": "acme/x", "instruction": "do x", "job_id": job_id}
 
@@ -285,8 +298,8 @@ async def test_worker_checkpoint_resume_across_real_postgres():
 
         # A *fresh* store + connector (simulating a restart) resumes from PG:
         # the worker is not re-run and exactly one PR is opened.
-        store2 = PostgresCheckpointStore(DSN)
-        await store2.setup()
+        store2 = PostgresCheckpointStore()
+        await store2.setup(postgres_pool)
         try:
             runner2, github2 = _Runner(), FakeGitHub()
             conn2 = CodingWorkerConnector(runner2, github2, checkpoints=store2)
@@ -310,7 +323,7 @@ async def test_worker_checkpoint_resume_across_real_postgres():
         await store.close()
 
 
-async def test_workflow_resume_across_real_postgres():
+async def test_workflow_resume_across_real_postgres(postgres_pool):
     """A workflow parked at a wait node resumes from Postgres on a fresh engine."""
     if not await _reachable():
         pytest.skip(f"no Postgres reachable at {DSN}")
@@ -327,16 +340,16 @@ async def test_workflow_resume_across_real_postgres():
 
         return Workflow("t", [Step("gate", wait=True), Step("finish", finish)])
 
-    store = PostgresWorkflowStore(DSN)
-    await store.setup()
+    store = PostgresWorkflowStore()
+    await store.setup(postgres_pool)
     try:
         engine1 = WorkflowEngine(store, {"t": _wf()})
         parked = await engine1.start("t", instance_id, {"seed": 1})
         assert parked.status == "waiting" and parked.waiting_on == "gate"
 
         # Fresh store + engine (a restart) delivers the event and completes.
-        store2 = PostgresWorkflowStore(DSN)
-        await store2.setup()
+        store2 = PostgresWorkflowStore()
+        await store2.setup(postgres_pool)
         try:
             engine2 = WorkflowEngine(store2, {"t": _wf()})
             done = await engine2.send_event(instance_id, "gate", {"by": "x"})
@@ -358,7 +371,7 @@ async def test_workflow_resume_across_real_postgres():
         await store.close()
 
 
-async def test_surface_session_roundtrip_across_real_postgres():
+async def test_surface_session_roundtrip_across_real_postgres(postgres_pool):
     """Persist a surface session and look it up by event + approval id (Phase D)."""
     if not await _reachable():
         pytest.skip(f"no Postgres reachable at {DSN}")
@@ -370,8 +383,8 @@ async def test_surface_session_roundtrip_across_real_postgres():
     event_id = f"ev-{uuid.uuid4().hex[:8]}"
     approval_id = f"appr-{uuid.uuid4().hex[:8]}"
 
-    store = PostgresSurfaceSessionStore(DSN)
-    await store.setup()
+    store = PostgresSurfaceSessionStore()
+    await store.setup(postgres_pool)
     try:
         await store.upsert(SurfaceSession(
             id=session_id,
@@ -390,8 +403,8 @@ async def test_surface_session_roundtrip_across_real_postgres():
         ))
 
         # A fresh store (a restart) reads it back by all three keys.
-        store2 = PostgresSurfaceSessionStore(DSN)
-        await store2.setup()
+        store2 = PostgresSurfaceSessionStore()
+        await store2.setup(postgres_pool)
         try:
             by_id = await store2.get(session_id)
             assert by_id is not None and by_id.status == "waiting"
@@ -430,7 +443,7 @@ async def test_surface_session_roundtrip_across_real_postgres():
         await store.close()
 
 
-async def test_thread_history_across_real_postgres():
+async def test_thread_history_across_real_postgres(postgres_pool):
     """Rebuild conversation history from prior thread sessions (oldest-first)."""
     if not await _reachable():
         pytest.skip(f"no Postgres reachable at {DSN}")
@@ -447,8 +460,8 @@ async def test_thread_history_across_real_postgres():
             channel="C1", thread=thr, event_id=f"ev-{tid}",
         )
 
-    store = PostgresSurfaceSessionStore(DSN)
-    await store.setup()
+    store = PostgresSurfaceSessionStore()
+    await store.setup(postgres_pool)
     try:
         # Two delivered turns + one still-running, plus an undelivered completed
         # turn (answer never reached the user) and a same-thread session for a
@@ -478,8 +491,8 @@ async def test_thread_history_across_real_postgres():
             final_message_id="ts-x",
         ))
 
-        store2 = PostgresSurfaceSessionStore(DSN)
-        await store2.setup()
+        store2 = PostgresSurfaceSessionStore()
+        await store2.setup(postgres_pool)
         try:
             # Oldest-first, scoped to this agent's thread, excluding the in-flight
             # turn — exactly the two *delivered* exchanges in order (the running,
@@ -570,7 +583,7 @@ async def test_postgres_advisory_lock_frees_when_holder_goes_away():
             await a.close()
 
 
-async def test_session_reconcile_across_real_postgres():
+async def test_session_reconcile_across_real_postgres(postgres_pool):
     """A session that crashed before delivery is recovered + delivered on a fresh
     runner reading both the session and workflow state from Postgres (Phase D)."""
     if not await _reachable():
@@ -588,10 +601,10 @@ async def test_session_reconcile_across_real_postgres():
     agent = load_agent(AGENT_YAML)
     workflow_name = f"agent_task:{agent.metadata.name}"
 
-    sessions = PostgresSurfaceSessionStore(DSN)
-    workflows = PostgresWorkflowStore(DSN)
-    await sessions.setup()
-    await workflows.setup()
+    sessions = PostgresSurfaceSessionStore()
+    workflows = PostgresWorkflowStore()
+    await sessions.setup(postgres_pool)
+    await workflows.setup(postgres_pool)
     try:
         # The turn's workflow completed, but the session crashed before delivery.
         await workflows.upsert(WorkflowInstance(
@@ -612,10 +625,10 @@ async def test_session_reconcile_across_real_postgres():
         ))
 
         # Fresh stores + runner (a restart) reconcile and deliver the answer.
-        sessions2 = PostgresSurfaceSessionStore(DSN)
-        workflows2 = PostgresWorkflowStore(DSN)
-        await sessions2.setup()
-        await workflows2.setup()
+        sessions2 = PostgresSurfaceSessionStore()
+        workflows2 = PostgresWorkflowStore()
+        await sessions2.setup(postgres_pool)
+        await workflows2.setup(postgres_pool)
         try:
             engine = WorkflowEngine(workflows2)
             runtime = Runtime(agent, gateway=FakeGateway(), engine=engine)
@@ -645,7 +658,7 @@ async def test_session_reconcile_across_real_postgres():
         await workflows.close()
 
 
-async def test_thread_record_transcript_across_real_postgres():
+async def test_thread_record_transcript_across_real_postgres(postgres_pool):
     """Phase A: the delivered-transcript lane round-trips and appends idempotently."""
     if not await _reachable():
         pytest.skip(f"no Postgres reachable at {DSN}")
@@ -662,8 +675,8 @@ async def test_thread_record_transcript_across_real_postgres():
         channel="C1", thread=thread, event_id="ignored",
     )
 
-    store = PostgresThreadRecordStore(DSN)
-    await store.setup()
+    store = PostgresThreadRecordStore()
+    await store.setup(postgres_pool)
     try:
         await store.get_or_create(scope)
         await store.append_delivered_fragment(
@@ -678,8 +691,8 @@ async def test_thread_record_transcript_across_real_postgres():
         )
 
         # A fresh store (a restart) reads the transcript back, oldest-first.
-        store2 = PostgresThreadRecordStore(DSN)
-        await store2.setup()
+        store2 = PostgresThreadRecordStore()
+        await store2.setup(postgres_pool)
         try:
             out = await store2.replayable_transcript(scope)
             assert [(f.request, f.answer) for f in out] == [("q1", "a1"), ("q2", "a2")]
@@ -703,7 +716,7 @@ async def test_thread_record_transcript_across_real_postgres():
         await store.close()
 
 
-async def test_thread_context_ref_across_real_postgres():
+async def test_thread_context_ref_across_real_postgres(postgres_pool):
     """Phase B: the warm-context handle column round-trips and clears."""
     if not await _reachable():
         pytest.skip(f"no Postgres reachable at {DSN}")
@@ -718,8 +731,8 @@ async def test_thread_context_ref_across_real_postgres():
     )
     key = thread_scope_key(scope)
 
-    store = PostgresThreadRecordStore(DSN)
-    await store.setup()
+    store = PostgresThreadRecordStore()
+    await store.setup(postgres_pool)
     try:
         # The row must exist first — set_context_ref is UPDATE-only (the caller,
         # the warm pool, holds only the scope_key, not the full target).
@@ -727,8 +740,8 @@ async def test_thread_context_ref_across_real_postgres():
         await store.set_context_ref(key, "handle-1")
 
         # A fresh store (a restart) reads the persisted handle back, then clears it.
-        store2 = PostgresThreadRecordStore(DSN)
-        await store2.setup()
+        store2 = PostgresThreadRecordStore()
+        await store2.setup(postgres_pool)
         try:
             assert await store2.get_context_ref(key) == "handle-1"
             await store2.set_context_ref(key, None)
@@ -746,7 +759,7 @@ async def test_thread_context_ref_across_real_postgres():
         await store.close()
 
 
-async def test_thread_inbox_and_claim_across_real_postgres():
+async def test_thread_inbox_and_claim_across_real_postgres(postgres_pool):
     """Phase C: inbox dedup, ordered drain, and the atomic active-turn claim."""
     if not await _reachable():
         pytest.skip(f"no Postgres reachable at {DSN}")
@@ -761,8 +774,8 @@ async def test_thread_inbox_and_claim_across_real_postgres():
     )
     key = "\x1f".join(("slack", "acme", "dev-platform", "C1", thread))
 
-    store = PostgresThreadRecordStore(DSN)
-    await store.setup()
+    store = PostgresThreadRecordStore()
+    await store.setup(postgres_pool)
     try:
         assert await store.append_inbox(scope, "e1", {"text": "one"}) is True
         assert await store.append_inbox(scope, "e2", {"text": "two"}) is True
@@ -770,8 +783,8 @@ async def test_thread_inbox_and_claim_across_real_postgres():
 
         # A fresh store (restart) claims and drains, oldest-first; the claim is
         # exclusive against a concurrent second claimant.
-        store2 = PostgresThreadRecordStore(DSN)
-        await store2.setup()
+        store2 = PostgresThreadRecordStore()
+        await store2.setup(postgres_pool)
         try:
             assert await store.try_begin_turn(scope) is True
             assert await store2.try_begin_turn(scope) is False  # exclusive CAS
