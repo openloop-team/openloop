@@ -221,25 +221,25 @@ def build_slack_app(
             _run_message(runner, event, say, context.get("bot_user_id"))
         )
 
-    async def _on_decision(ack, body, action, respond, approve):  # type: ignore[no-untyped-def]
+    async def _on_decision(ack, body, action, approve):  # type: ignore[no-untyped-def]
         await ack()
         if runtime.tools is None:
             return
         approver = _approver_handle(body.get("user", {}))
-        # The runner resolves the approval *and* continues the owning session,
-        # posting the eventual answer back in the original thread.
-        message = await runner.resolve_approval(
-            action["value"], approver, approve=approve
-        )
-        await respond(text=message, replace_original=False)
+        # The runner resolves the approval *and* continues the owning session:
+        # it collapses the approval card in place to the resolution line and posts
+        # the eventual answer back in the original thread. `ack()` already satisfies
+        # Slack's interaction ack, so we don't also `respond()` — that only added an
+        # ephemeral duplicate of the collapsed card.
+        await runner.resolve_approval(action["value"], approver, approve=approve)
 
     @app.action(APPROVE_ACTION)
-    async def on_approve(ack, body, action, respond):  # type: ignore[no-untyped-def]
-        await _on_decision(ack, body, action, respond, approve=True)
+    async def on_approve(ack, body, action):  # type: ignore[no-untyped-def]
+        await _on_decision(ack, body, action, approve=True)
 
     @app.action(DENY_ACTION)
-    async def on_deny(ack, body, action, respond):  # type: ignore[no-untyped-def]
-        await _on_decision(ack, body, action, respond, approve=False)
+    async def on_deny(ack, body, action):  # type: ignore[no-untyped-def]
+        await _on_decision(ack, body, action, approve=False)
 
     return app
 
