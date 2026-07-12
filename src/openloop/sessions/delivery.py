@@ -131,7 +131,8 @@ class SlackSurfaceDelivery:
       model-authored text are neutralized first; user mentions are preserved.
     - :class:`Artifact` (and prose past the ``markdown_text`` cap) → a hosted
       snippet via ``files.upload`` v2, shared into the thread at upload time,
-      plus a keyed summary message carrying the file permalink. Needs the
+      plus a short keyed summary message (prose only, no permalink, unfurling
+      off) that captions the share and anchors delivery. Needs the
       ``files:write`` scope; on upload failure the content degrades to an
       inline plain-text post rather than dropping the answer.
     - Approval cards → Block Kit, with ``text`` as the notification fallback.
@@ -226,10 +227,17 @@ class SlackSurfaceDelivery:
         blocks: list[dict] | None = None,
         key: str | None,
         recover: bool,
+        unfurl_links: bool | None = None,
+        unfurl_media: bool | None = None,
     ) -> str:
         """Tagged, idempotent message post: recover an existing keyed message or
         post one. The SDK drops ``None`` params, so unused fields never reach
         the API (``markdown_text`` is mutually exclusive with ``text``/``blocks``).
+
+        ``unfurl_links``/``unfurl_media`` default to ``None`` (Slack's normal
+        behavior); the artifact summary sets them ``False`` so the file permalink
+        it carries stays a plain locator link instead of unfurling into a second
+        preview of the file already shared into the thread.
         """
         if key and recover:
             existing = await self._find_by_key(target, key)
@@ -242,6 +250,8 @@ class SlackSurfaceDelivery:
             markdown_text=markdown_text,
             blocks=blocks,
             metadata=self._metadata(key),
+            unfurl_links=unfurl_links,
+            unfurl_media=unfurl_media,
         )
         return resp["ts"]
 
@@ -266,21 +276,27 @@ class SlackSurfaceDelivery:
 
         The snippet is shared into the thread at upload time (explicit
         ``channel``/``thread_ts``) rather than relying on permalink-unfurl
-        sharing, so the file is always visible to thread members. The keyed
-        *message* remains the delivery anchor: recovery looks it up before any
-        upload, so a crash-retry never duplicates the answer — the accepted
-        cost is that a retry in the upload-to-post window can leave one
-        duplicate file-share message (the share itself cannot carry delivery
-        metadata, so it is unkeyed by necessity).
+        sharing, so the file is always visible to thread members. That share is
+        the report; the keyed summary that follows is a short prose caption and
+        the delivery *anchor* (the share itself cannot carry delivery metadata,
+        so it is unkeyed — the summary is what recovery looks up). The summary
+        deliberately carries **no** file permalink and posts with unfurling OFF:
+        the file is already rendered by the share above, so a permalink would
+        only unfurl into a duplicate preview (the reported triple-render was
+        share + summary-with-link + that link's unfurl).
+
+        Recovery looks the keyed summary up before any upload, so a crash-retry
+        never duplicates the answer — the accepted cost is that a retry in the
+        upload-to-post window can leave one duplicate file-share message.
         """
         if key and recover:
             existing = await self._find_by_key(target, key)
             if existing is not None:
                 return existing
         summary = slack_format.sanitize(artifact.summary)
-        permalink = None
+        uploaded_ok = False
         try:
-            resp = await self.client.files_upload_v2(
+            await self.client.files_upload_v2(
                 content=artifact.content,
                 filename=artifact.filename,
                 title=artifact.title,
@@ -288,19 +304,22 @@ class SlackSurfaceDelivery:
                 channel=target.channel,
                 thread_ts=target.thread,
             )
-            uploaded = resp.get("files") or [resp.get("file") or {}]
-            permalink = uploaded[0].get("permalink")
+            uploaded_ok = True
         except Exception:  # noqa: BLE001 — the answer must land even if hosting fails
             logger.warning(
                 "snippet upload failed for %s; posting content inline",
                 artifact.filename, exc_info=True,
             )
-        if permalink:
+        if uploaded_ok:
+            # The share already rendered the file; this keyed caption is just
+            # prose (no permalink) with unfurling off so nothing re-renders it.
             return await self._post(
                 target,
-                markdown_text=f"{summary}\n\n{permalink}",
+                markdown_text=summary,
                 key=key,
                 recover=False,  # recovery already checked above
+                unfurl_links=False,
+                unfurl_media=False,
             )
         # Inline fallback renders as mrkdwn where `<!channel>` pings, so the
         # content is sanitized here — and only here: uploaded snippet bytes

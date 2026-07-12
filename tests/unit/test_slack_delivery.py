@@ -32,7 +32,7 @@ class FakeSlackClient:
 
     async def chat_postMessage(
         self, *, channel, thread_ts=None, text=None, markdown_text=None,
-        blocks=None, metadata=None,
+        blocks=None, metadata=None, unfurl_links=None, unfurl_media=None,
     ):
         self._seq += 1
         ts = f"{self._seq}.0001"
@@ -44,6 +44,8 @@ class FakeSlackClient:
                 "markdown_text": markdown_text,
                 "blocks": blocks,
                 "metadata": metadata,
+                "unfurl_links": unfurl_links,
+                "unfurl_media": unfurl_media,
                 "ts": ts,
             }
         )
@@ -331,9 +333,15 @@ async def test_artifact_uploads_snippet_and_posts_keyed_summary():
         }
     ]
     post = client.posted[0]
-    assert post["markdown_text"].startswith("Applied the rename in `x.py`.")
-    assert "https://files.slack/F1" in post["markdown_text"]
+    # The summary is prose only — the file is already shared as its own message,
+    # so no permalink rides the caption (a link would unfurl into a duplicate).
+    assert post["markdown_text"] == "Applied the rename in `x.py`."
+    assert "files.slack" not in post["markdown_text"]
     assert post["text"] is None
+    # Unfurling stays off so any link in the prose summary itself can't render a
+    # second card either.
+    assert post["unfurl_links"] is False
+    assert post["unfurl_media"] is False
     # The summary message, not the file, carries the delivery key.
     assert post["metadata"]["event_payload"]["key"] == "s1:final"
 
@@ -351,7 +359,10 @@ async def test_oversize_final_becomes_hosted_snippet():
     assert client.uploads[0]["thread_ts"] == "100.1"
     post = client.posted[0]
     assert post["markdown_text"].startswith("Intro paragraph.")
-    assert "https://files.slack/F1" in post["markdown_text"]
+    # Caption only — no permalink to unfurl into a duplicate of the shared file.
+    assert "files.slack" not in post["markdown_text"]
+    assert post["unfurl_links"] is False
+    assert post["unfurl_media"] is False
 
 
 async def test_upload_failure_degrades_to_inline_text():
