@@ -10,7 +10,7 @@ from openloop.agents.schema import Tool
 from openloop.approvals import InMemoryApprovalStore
 from openloop.analysis import InMemoryAnalysisAttemptStore
 from openloop.checkpoints import InMemoryCheckpointStore
-from openloop.config import Settings
+from openloop.config import DEFAULT_ANALYSIS_SANDBOX_IMAGE, Settings
 from openloop.sandbox import DockerSandbox
 from openloop.tools.analysis_worker import AnalysisWorkerConnector, BuiltinAnalysisWorker
 from openloop.usage import InMemoryUsageStore
@@ -63,6 +63,19 @@ def test_analysis_registers_without_github_when_digest_and_sealed_probe_work(mon
     # direct execute().
     assert connector.workflow == "analysis_worker"
     assert "analysis_worker" in engine.workflows
+
+
+def test_analysis_uses_an_immutable_python_smoke_image_by_default(monkeypatch):
+    monkeypatch.setattr(
+        DockerSandbox, "probe_sealed", lambda self, workspace_root=None: None
+    )
+    monkeypatch.setattr(appmod, "build_github_credentials", lambda settings: None)
+
+    gateway = _gateway(Settings(analysis_worker_enabled=True))
+
+    worker = gateway._tools["analysis"].orchestrator.worker
+    assert worker.sandbox.image == DEFAULT_ANALYSIS_SANDBOX_IMAGE
+    assert DEFAULT_ANALYSIS_SANDBOX_IMAGE.startswith("python@sha256:")
 
 
 @pytest.mark.parametrize(

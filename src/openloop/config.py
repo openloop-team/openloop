@@ -9,6 +9,16 @@ from __future__ import annotations
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# Temporary smoke-test default: the official multi-platform Python 3.12 slim
+# image pinned by registry digest. It satisfies the sealed runtime contract
+# (python + GNU timeout), but not the richer pandas/numpy/matplotlib contract of
+# docker/analysis.Dockerfile; production deployments should override it with
+# the purpose-built image's immutable digest.
+DEFAULT_ANALYSIS_SANDBOX_IMAGE = (
+    "python@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf"
+)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
@@ -108,8 +118,9 @@ class Settings(BaseSettings):
 
     # Sealed analysis worker (Phase 1). It executes model-authored Python over
     # controller-provisioned data, so unlike the coding worker it NEVER permits
-    # host execution. The worker remains off until an operator supplies the
-    # digest-pinned image produced from docker/analysis.Dockerfile.
+    # host execution. The worker remains off by default; when enabled, it uses
+    # a digest-pinned Python smoke image unless the operator supplies the richer
+    # purpose-built image from docker/analysis.Dockerfile.
     analysis_worker_enabled: bool = False
     analysis_worker_backend: str = "builtin"
     analysis_worker_model: str = "anthropic/claude-sonnet-4-6"
@@ -118,7 +129,7 @@ class Settings(BaseSettings):
     analysis_worker_sandbox: str = "docker"
     # Must be a digest reference (contains ``@sha256:``); no mutable image tag
     # is allowed for arbitrary model-authored execution.
-    analysis_worker_sandbox_image: str | None = None
+    analysis_worker_sandbox_image: str = DEFAULT_ANALYSIS_SANDBOX_IMAGE
     # This worker has no adaptive access: its sandbox always stays fully sealed.
     analysis_worker_sandbox_network: str = "none"
     # Host path visible to the Docker daemon; required in a containerized deploy

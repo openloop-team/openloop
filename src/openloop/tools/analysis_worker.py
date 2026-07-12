@@ -560,8 +560,11 @@ class BuiltinAnalysisWorker:
                         "installation. Read only from /workspace/inputs and write the "
                         "final UTF-8 Markdown report exactly to "
                         "/workspace/outputs/report.md. Do not write anywhere else. "
-                        "You may use the preinstalled pandas, numpy, and matplotlib "
-                        "(Agg backend). Inspect input contents at runtime as needed."
+                        "The Python standard library is guaranteed. Optional "
+                        "analysis packages may not be installed, so prefer the "
+                        "standard library unless an earlier execution proved an "
+                        "import is available. Inspect input contents at runtime "
+                        "as needed."
                     ),
                 },
                 {"role": "user", "content": self._request(state, inputs)},
@@ -579,8 +582,10 @@ class BuiltinAnalysisWorker:
                     "complete Python program, with no Markdown fences or prose. "
                     "The program has no network, no credentials, and no package "
                     "installation. Read only from /workspace/inputs and write "
-                    "only under /workspace/outputs. You may use the preinstalled "
-                    "pandas, numpy, and matplotlib (Agg backend). After each "
+                    "only under /workspace/outputs. The Python standard library "
+                    "is guaranteed. Optional analysis packages may not be "
+                    "installed; prefer the standard library unless an earlier "
+                    "round proved an import is available. After each "
                     "round you are shown the program's exit code and truncated "
                     "stdout/stderr. Use early rounds to inspect the data (print "
                     "schemas, samples, aggregates). When the analysis is "
