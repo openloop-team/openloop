@@ -596,7 +596,11 @@ class BuiltinAnalysisWorker:
                     "complete, write the final UTF-8 Markdown report exactly to "
                     "/workspace/outputs/report.md and exit 0 — the loop ends as "
                     "soon as a run exits 0 with report.md present, so write "
-                    "report.md only in your final round. Always use that "
+                    "report.md only when your analysis is complete. But you MUST "
+                    "write it by your final round even if the analysis is not as "
+                    "thorough as you wanted: a run that ends without report.md "
+                    "produces nothing, so never spend your last round only "
+                    "inspecting or printing. Always use that "
                     "absolute path: a report written to a relative path (the "
                     "working directory is a throwaway tmpfs) or printed to "
                     "stdout is not captured and the run counts as producing no "
@@ -645,14 +649,26 @@ class BuiltinAnalysisWorker:
                 "or printed to stdout is discarded and does not count)"
             )
         )
+        # The next round is round_no + 1; this feedback is only built when one
+        # follows. If that next round is the last, the model gets no further
+        # chance — make the write obligation unmissable so it doesn't spend the
+        # final round still inspecting (the observed failure mode).
+        closing = (
+            "This is your FINAL round: you MUST write the complete report to "
+            "/workspace/outputs/report.md and exit 0 now — do not only inspect "
+            "or print, and remember stdout is not captured. Respond with that "
+            "program (no fences, no prose)."
+            if round_no + 1 >= self.max_iterations
+            else "Respond with the next complete Python program (no fences, no "
+            "prose)."
+        )
         return "\n\n".join(
             (
                 f"Round {round_no} of {self.max_iterations}: your program "
                 f"{status}. {report_line}.",
                 self._feedback_stream("stdout", result.stdout, result.stdout_truncated),
                 self._feedback_stream("stderr", result.stderr, result.stderr_truncated),
-                "Respond with the next complete Python program (no fences, no "
-                "prose).",
+                closing,
             )
         )
 

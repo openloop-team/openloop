@@ -777,6 +777,29 @@ async def test_iterative_worker_feeds_exec_feedback_and_stops_on_clean_report(tm
     assert "no report was captured at /workspace/outputs/report.md" in feedback
 
 
+async def test_final_round_feedback_demands_the_report_be_written(tmp_path):
+    # The observed failure: the model spends its last round inspecting/printing
+    # and never writes the report. The feedback for the round before the last
+    # must make the write obligation unmissable.
+    workspace = _workspace(tmp_path)
+    gateway = _SequencedGateway([
+        _response("print(open('/workspace/inputs/sales.csv').read())"),
+        _response("open('/workspace/outputs/report.md','w').write('# done')"),
+    ])
+    sandbox = _ScriptedSealedSandbox([
+        (_sandbox_result(exit_code=0), None),  # round 1: inspected, no report
+        (_sandbox_result(exit_code=0), b"# done\n"),  # round 2 (final): writes it
+    ])
+    worker = _iterative_worker(sandbox, gateway, max_iterations=2)
+
+    await worker.run(workspace, _state())
+
+    final_round_prompt = gateway.calls[1][-1]["content"]
+    assert "FINAL round" in final_round_prompt
+    assert "you MUST write" in final_round_prompt
+    assert "/workspace/outputs/report.md" in final_round_prompt
+
+
 async def test_exec_feedback_is_hard_truncated_and_says_so(tmp_path):
     workspace = _workspace(tmp_path)
     gateway = _SequencedGateway([
