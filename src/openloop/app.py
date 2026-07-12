@@ -457,6 +457,11 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
         sandbox = build_worker_sandbox(settings)
         if sandbox is None:
             return None
+        log.info(
+            "coding worker backend=builtin (model=%s, sandbox=%s)",
+            settings.coding_worker_model,
+            settings.coding_worker_sandbox,
+        )
         return BuiltinCodingWorker(model=settings.coding_worker_model, sandbox=sandbox)
     if backend == "openhands":
         if settings.coding_worker_sandbox not in ("host", "docker"):
@@ -479,6 +484,11 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
         except OpenHandsUnavailable:
             log.error("openhands backend probe failed", exc_info=True)
             return None
+        log.info(
+            "coding worker backend=openhands (model=%s, sandbox=%s)",
+            settings.coding_worker_model,
+            settings.coding_worker_sandbox,
+        )
         return worker
     log.error(
         "unknown CODING_WORKER_BACKEND=%r (expected builtin|openhands)", backend

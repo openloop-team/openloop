@@ -686,6 +686,13 @@ class GitWorkspaceOrchestrator:
 
             # The worker edits the prepared workspace. No credential in scope:
             # not in its arguments, not anywhere under the workspace.
+            logger.info(
+                "coding-worker attempt job=%s repo=%s branch=%s backend=%s "
+                "(warm=%s)",
+                state.job_id, state.repo, state.branch,
+                type(self.worker).__name__,
+                bool(lease and lease.warm),
+            )
             try:
                 edit = await self.worker.run(workspace, state, on_step)
             except WorkerRunAborted as aborted:
@@ -754,6 +761,12 @@ class GitWorkspaceOrchestrator:
                 cost_usd=edit.cost_usd,
                 prompt_tokens=edit.prompt_tokens,
                 completion_tokens=edit.completion_tokens,
+            )
+            logger.info(
+                "coding-worker attempt done job=%s branch=%s backend=%s pushed "
+                "($%.4f, %d+%d tok)",
+                state.job_id, state.branch, type(self.worker).__name__,
+                edit.cost_usd, edit.prompt_tokens, edit.completion_tokens,
             )
             # Keep the checkout warm for this thread's next turn (a no-op for the
             # ephemeral path). The push already succeeded, so the warm tree is a
