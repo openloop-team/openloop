@@ -5,6 +5,8 @@
 #
 # Enable ANALYSIS_WORKER_ENABLED=true and/or CODING_WORKER_SANDBOX=docker in
 # .env for the workers that should use this access.
+# OPENLOOP_SANDBOX_ROOT must be an absolute host path, mounted at the same path
+# in the runtime, and writable by the runtime's numeric UID/GID.
 #
 # SECURITY: access to the Docker API is daemon-equivalent authority. Use this
 # only when the OpenLoop runtime and host are trusted and single-tenant.
@@ -21,12 +23,12 @@ services:
       # Sibling containers resolve bind mounts on the Docker daemon's host.
       # Both workers therefore use children of the same host-visible root that
       # is mounted into this controller at an identical absolute path.
-      CODING_WORKER_WORKSPACE_DIR: ${OPENLOOP_SANDBOX_ROOT:-${PWD}/.openloop-sandboxes}/coding
-      ANALYSIS_WORKER_WORKSPACE_DIR: ${OPENLOOP_SANDBOX_ROOT:-${PWD}/.openloop-sandboxes}/analysis
+      CODING_WORKER_WORKSPACE_DIR: ${OPENLOOP_SANDBOX_ROOT:?Set OPENLOOP_SANDBOX_ROOT to a pre-created absolute host path}/coding
+      ANALYSIS_WORKER_WORKSPACE_DIR: ${OPENLOOP_SANDBOX_ROOT:?Set OPENLOOP_SANDBOX_ROOT to a pre-created absolute host path}/analysis
     volumes:
       - type: bind
         source: ${DOCKER_SOCKET:-/var/run/docker.sock}
         target: /var/run/docker.sock
       - type: bind
-        source: ${OPENLOOP_SANDBOX_ROOT:-${PWD}/.openloop-sandboxes}
-        target: ${OPENLOOP_SANDBOX_ROOT:-${PWD}/.openloop-sandboxes}
+        source: ${OPENLOOP_SANDBOX_ROOT:?Set OPENLOOP_SANDBOX_ROOT to a pre-created absolute host path}
+        target: ${OPENLOOP_SANDBOX_ROOT:?Set OPENLOOP_SANDBOX_ROOT to a pre-created absolute host path}
