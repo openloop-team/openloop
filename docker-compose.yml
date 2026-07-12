@@ -1,3 +1,11 @@
+# The base development stack does not grant the runtime Docker-daemon access.
+# To enable fail-closed coding/analysis sandboxes as sibling containers on a
+# trusted machine, layer the explicit sandbox override:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.sandbox.yml up --build
+#
+# Then enable the desired sandbox-backed worker settings in .env.
+
 services:
   postgres:
     image: pgvector/pgvector:pg16

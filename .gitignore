@@ -223,3 +223,6 @@ __marimo__/
 # Local secret material (GitHub App private key etc.) — never commit.
 secrets/
 *.pem
+
+# Default host-visible workspaces for the opt-in Compose sandbox override.
+/.openloop-sandboxes/
