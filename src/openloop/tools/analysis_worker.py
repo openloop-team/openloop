@@ -560,6 +560,10 @@ class BuiltinAnalysisWorker:
                         "installation. Read only from /workspace/inputs and write the "
                         "final UTF-8 Markdown report exactly to "
                         "/workspace/outputs/report.md. Do not write anywhere else. "
+                        "Use that absolute path — a report written to a relative "
+                        "path (the working directory is a throwaway tmpfs) or "
+                        "printed to stdout is not captured and the run produces no "
+                        "report. "
                         "The Python standard library is guaranteed. Optional "
                         "analysis packages may not be installed, so prefer the "
                         "standard library unless an earlier execution proved an "
@@ -592,7 +596,11 @@ class BuiltinAnalysisWorker:
                     "complete, write the final UTF-8 Markdown report exactly to "
                     "/workspace/outputs/report.md and exit 0 — the loop ends as "
                     "soon as a run exits 0 with report.md present, so write "
-                    "report.md only in your final round. A report.md left by a "
+                    "report.md only in your final round. Always use that "
+                    "absolute path: a report written to a relative path (the "
+                    "working directory is a throwaway tmpfs) or printed to "
+                    "stdout is not captured and the run counts as producing no "
+                    "report. A report.md left by a "
                     "failed run is discarded before the next round. You have "
                     f"{self.max_iterations} rounds in total."
                 ),
@@ -631,7 +639,11 @@ class BuiltinAnalysisWorker:
             "report.md was written, but a run must exit 0 for it to be "
             "accepted; it will be discarded before your next run"
             if report_written
-            else "/workspace/outputs/report.md does not exist yet"
+            else (
+                "no report was captured at /workspace/outputs/report.md — write "
+                "it by that absolute path (a report written to a relative path "
+                "or printed to stdout is discarded and does not count)"
+            )
         )
         return "\n\n".join(
             (
@@ -924,7 +936,23 @@ class SealedAnalysisOrchestrator:
                 body, truncated = read_contained(
                     workspace / "outputs", _REPORT_NAME, max_bytes=self.report_max_bytes
                 )
-            except (FileNotFoundError, OSError, ReadOutViolation) as exc:
+            except FileNotFoundError:
+                # A clean exit that left no report is a job outcome, not an
+                # attack — read_contained deliberately lets absence through as
+                # FileNotFoundError, never a ReadOutViolation, so it must not be
+                # reported as a read-out "refusal". The usual cause is a
+                # generated program that wrote a relative path (the sealed cwd
+                # is a throwaway tmpfs) or printed the report instead of writing
+                # the output mount.
+                return _failed(
+                    state,
+                    "analysis finished but produced no report; the program must "
+                    f"write its report to /workspace/outputs/{_REPORT_NAME}",
+                    run=run,
+                )
+            except (OSError, ReadOutViolation) as exc:
+                # A real containment refusal (symlink/FIFO/hardlink) or an
+                # unexpected OS error — kept distinct from plain absence above.
                 return _failed(state, f"analysis report read-out refused: {exc}", run=run)
             if truncated:
                 return _failed(

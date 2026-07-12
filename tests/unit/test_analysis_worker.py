@@ -116,6 +116,19 @@ class _ReportWorker:
         return self.result
 
 
+class _NoReportWorker:
+    """Exits 0 but writes no report — the relative-path / stdout-only miss."""
+
+    def __init__(self, run=None):
+        self.result = run or _run()
+        self.workspaces = []
+
+    async def run(self, workspace, state, on_step=None, on_charge=None):
+        self.workspaces.append(workspace)
+        # Deliberately writes nothing to outputs/report.md.
+        return self.result
+
+
 class _TrackingInputStore(InMemoryInputStore):
     def __init__(self):
         super().__init__()
@@ -348,6 +361,35 @@ async def test_nonzero_execution_settles_spend_without_reading_report():
     assert "sensitive input" not in result.error
     assert await artifacts.get("analysis://job-1/report.md") is None
     assert usage.records[0].outcome == "ok"
+
+
+async def test_clean_exit_without_report_is_a_job_outcome_not_a_readout_refusal():
+    # A program that exits 0 but leaves no report.md is a benign outcome, not a
+    # containment refusal: read_contained raises FileNotFoundError (never a
+    # ReadOutViolation), so the message must say the run produced no report and
+    # must NOT read like a security block. Spend still settles before read-out.
+    inputs = InMemoryInputStore()
+    state = _state()
+    await inputs.stage(InputManifest(
+        input_ref=_INPUT_REF,
+        files=(InputFile("sales.csv", b"x"),),
+    ))
+    artifacts = InMemoryArtifactStore()
+    ledger, usage, agent = _ledger()
+    state.agent = agent.metadata.name
+    result = await SealedAnalysisOrchestrator(
+        _NoReportWorker(run=_run(exit_code=0)),
+        [StagedProvisioner(inputs)],
+        artifacts,
+        ledger=ledger,
+    ).run_analysis(state)
+
+    assert not result.ok
+    assert "produced no report" in result.error
+    assert "/workspace/outputs/report.md" in result.error
+    assert "refused" not in result.error  # not a containment refusal
+    assert await artifacts.get("analysis://job-1/report.md") is None
+    assert usage.records[0].outcome == "ok"  # spend settled before read-out
 
 
 async def test_empty_generated_program_still_settles_known_completion_spend():
@@ -732,7 +774,7 @@ async def test_iterative_worker_feeds_exec_feedback_and_stops_on_clean_report(tm
     assert "exited with code 1" in feedback
     assert "columns: a,b" in feedback
     assert "KeyError: 'c'" in feedback
-    assert "report.md does not exist" in feedback
+    assert "no report was captured at /workspace/outputs/report.md" in feedback
 
 
 async def test_exec_feedback_is_hard_truncated_and_says_so(tmp_path):
@@ -786,7 +828,7 @@ async def test_iterative_worker_discards_a_failed_rounds_report(tmp_path):
     assert sandbox.report_existed_at_start == [False, False, False]
     assert (workspace / "outputs" / "report.md").read_bytes() == b"# final\n"
     assert "discarded" in gateway.calls[1][-1]["content"]
-    assert "report.md does not exist" in gateway.calls[2][-1]["content"]
+    assert "no report was captured" in gateway.calls[2][-1]["content"]
 
 
 async def test_iterative_worker_returns_the_last_run_when_rounds_are_exhausted(tmp_path):
