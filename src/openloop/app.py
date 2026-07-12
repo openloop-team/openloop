@@ -520,6 +520,11 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
         except ClaudeCodeUnavailable:
             log.error("claude backend probe failed", exc_info=True)
             return None
+        log.info(
+            "coding worker backend=claude (model=%s, bin=%s, host sandbox)",
+            settings.coding_worker_model,
+            settings.coding_worker_claude_bin,
+        )
         return claude_worker
     log.error(
         "unknown CODING_WORKER_BACKEND=%r (expected builtin|openhands|claude)",
