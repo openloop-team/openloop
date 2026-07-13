@@ -7,7 +7,10 @@ import yaml
 
 ROOT = Path(__file__).parents[2]
 OVERRIDE = ROOT / "docker-compose.sandbox.yml"
-SANDBOX_ROOT = "${OPENLOOP_SANDBOX_ROOT:-${PWD}/.openloop-sandboxes}"
+SANDBOX_ROOT = (
+    "${OPENLOOP_SANDBOX_ROOT:?Set OPENLOOP_SANDBOX_ROOT to a pre-created "
+    "absolute host path}"
+)
 
 
 def _compose(path: Path) -> dict:
@@ -16,6 +19,8 @@ def _compose(path: Path) -> dict:
 
 def test_sandbox_override_exposes_docker_and_preserves_same_path_root():
     runtime = _compose(OVERRIDE)["services"]["runtime"]
+
+    assert runtime["group_add"] == ["${DOCKER_GID:-0}"]
 
     mounts = {mount["target"]: mount for mount in runtime["volumes"]}
     socket = mounts["/var/run/docker.sock"]

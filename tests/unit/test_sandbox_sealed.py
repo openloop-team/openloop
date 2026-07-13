@@ -294,6 +294,25 @@ def test_probe_sealed_passes_and_rehearses_the_real_argv(monkeypatch, tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_probe_sealed_fails_closed_when_workspace_root_is_unwritable(
+    monkeypatch, tmp_path
+):
+    _fake_sealed_probe(monkeypatch)
+
+    def deny_mkdir(self, *args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "mkdir", deny_mkdir)
+
+    with pytest.raises(
+        sandbox_runner.SandboxUnavailable,
+        match="sealed analysis sandbox probe workspace is not usable",
+    ):
+        DockerSandbox("img", kind="analysis").probe_sealed(
+            workspace_root=tmp_path / "unwritable"
+        )
+
+
 def test_probe_sealed_names_a_demoted_pid1(monkeypatch, tmp_path):
     _fake_sealed_probe(monkeypatch, returncode=41, writes=False, stderr="PID1=tini")
     with pytest.raises(sandbox_runner.SandboxUnavailable, match="PID 1"):

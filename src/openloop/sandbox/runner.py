@@ -98,6 +98,23 @@ _KILL_STAGGER_SECONDS = 15.0
 _POST_KILL_CLIENT_TIMEOUT_SECONDS = 30.0
 
 
+def _make_probe_workspace(
+    workspace_root: Path | None, *, prefix: str, probe_name: str
+) -> Path:
+    """Create a probe workspace or translate host-path failures fail-closed."""
+    import tempfile
+
+    location = workspace_root or Path("<system temporary directory>")
+    try:
+        if workspace_root is not None:
+            workspace_root.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix=prefix, dir=workspace_root))
+    except OSError as exc:
+        raise SandboxUnavailable(
+            f"{probe_name} probe workspace is not usable at {location}: {exc}"
+        ) from exc
+
+
 @dataclass(slots=True, frozen=True)
 class SandboxLimits:
     """Resource/time bounds for one sealed run (docs/sealed-analysis-worker.md §4.1).
@@ -221,7 +238,6 @@ class DockerSandbox:
         """
         import shutil as _shutil
         import subprocess
-        import tempfile as _tempfile
 
         # Step 1: CLI + daemon ping, so a missing binary or dead daemon gets
         # its own clear error instead of surfacing as a failed container run.
@@ -231,10 +247,10 @@ class DockerSandbox:
         # probe command because git is the only binary the worker requires of
         # the image, and it *writes* — proving the mount is writable by the
         # mapped uid, not just present.
-        if workspace_root is not None:
-            workspace_root.mkdir(parents=True, exist_ok=True)
-        workspace = Path(
-            _tempfile.mkdtemp(prefix="openloop-sandbox-probe-", dir=workspace_root)
+        workspace = _make_probe_workspace(
+            workspace_root,
+            prefix="openloop-sandbox-probe-",
+            probe_name="docker sandbox",
         )
         try:
             args = self._args(
@@ -511,14 +527,13 @@ class DockerSandbox:
         """
         import shutil as _shutil
         import subprocess
-        import tempfile as _tempfile
 
         self._assert_docker_usable()
 
-        if workspace_root is not None:
-            workspace_root.mkdir(parents=True, exist_ok=True)
-        workspace = Path(
-            _tempfile.mkdtemp(prefix="openloop-sealed-probe-", dir=workspace_root)
+        workspace = _make_probe_workspace(
+            workspace_root,
+            prefix="openloop-sealed-probe-",
+            probe_name="sealed analysis sandbox",
         )
         try:
             inputs = workspace / "inputs"
