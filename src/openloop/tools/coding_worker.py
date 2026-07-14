@@ -473,8 +473,18 @@ class CodingWorkerConnector:
             draft=True,
         )
 
-    # Statuses that are done (no resume) vs. interrupted (resume on startup).
-    _TERMINAL = ("opened", "failed")
+    # Positive legacy recovery policy. A new lifecycle must never become
+    # executable merely because it is not in a stale terminal tuple.
+    _LEGACY_RECOVERABLE = frozenset({"running", "pushed", "open_pr_failed"})
+    _LEGACY_TERMINAL = frozenset({"opened", "failed"})
+    _VERSIONED_STATE_KEYS = frozenset(
+        {
+            "schema_version",
+            "minimum_reader_version",
+            "openhands_resume",
+            "openhands_resume_state",
+        }
+    )
 
     async def resume_incomplete(self) -> list[str]:
         """Re-drive jobs left non-terminal by a crash. Call once at startup.
@@ -497,7 +507,25 @@ class CodingWorkerConnector:
             return []
         resumed: list[str] = []
         for cp in await self.checkpoints.recent(limit=1000):
-            if cp.status in self._TERMINAL:
+            if cp.status in self._LEGACY_TERMINAL:
+                continue
+            if not isinstance(cp.state_json, dict) or (
+                self._VERSIONED_STATE_KEYS.intersection(cp.state_json)
+            ):
+                logger.error(
+                    "quarantining coding-worker checkpoint %s: versioned or "
+                    "malformed state requires a typed reconciler (status=%s)",
+                    cp.job_id,
+                    cp.status,
+                )
+                continue
+            if cp.status not in self._LEGACY_RECOVERABLE:
+                logger.error(
+                    "quarantining coding-worker checkpoint %s: unsupported "
+                    "legacy lifecycle status=%s",
+                    cp.job_id,
+                    cp.status,
+                )
                 continue
             logger.info("resuming coding-worker job %s (was %s)", cp.job_id, cp.status)
             await self.execute(

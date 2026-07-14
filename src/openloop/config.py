@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from typing import Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from openloop.tools.openhands_docker import DEFAULT_OPENHANDS_SERVER_IMAGE
 
 
 # Temporary smoke-test default: the official multi-platform Python 3.12 slim
@@ -96,14 +98,24 @@ class Settings(BaseSettings):
     coding_worker_claude_permission_mode: str = "acceptEdits"
     # Agent-server image for the OpenHands docker runtime
     # (CODING_WORKER_SANDBOX=docker + backend=openhands).
-    coding_worker_openhands_image: str = (
-        "ghcr.io/openhands/agent-server:latest-python"
-    )
+    coding_worker_openhands_image: str = DEFAULT_OPENHANDS_SERVER_IMAGE
     # Docker network for the OpenHands agent-server container. Unset = the
     # default bridge (the agent loop runs in-container and needs egress to
     # the model provider — "none" would break it). Point at an egress-proxy
     # network to move to an allowlist model.
     coding_worker_openhands_network: str | None = None
+    # Phase 0 cold-resume foundation. The root defaults beneath the system temp
+    # directory; production may point it at storage shared by resume-capable
+    # replicas. It always stays outside Git checkouts.
+    coding_worker_openhands_state_dir: str | None = None
+    # Dedicated base64-encoded 32-byte master key. Required for Docker OpenHands;
+    # SecretStr keeps it out of Settings repr/logging. Never reuse another app,
+    # Slack, GitHub, or provider secret here.
+    coding_worker_openhands_state_master_key: SecretStr | None = None
+    coding_worker_openhands_master_key_id: str = "key-v1"
+    # Phase 0 installs only the safe foundation. Parking/resume remains
+    # unreachable while this flag is false (the default).
+    coding_worker_openhands_cold_resume_enabled: bool = False
     # Where the worker's model-influenced execution (applying generated edits)
     # runs:
     #   "host"   (default) — a plain subprocess in this process's environment.

@@ -389,6 +389,13 @@ the workflow.
   capped **fail-closed** by the owning agent's `per_task_usd` before anything
   is pushed — on both durable paths — and the agentic backend refuses to
   register without that cap
+- [x] OpenHands cold-resume runtime foundation (Phase 0) — the Docker
+  agent-server is digest-pinned, loopback-only, and authenticated; conversation
+  state lives in a private per-job mount outside the checkout; independent
+  per-job keys protect conversation state and AES-GCM workspace artifacts; and
+  startup recovery uses a positive legacy allowlist. The cold-resume feature
+  flag remains off: confirmation parking, fresh-container attachment, and Slack
+  Accept/Reject land in the proof-gated later phases.
 - [x] Claude Code worker backend (`CODING_WORKER_BACKEND=claude`) —
   **experimental, personal use only**: drives the `claude` CLI in headless mode
   (`claude -p`) over the same prepared, credential-free workspace, authenticating

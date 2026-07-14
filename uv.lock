@@ -6341,6 +6341,7 @@ mcp = [
     { name = "mcp" },
 ]
 openhands = [
+    { name = "cryptography", marker = "python_full_version >= '3.12'" },
     { name = "openhands-sdk", marker = "python_full_version >= '3.12'" },
     { name = "openhands-tools", marker = "python_full_version >= '3.12'" },
     { name = "openhands-workspace", marker = "python_full_version >= '3.12'" },
@@ -6352,6 +6353,7 @@ redis = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.29" },
+    { name = "cryptography", marker = "python_full_version >= '3.12' and extra == 'openhands'", specifier = ">=42" },
     { name = "fastapi", specifier = ">=0.110" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },

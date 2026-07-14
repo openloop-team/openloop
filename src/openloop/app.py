@@ -474,14 +474,66 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
                 settings.coding_worker_sandbox,
             )
             return None
+        if (
+            settings.coding_worker_openhands_cold_resume_enabled
+            and settings.coding_worker_sandbox != "docker"
+        ):
+            log.error(
+                "OpenHands cold resume requires CODING_WORKER_SANDBOX=docker; "
+                "host mode has no durable authenticated agent-server lifecycle"
+            )
+            return None
+
+        docker = settings.coding_worker_sandbox == "docker"
+        docker_adapter = None
+        artifact_store = None
+        if docker:
+            master_secret = settings.coding_worker_openhands_state_master_key
+            if master_secret is None:
+                log.error(
+                    "Docker OpenHands requires "
+                    "CODING_WORKER_OPENHANDS_STATE_MASTER_KEY (a dedicated "
+                    "base64-encoded 32-byte secret)"
+                )
+                return None
+            try:
+                from openloop.tools.openhands_artifacts import WorkspaceArtifactStore
+                from openloop.tools.openhands_docker import HardenedDockerWorkspace
+                from openloop.tools.openhands_state import (
+                    OpenHandsKeyDeriver,
+                    OpenHandsStateLayout,
+                )
+
+                layout = OpenHandsStateLayout(
+                    settings.coding_worker_openhands_state_dir
+                )
+                keys = OpenHandsKeyDeriver.from_base64(
+                    master_secret.get_secret_value(),
+                    master_key_id=settings.coding_worker_openhands_master_key_id,
+                )
+                artifact_store = WorkspaceArtifactStore(layout, keys)
+                docker_adapter = HardenedDockerWorkspace(
+                    layout=layout,
+                    keys=keys,
+                    server_image=settings.coding_worker_openhands_image,
+                    network=settings.coding_worker_openhands_network,
+                )
+            except Exception as exc:  # noqa: BLE001 — boot gate normalizes errors
+                log.error(
+                    "OpenHands hardened Docker state configuration is invalid: %s",
+                    exc,
+                )
+                return None
         worker = OpenHandsCodingWorker(
             settings.coding_worker_model,
             api_key=_provider_key(settings, settings.coding_worker_model),
             max_iterations=settings.coding_worker_max_iterations,
             deadline_seconds=settings.coding_worker_deadline_seconds or None,
-            docker=settings.coding_worker_sandbox == "docker",
+            docker=docker,
             server_image=settings.coding_worker_openhands_image,
             network=settings.coding_worker_openhands_network,
+            docker_adapter=docker_adapter,
+            artifact_store=artifact_store,
         )
         try:
             worker.probe()

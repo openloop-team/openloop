@@ -200,6 +200,43 @@ async def test_reconciler_resumes_only_non_terminal_jobs():
     assert (await store.get("done1")).status == "opened"  # untouched
 
 
+async def test_reconciler_quarantines_unknown_legacy_status(caplog):
+    store = InMemoryCheckpointStore()
+    runner = CountingRunner()
+    conn = CodingWorkerConnector(runner, FakeGitHub(), checkpoints=store)
+    await store.upsert(_seed_checkpoint("parked1", "parked", ["clone"]))
+
+    with caplog.at_level("ERROR"):
+        resumed = await conn.resume_incomplete()
+
+    assert resumed == []
+    assert runner.runs == 0
+    assert "quarantining" in caplog.text
+    assert "parked" in caplog.text
+    assert (await store.get("parked1")).status == "parked"
+
+
+async def test_reconciler_never_sends_versioned_running_state_to_legacy_execute(
+    caplog,
+):
+    store = InMemoryCheckpointStore()
+    runner = CountingRunner()
+    conn = CodingWorkerConnector(runner, FakeGitHub(), checkpoints=store)
+    checkpoint = _seed_checkpoint("cold1", "running", ["clone"])
+    checkpoint.state_json["openhands_resume"] = {
+        "schema_version": 1,
+        "status": "running",
+    }
+    await store.upsert(checkpoint)
+
+    with caplog.at_level("ERROR"):
+        resumed = await conn.resume_incomplete()
+
+    assert resumed == []
+    assert runner.runs == 0
+    assert "typed reconciler" in caplog.text
+
+
 async def test_existing_pr_is_reused_not_duplicated():
     # Checkpoint says branch pushed but the "opened" record was lost; a PR already
     # exists on GitHub. Resume must reuse it via find_pull, not open a second.

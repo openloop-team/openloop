@@ -7,6 +7,7 @@ instead of degrading to a different worker or a weaker boundary.
 """
 
 from pathlib import Path
+import base64
 import pytest
 
 import openloop.app as appmod
@@ -30,6 +31,10 @@ def _settings(**kwargs):
     return Settings(
         coding_worker_enabled=True, github_token="t", **kwargs
     )
+
+
+def _state_master_key():
+    return base64.urlsafe_b64encode(b"k" * 32).decode("ascii")
 
 
 def _gateway(settings, agents=None, usage=None):
@@ -78,13 +83,15 @@ def test_unknown_backend_fails_closed(caplog):
     assert "CODING WORKER DISABLED" in caplog.text
 
 
-def test_openhands_registers_with_cap_and_probe(monkeypatch):
+def test_openhands_registers_with_cap_and_probe(monkeypatch, tmp_path):
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
     gateway = _gateway(
         _settings(
             coding_worker_backend="openhands",
             coding_worker_sandbox="docker",
             coding_worker_openhands_network="egress-proxy",
+            coding_worker_openhands_state_dir=str(tmp_path / "openhands-state"),
+            coding_worker_openhands_state_master_key=_state_master_key(),
             anthropic_api_key="sk-test",
         )
     )
@@ -96,6 +103,66 @@ def test_openhands_registers_with_cap_and_probe(monkeypatch):
     assert worker.network == "egress-proxy"
     # The provider key for the worker model is threaded from settings.
     assert worker._api_key == "sk-test"
+    assert worker._docker_adapter is not None
+    assert worker.artifact_store is not None
+    assert worker._docker_adapter.layout.root == (
+        tmp_path / "openhands-state"
+    ).resolve()
+
+
+def test_openhands_docker_without_dedicated_state_secret_fails_closed(
+    monkeypatch, caplog
+):
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    with caplog.at_level("ERROR"):
+        gateway = _gateway(
+            _settings(
+                coding_worker_backend="openhands",
+                coding_worker_sandbox="docker",
+            )
+        )
+
+    assert "coding_worker" not in gateway._tools
+    assert "STATE_MASTER_KEY" in caplog.text
+
+
+def test_openhands_invalid_state_secret_is_not_logged(monkeypatch, caplog, tmp_path):
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    invalid_secret = "not-valid-base64!!"
+    with caplog.at_level("ERROR"):
+        gateway = _gateway(
+            _settings(
+                coding_worker_backend="openhands",
+                coding_worker_sandbox="docker",
+                coding_worker_openhands_state_dir=str(tmp_path / "state"),
+                coding_worker_openhands_state_master_key=invalid_secret,
+            )
+        )
+
+    assert "coding_worker" not in gateway._tools
+    assert "state configuration is invalid" in caplog.text
+    assert invalid_secret not in caplog.text
+
+
+def test_openhands_cold_resume_refuses_host_mode(monkeypatch, caplog):
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    with caplog.at_level("ERROR"):
+        gateway = _gateway(
+            _settings(
+                coding_worker_backend="openhands",
+                coding_worker_sandbox="host",
+                coding_worker_openhands_cold_resume_enabled=True,
+            )
+        )
+
+    assert "coding_worker" not in gateway._tools
+    assert "cold resume requires" in caplog.text
+
+
+def test_openhands_state_secret_is_redacted_from_settings_repr():
+    secret = _state_master_key()
+    settings = _settings(coding_worker_openhands_state_master_key=secret)
+    assert secret not in repr(settings)
 
 
 def test_openhands_without_per_task_cap_fails_closed(monkeypatch, caplog):

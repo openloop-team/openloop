@@ -48,9 +48,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from openloop.tools.coding_worker import StepCallback, WorkerEdit, WorkerRunAborted
+from openloop.tools.openhands_docker import (
+    DEFAULT_OPENHANDS_SERVER_IMAGE,
+    HardenedDockerWorkspace,
+    HardenedDockerWorkspaceError,
+)
 
 if TYPE_CHECKING:
     from openloop.tools.coding_worker import WorkerState
+    from openloop.tools.openhands_artifacts import WorkspaceArtifactStore
 
 logger = logging.getLogger(__name__)
 
@@ -78,9 +84,9 @@ PR_FILE = "OPENLOOP_PR.md"
 # checkpoint write.
 _HEARTBEAT_SECONDS = 5.0
 
-_DEFAULT_SERVER_IMAGE = "ghcr.io/openhands/agent-server:latest-python"
+_DEFAULT_SERVER_IMAGE = DEFAULT_OPENHANDS_SERVER_IMAGE
 
-# A conversation factory takes (workspace, callbacks) and returns a
+# A conversation factory takes (workspace, callbacks, job_id) and returns a
 # Conversation-shaped object (send_message / run / conversation_stats /
 # close) plus a cleanup callable that tears down whatever runtime the factory
 # started (the docker agent-server container; a no-op for local mode).
@@ -89,7 +95,7 @@ _DEFAULT_SERVER_IMAGE = "ghcr.io/openhands/agent-server:latest-python"
 # DockerWorkspace owns its container (started at construction) and only its
 # own cleanup() reaps it. Injectable so tests never import the heavy SDK.
 ConversationFactory = Callable[
-    [Path, list], "tuple[object, Callable[[], None]]"
+    [Path, list, str], "tuple[object, Callable[[], None]]"
 ]
 
 
@@ -118,6 +124,8 @@ class OpenHandsCodingWorker:
         docker: bool = False,
         server_image: str = _DEFAULT_SERVER_IMAGE,
         network: str | None = None,
+        docker_adapter: HardenedDockerWorkspace | None = None,
+        artifact_store: "WorkspaceArtifactStore | None" = None,
         conversation_factory: ConversationFactory | None = None,
     ) -> None:
         self.model = model
@@ -132,6 +140,8 @@ class OpenHandsCodingWorker:
         # None = docker's default bridge (the agent server needs egress to the
         # model provider); set to an egress-proxy network for an allowlist.
         self.network = network
+        self._docker_adapter = docker_adapter
+        self.artifact_store = artifact_store
         self._factory = conversation_factory or self._build_conversation
 
     def probe(self) -> None:
@@ -160,6 +170,14 @@ class OpenHandsCodingWorker:
                     "openhands-workspace is not installed — required for the "
                     f"docker-mounted OpenHands runtime ({exc})"
                 ) from exc
+            if self._docker_adapter is None:
+                raise OpenHandsUnavailable(
+                    "the hardened OpenHands Docker adapter is not configured"
+                )
+            try:
+                self._docker_adapter.probe()
+            except HardenedDockerWorkspaceError as exc:
+                raise OpenHandsUnavailable(str(exc)) from exc
             import subprocess
 
             try:
@@ -182,7 +200,12 @@ class OpenHandsCodingWorker:
         loop = asyncio.get_running_loop()
         heartbeat = self._heartbeat(loop, state, on_step)
         cost, prompt_tokens, completion_tokens = await asyncio.to_thread(
-            self._drive, workspace, self._prompt(state), heartbeat, state.budget_usd
+            self._drive,
+            workspace,
+            self._prompt(state),
+            heartbeat,
+            state.budget_usd,
+            state.job_id,
         )
         title, body = self._read_pr_file(workspace, state)
         state.completed_steps.append("edit")
@@ -202,6 +225,7 @@ class OpenHandsCodingWorker:
         prompt: str,
         heartbeat,
         cost_limit: float | None,
+        job_id: str,
     ) -> tuple[float, int, int]:
         """Run the conversation to completion (worker thread; SDK is sync).
 
@@ -238,7 +262,7 @@ class OpenHandsCodingWorker:
                     f"exceeded the {deadline:.0f}s attempt deadline"
                 )
 
-        conversation, cleanup = self._factory(workspace, [guard])
+        conversation, cleanup = self._factory(workspace, [guard], job_id)
         conv_box.append(conversation)
         try:
             conversation.send_message(prompt)
@@ -372,7 +396,7 @@ class OpenHandsCodingWorker:
         body = "\n".join(lines[1:]).strip()
         return title, body
 
-    def _build_conversation(self, workspace: Path, callbacks: list):
+    def _build_conversation(self, workspace: Path, callbacks: list, job_id: str):
         """Construct the real SDK conversation (verified against SDK v1).
 
         Local mode passes the workspace path (LocalConversation); docker mode
@@ -391,19 +415,13 @@ class OpenHandsCodingWorker:
         )
         cleanup: Callable[[], None] = lambda: None  # noqa: E731
         if self.docker:
-            from openhands.workspace import DockerWorkspace
-
-            # Constructing the workspace STARTS the agent-server container;
-            # only its own cleanup() stops it (Conversation.close() will not).
-            target: object = DockerWorkspace(
-                server_image=self.server_image,
-                working_dir="/workspace",
-                volumes=[f"{workspace}:/workspace:rw"],
-                # Forward nothing from the controller environment (the field
-                # defaults to forwarding DEBUG; even that is not needed).
-                forward_env=[],
-                network=self.network,
-            )
+            if self._docker_adapter is None:
+                raise OpenHandsUnavailable(
+                    "the hardened OpenHands Docker adapter is not configured"
+                )
+            # Constructing the adapter target starts the authenticated,
+            # loopback-only agent-server over this job's isolated state mount.
+            target: object = self._docker_adapter.create(workspace, job_id)
             cleanup = target.cleanup
         else:
             target = str(workspace)

@@ -87,7 +87,8 @@ class FakeConversation:
 def _worker(**fake_kwargs):
     created = []
 
-    def factory(workspace, callbacks):
+    def factory(workspace, callbacks, job_id):
+        assert job_id == "j1"
         conversation = FakeConversation(workspace, callbacks, **fake_kwargs)
         created.append(conversation)
 
@@ -194,7 +195,8 @@ class SleepyConversation(FakeConversation):
 def _worker_with(conv_cls, *, deadline_seconds=None, **fake_kwargs):
     created = []
 
-    def factory(workspace, callbacks):
+    def factory(workspace, callbacks, job_id):
+        assert job_id == "j1"
         conversation = conv_cls(workspace, callbacks, **fake_kwargs)
         created.append(conversation)
         return conversation, lambda: conversation.teardown.append("cleanup")
@@ -269,7 +271,7 @@ async def test_metrics_api_drift_fails_the_attempt(tmp_path):
 
     worker = OpenHandsCodingWorker(
         "m",
-        conversation_factory=lambda ws, cbs: (
+        conversation_factory=lambda ws, cbs, job_id: (
             NoStatsConversation(ws, cbs), lambda: None
         ),
     )
@@ -287,7 +289,8 @@ async def test_failed_run_still_reaps_the_runtime(tmp_path):
 
     torn_down = []
 
-    def factory(ws, cbs):
+    def factory(ws, cbs, job_id):
+        assert job_id == "j1"
         conversation = BoomConversation(ws, cbs)
         conversation.teardown = torn_down
         return conversation, lambda: torn_down.append("cleanup")
