@@ -534,6 +534,9 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
             network=settings.coding_worker_openhands_network,
             docker_adapter=docker_adapter,
             artifact_store=artifact_store,
+            cold_resume_enabled=(
+                settings.coding_worker_openhands_cold_resume_enabled
+            ),
         )
         try:
             worker.probe()

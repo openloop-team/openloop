@@ -8,6 +8,17 @@ from pathlib import Path
 from openloop.agents import load_agent
 from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import CodingWorkerConnector
+from openloop.tools.coding_worker import WorkerOutcome
+from openloop.tools.openhands_artifacts import (
+    WorkspaceArtifact,
+    WorkspaceArtifactIdentity,
+)
+from openloop.tools.openhands_docker import DEFAULT_OPENHANDS_SERVER_IMAGE
+from openloop.tools.openhands_resume import (
+    OpenHandsResumeState,
+    WorkerPaused,
+    WorkspaceArtifactRef,
+)
 from openloop.tools.github import GitHubConnector
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from openloop.workflows.coding_worker import _worker_phase, build_coding_worker_workflow
@@ -197,3 +208,91 @@ async def test_resume_after_crash_between_approval_and_pr():
     assert (await store.get(job_id)).status == "completed"
     assert len(github.pulls) == 1  # PR opened on resume
     assert runner.runs == []  # run_worker was already done; not re-run
+
+
+async def test_workflow_can_park_repeatedly_on_typed_openhands_decision():
+    class PausingRunner:
+        def __init__(self):
+            self.decisions = []
+
+        async def run_attempt(self, state, on_step=None):
+            resume = OpenHandsResumeState(
+                status="running",
+                conversation_id="conversation-1",
+                segment_id="segment-1",
+                base_ref="main",
+                resolved_base_commit="a" * 40,
+                image_digest=DEFAULT_OPENHANDS_SERVER_IMAGE,
+                master_key_id="key-v1",
+                slack_requester_id="maciag.artur",
+            )
+            identity = WorkspaceArtifactIdentity(
+                state.job_id, "conversation-1", "segment-1", "paused"
+            )
+            artifact = WorkspaceArtifactRef(
+                WorkspaceArtifact(
+                    identity=identity,
+                    key=(
+                        f"jobs/{state.job_id}/artifacts/conversation-1/"
+                        "segment-1.paused.artifact"
+                    ),
+                    ciphertext_sha256="b" * 64,
+                    ciphertext_bytes=10,
+                    envelope_version=1,
+                    master_key_id="key-v1",
+                ),
+                "git-delta",
+                "a" * 40,
+            )
+            paused = WorkerPaused(
+                "conversation-1",
+                "segment-1",
+                "decision-1",
+                "Run terminal",
+                "c" * 64,
+                artifact,
+            )
+            resume.transition_to(
+                "parking",
+                decision_id=paused.decision_id,
+                pending_action_summary=paused.pending_action_summary,
+                pending_action_fingerprint=paused.pending_action_fingerprint,
+                workspace_artifact=artifact,
+            )
+            resume.transition_to("parked")
+            state.openhands_resume = resume
+            if on_step:
+                await on_step(state)
+            return paused
+
+        async def resume_attempt(self, state, decision, on_step=None):
+            self.decisions.append(decision)
+            state.openhands_resume = None
+            return WorkerOutcome(state.branch, "Done", "Body")
+
+    runner = PausingRunner()
+    gw, engine, store, _, github = _setup(runner=runner)
+    pending = await gw.invoke(
+        _agent(), "coding_worker.pr:write", {"repo": "acme/x", "instruction": "x"}
+    )
+    job_id = pending.approval.args["job_id"]
+    await gw.resolve(pending.approval.id, "@maciag.artur", approve=True)
+    parked = await engine.wait_background(job_id)
+
+    assert parked.status == "waiting"
+    assert parked.waiting_on == "openhands_decision:decision-1"
+    assert github.pulls == []
+
+    done = await engine.send_event(
+        job_id,
+        "openhands_decision:decision-1",
+        {
+            "kind": "accept",
+            "decision_id": "decision-1",
+            "event_id": "Ev123",
+            "actor_id": "maciag.artur",
+        },
+    )
+    assert done.status == "completed"
+    assert runner.decisions[0].kind == "accept"
+    assert len(github.pulls) == 1

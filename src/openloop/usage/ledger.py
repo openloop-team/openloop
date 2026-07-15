@@ -136,50 +136,75 @@ class WorkerSpendLedger:
         agent: str | None = None,
         job_id: str,
         idempotency_key: str | None = None,
-        cost_usd: float,
-        prompt_tokens: int = 0,
-        completion_tokens: int = 0,
+        cost_usd: float | None = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        record_cost_usd: float | None = None,
+        record_prompt_tokens: int | None = None,
+        record_completion_tokens: int | None = None,
+        cap_cost_usd: float | None = None,
     ) -> None:
-        """Record the attempt's spend; raise if it blew the per-task cap.
+        """Record one segment delta and cap against cumulative task spend.
 
-        Always records first — over-budget spend already happened and must be
-        visible in the audit trail — then fails the attempt. Callers run this
-        *before* the push/PR boundary so an over-budget change never ships.
+        The legacy ``cost_usd``/token inputs remain accepted as a one-segment
+        task. Cold resume supplies the explicit ``record_*`` deltas plus
+        ``cap_cost_usd`` cumulative total in the same call, preventing either
+        view from drifting away from the other.
         """
+        record_cost = record_cost_usd if record_cost_usd is not None else cost_usd
+        record_prompt = (
+            record_prompt_tokens
+            if record_prompt_tokens is not None
+            else (prompt_tokens or 0)
+        )
+        record_completion = (
+            record_completion_tokens
+            if record_completion_tokens is not None
+            else (completion_tokens or 0)
+        )
+        if record_cost is None:
+            raise ValueError("worker spend settlement requires record cost")
+        cap_cost = cap_cost_usd if cap_cost_usd is not None else record_cost
+        if min(record_cost, record_prompt, record_completion, cap_cost) < 0:
+            raise ValueError("worker spend settlement cannot be negative")
         attributed = self._agent_for(agent)
         per_task_usd = attributed.spec.budget.per_task_usd
         if reason := self._missing_cap_reason(attributed):
             await self._record(
                 attributed,
-                cost_usd=cost_usd,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
+                cost_usd=record_cost,
+                prompt_tokens=record_prompt,
+                completion_tokens=record_completion,
                 outcome="blocked",
                 idempotency_key=idempotency_key,
             )
             raise WorkerBudgetExceeded(
-                f"worker job {job_id} spent ${cost_usd:.4f}, but {reason} "
+                f"worker job {job_id} spent ${cap_cost:.4f}, but {reason} "
                 "— failing closed (no push, no PR)"
             )
 
-        over = per_task_usd is not None and cost_usd > per_task_usd
+        over = per_task_usd is not None and cap_cost > per_task_usd
         await self._record(
             attributed,
-            cost_usd=cost_usd,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
+            cost_usd=record_cost,
+            prompt_tokens=record_prompt,
+            completion_tokens=record_completion,
             outcome="over_task_budget" if over else "ok",
             idempotency_key=idempotency_key,
         )
         if over:
             raise WorkerBudgetExceeded(
-                f"worker job {job_id} spent ${cost_usd:.4f}, over agent "
+                f"worker job {job_id} spent ${cap_cost:.4f}, over agent "
                 f"{attributed.metadata.name}'s ${per_task_usd:.2f} per-task "
                 "budget — failing closed (no push, no PR)"
             )
         logger.debug(
-            "worker job %s spend recorded: $%.4f against %s",
-            job_id, cost_usd, budget_scope_key(attributed),
+            "worker job %s segment spend recorded: $%.4f (cumulative $%.4f) "
+            "against %s",
+            job_id,
+            record_cost,
+            cap_cost,
+            budget_scope_key(attributed),
         )
 
     async def _record(

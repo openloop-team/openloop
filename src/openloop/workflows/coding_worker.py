@@ -4,14 +4,15 @@ The whole approve → run-worker → open-draft-PR flow becomes three steps:
 
 1. ``await_approval`` — a **wait node**. The instance is started (parked here)
    when the action is held for approval; the approval event wakes it.
-2. ``run_worker`` — one **opaque replay unit** run by the shared
+2. ``run_worker`` — one durable worker lifecycle run by the shared
    :class:`~openloop.tools.coding_worker.GitWorkspaceOrchestrator`: provision an
    ephemeral workspace → credential-free worker edit → commit → force-push to
    the job-exclusive branch. Provision lives *inside* the unit, never as its own
    durable step — the engine skips completed steps on re-drive, and a workspace
-   provisioned before a crash no longer exists. The step stays ``resumable``
-   (the engine's ``resumable=False`` means *abandon before replay*): a resume
-   runs a fresh attempt; the force-push keeps the retry idempotent.
+   provisioned before a crash no longer exists. OpenHands may dynamically park
+   this same step on one or more typed confirmation events; each wake restores
+   the exact recorded base and artifact, while an interrupted active segment
+   fails closed.
 3. ``open_pr`` — open the draft PR, reusing an existing one for the head branch.
 
 This is the same logic as the connector's checkpoint fallback, but its durability
@@ -30,7 +31,13 @@ from openloop.tools.coding_worker import (
     _pr_body,
 )
 from openloop.tools.github import GitHubClient
-from openloop.workflows.engine import Step, Workflow, WorkflowContext
+from openloop.tools.openhands_resume import ResumeDecision, WorkerPaused
+from openloop.workflows.engine import (
+    Step,
+    Workflow,
+    WorkflowContext,
+    WorkflowPark,
+)
 
 WORKFLOW_NAME = "coding_worker"
 
@@ -71,26 +78,72 @@ def build_coding_worker_workflow(
 
     async def run_worker(ctx: WorkflowContext) -> None:
         s = ctx.state
-        state = WorkerState(
-            job_id=s["job_id"],
-            repo=s["repo"],
-            instruction=s["instruction"],
-            base=s.get("base", "main"),
-            branch=_branch_for(s["job_id"]),
-            # The invoking agent, stamped into the approval args by the
-            # gateway (Phase 5) — the ledger attributes spend to it.
-            agent=s.get("agent"),
-            # The requesting thread's warm-context key (Phase B) — lets the
-            # orchestrator reuse this thread's kept checkout.
-            warm_key=s.get("warm_key"),
+        state = (
+            WorkerState.from_dict(s["worker_state"])
+            if s.get("worker_state") is not None
+            else WorkerState(
+                job_id=s["job_id"],
+                repo=s["repo"],
+                instruction=s["instruction"],
+                base=s.get("base", "main"),
+                branch=_branch_for(s["job_id"]),
+                # The invoking agent, stamped into the approval args by the
+                # gateway (Phase 5) — the ledger attributes spend to it.
+                agent=s.get("agent"),
+                requester_id=(
+                    ((s.get("events") or {}).get(APPROVAL_EVENT) or {})
+                    .get("approver", "")
+                    .lstrip("@")
+                    or None
+                ),
+                # The requesting thread's warm-context key (Phase B) — lets the
+                # orchestrator reuse this thread's kept checkout.
+                warm_key=s.get("warm_key"),
+            )
         )
+
         async def on_step(ws: WorkerState) -> None:
             # Record a human progress phrase so the surface can show "still
             # working…" without knowing worker-internal step names.
+            s["worker_state"] = ws.to_dict()
             s["progress"] = _worker_phase(ws.completed_steps)
             await ctx.checkpoint()
 
-        outcome = await orchestrator.run_attempt(state, on_step=on_step)
+        resume = state.openhands_resume
+        if resume is not None and resume.status == "parked":
+            event = f"openhands_decision:{resume.decision_id}"
+            payload = s.get("events", {}).get(event)
+            if payload is None:
+                s["worker_state"] = state.to_dict()
+                raise WorkflowPark(event)
+            decision = ResumeDecision.from_dict(payload)
+            outcome = await orchestrator.resume_attempt(
+                state, decision, on_step=on_step
+            )
+        elif resume is not None and resume.status == "parking":
+            reconcile = getattr(orchestrator, "reconcile_parking", None)
+            if reconcile is None:
+                raise RuntimeError("OpenHands parking reconciler is unavailable")
+            outcome = await reconcile(state, on_step=on_step)
+        elif resume is not None and resume.status == "terminal":
+            deliver = getattr(orchestrator, "deliver_terminal", None)
+            if deliver is None:
+                raise RuntimeError("OpenHands terminal recovery is unavailable")
+            outcome = await deliver(state, on_step=on_step)
+        elif resume is not None:
+            raise RuntimeError(
+                f"active OpenHands {resume.status} segment cannot be replayed"
+            )
+        else:
+            outcome = await orchestrator.run_attempt(state, on_step=on_step)
+        s["worker_state"] = state.to_dict()
+        if isinstance(outcome, WorkerPaused):
+            s["openhands_decision"] = {
+                "decision_id": outcome.decision_id,
+                "summary": outcome.pending_action_summary,
+                "fingerprint": outcome.pending_action_fingerprint,
+            }
+            raise WorkflowPark(f"openhands_decision:{outcome.decision_id}")
         s["branch"] = outcome.branch
         s["title"] = outcome.title
         s["body"] = outcome.body
@@ -125,13 +178,19 @@ def build_coding_worker_workflow(
                 f"(job {s['job_id']})"
             ),
         }
+        cleanup = getattr(orchestrator, "cleanup_attempt", None)
+        if cleanup is not None and s.get("worker_state") is not None:
+            state = WorkerState.from_dict(s["worker_state"])
+            if state.openhands_resume is not None:
+                await cleanup(state, on_step=None)
+                s["worker_state"] = state.to_dict()
 
     return Workflow(
         WORKFLOW_NAME,
         [
             Step(APPROVAL_EVENT, wait=True),
-            # The opaque replay unit MUST stay resumable: resumable=False means
-            # "abandon before replay" in this engine — the opposite of intent.
+            # This step owns schema-first resume rules. Marking it non-resumable
+            # would abandon even safe parked/final boundaries.
             Step("run_worker", run_worker, resumable=True),
             Step("open_pr", open_pr),
         ],

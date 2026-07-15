@@ -87,6 +87,26 @@ class SurfaceDelivery(Protocol):
         """
         ...
 
+    async def post_openhands_decision(
+        self,
+        target: SurfaceTarget,
+        job_id: str,
+        decision_id: str,
+        summary: str,
+        *,
+        key: str | None = None,
+        recover: bool = False,
+    ) -> str: ...
+
+    async def update_openhands_decision(
+        self,
+        target: SurfaceTarget,
+        message_id: str,
+        job_id: str,
+        decision_id: str,
+        summary: str,
+    ) -> None: ...
+
     async def post_final(
         self, target: SurfaceTarget, result: "Deliverable | str", *,
         key: str | None = None, recover: bool = False,
@@ -352,6 +372,39 @@ class SlackSurfaceDelivery:
             blocks=approval_blocks(requests),
             key=key,
             recover=recover,
+        )
+
+    async def post_openhands_decision(
+        self,
+        target,
+        job_id,
+        decision_id,
+        summary,
+        *,
+        key=None,
+        recover=False,
+    ) -> str:
+        from openloop.surfaces.approvals import openhands_decision_blocks
+
+        text = f"OpenHands needs confirmation: {summary}"
+        return await self._post(
+            target,
+            text=text,
+            blocks=openhands_decision_blocks(job_id, decision_id, summary),
+            key=key,
+            recover=recover,
+        )
+
+    async def update_openhands_decision(
+        self, target, message_id, job_id, decision_id, summary
+    ) -> None:
+        from openloop.surfaces.approvals import openhands_decision_blocks
+
+        await self.client.chat_update(
+            channel=target.channel,
+            ts=message_id,
+            text=f"OpenHands needs confirmation: {summary}",
+            blocks=openhands_decision_blocks(job_id, decision_id, summary),
         )
 
     async def post_final(

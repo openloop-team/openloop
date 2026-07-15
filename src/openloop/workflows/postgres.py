@@ -82,6 +82,42 @@ class PostgresWorkflowStore(BorrowedPostgresStore):
                 instance.leased_until,
             )
 
+    async def claim_event(
+        self,
+        instance_id: str,
+        event: str,
+        payload: dict,
+        *,
+        leased_until: datetime,
+    ) -> WorkflowInstance | None:
+        """Atomically consume one exact wait event across all replicas."""
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE workflow_instances
+                SET state = state || jsonb_build_object(
+                        'events',
+                        COALESCE(state->'events', '{}'::jsonb)
+                        || jsonb_build_object($2::text, $3::jsonb)
+                    ),
+                    completed_steps = completed_steps || jsonb_build_array($2::text),
+                    status = 'running',
+                    waiting_on = NULL,
+                    leased_until = $4,
+                    updated_at = now()
+                WHERE id = $1
+                  AND status = 'waiting'
+                  AND waiting_on = $2
+                RETURNING *
+                """,
+                instance_id,
+                event,
+                json.dumps(payload),
+                leased_until,
+            )
+        return _row_to_instance(row) if row else None
+
     async def recent(self, limit: int = 100) -> list[WorkflowInstance]:
         pool = self._require_pool()
         async with pool.acquire() as conn:

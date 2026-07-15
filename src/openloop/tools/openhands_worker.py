@@ -6,9 +6,10 @@ diff-apply worker: it receives a *prepared* workspace (already cloned, on the
 job branch) from :class:`~openloop.tools.coding_worker.GitWorkspaceOrchestrator`
 and only edits files. It never clones, commits, or pushes — the orchestrator
 owns every credential-bearing git operation, so the agent runs with no git
-credential in scope *by construction*, and the whole run stays the one opaque
-replay unit (a resume re-provisions and re-runs; force-push keeps it
-idempotent).
+credential in scope *by construction*. With cold resume enabled, each
+confirmation-bounded segment captures an authenticated cumulative Git delta,
+removes its container, and later attaches the persisted conversation in a fresh
+container without resending the task.
 
 Two execution modes, following ``CODING_WORKER_SANDBOX``:
 
@@ -42,8 +43,14 @@ agent-server image is comparatively expensive.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import re
+import subprocess
+import tempfile
 import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -52,6 +59,13 @@ from openloop.tools.openhands_docker import (
     DEFAULT_OPENHANDS_SERVER_IMAGE,
     HardenedDockerWorkspace,
     HardenedDockerWorkspaceError,
+)
+from openloop.tools.openhands_resume import (
+    OPENHANDS_REJECTION_REASON,
+    OpenHandsResumeError,
+    OpenHandsResumeState,
+    WorkerPaused,
+    WorkspaceArtifactRef,
 )
 
 if TYPE_CHECKING:
@@ -99,6 +113,13 @@ ConversationFactory = Callable[
 ]
 
 
+@dataclass(slots=True)
+class _ColdRuntime:
+    conversation: object
+    workspace: object
+    cleanup: Callable[[], None]
+
+
 class OpenHandsUnavailable(RuntimeError):
     """The OpenHands backend cannot run on this host (fail-closed at boot)."""
 
@@ -126,6 +147,7 @@ class OpenHandsCodingWorker:
         network: str | None = None,
         docker_adapter: HardenedDockerWorkspace | None = None,
         artifact_store: "WorkspaceArtifactStore | None" = None,
+        cold_resume_enabled: bool = False,
         conversation_factory: ConversationFactory | None = None,
     ) -> None:
         self.model = model
@@ -142,6 +164,7 @@ class OpenHandsCodingWorker:
         self.network = network
         self._docker_adapter = docker_adapter
         self.artifact_store = artifact_store
+        self.cold_resume_enabled = cold_resume_enabled
         self._factory = conversation_factory or self._build_conversation
 
     def probe(self) -> None:
@@ -196,7 +219,10 @@ class OpenHandsCodingWorker:
         workspace: Path,
         state: "WorkerState",
         on_step: StepCallback | None = None,
-    ) -> WorkerEdit:
+    ) -> WorkerEdit | WorkerPaused:
+        if self.cold_resume_enabled:
+            return await self._run_cold(workspace, state, on_step)
+
         loop = asyncio.get_running_loop()
         heartbeat = self._heartbeat(loop, state, on_step)
         cost, prompt_tokens, completion_tokens = await asyncio.to_thread(
@@ -217,6 +243,320 @@ class OpenHandsCodingWorker:
             cost_usd=cost,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+        )
+
+    async def _run_cold(
+        self,
+        workspace: Path,
+        state: "WorkerState",
+        on_step: StepCallback | None,
+    ) -> WorkerEdit | WorkerPaused:
+        """Drive one durable OpenHands segment in a disposable container."""
+        if not self.docker or self._docker_adapter is None or self.artifact_store is None:
+            raise OpenHandsResumeError(
+                "OpenHands cold resume requires the hardened Docker adapter "
+                "and encrypted artifact store"
+            )
+
+        resume = state.openhands_resume
+        if resume is None:
+            resolved_base = await asyncio.to_thread(self._git_head, workspace)
+            resume = OpenHandsResumeState(
+                status="running",
+                conversation_id=str(uuid.uuid4()),
+                segment_id=uuid.uuid4().hex,
+                base_ref=state.base,
+                resolved_base_commit=resolved_base,
+                image_digest=self.server_image,
+                master_key_id=self.artifact_store.keys.master_key_id,
+                slack_requester_id=state.requester_id,
+            )
+            state.openhands_resume = resume
+            # The IDs and immutable base are durable before container creation,
+            # making the artifact key deterministic across a crash.
+            if on_step is not None:
+                await on_step(state)
+        elif resume.status not in {"running", "resuming"}:
+            raise OpenHandsResumeError(
+                f"cannot execute OpenHands segment in {resume.status!r} state"
+            )
+
+        loop = asyncio.get_running_loop()
+        heartbeat = self._heartbeat(loop, state, on_step)
+        result = await asyncio.to_thread(
+            self._drive_cold,
+            workspace,
+            state,
+            heartbeat,
+            state.budget_usd,
+        )
+        if isinstance(result, WorkerEdit):
+            state.completed_steps.append("edit")
+            if on_step is not None:
+                await on_step(state)
+        return result
+
+    @staticmethod
+    def _git_head(workspace: Path) -> str:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=workspace,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        commit = result.stdout.strip()
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
+            raise OpenHandsResumeError("prepared checkout has an invalid base commit")
+        return commit
+
+    def _drive_cold(
+        self,
+        workspace: Path,
+        state: "WorkerState",
+        heartbeat,
+        cost_limit: float | None,
+    ) -> WorkerEdit | WorkerPaused:
+        """Run and capture one fresh/resumed segment before tearing it down."""
+        resume = state.openhands_resume
+        assert resume is not None
+        conv_box: list = []
+        started = time.monotonic()
+
+        def guard(_event) -> None:
+            heartbeat()
+            conversation = conv_box[0] if conv_box else None
+            if conversation is not None and cost_limit is not None:
+                spent = self._accumulated_cost(conversation)
+                if spent is not None and spent > cost_limit:
+                    raise _RunAborted(
+                        f"in-run spend ${spent:.4f} reached the "
+                        f"${cost_limit:.2f} per-task cap"
+                    )
+            if (
+                self.deadline_seconds
+                and time.monotonic() - started > self.deadline_seconds
+            ):
+                raise _RunAborted(
+                    f"exceeded the {self.deadline_seconds:.0f}s attempt deadline"
+                )
+
+        runtime = self._open_cold_runtime(workspace, state, [guard])
+        conversation = runtime.conversation
+        conv_box.append(conversation)
+        try:
+            if resume.status == "running":
+                conversation.send_message(self._prompt(state))
+                # Remote agent initialization is lazy and may replace policy
+                # state, so confirmation is installed only after send_message.
+                from openhands.sdk.security.confirmation_policy import AlwaysConfirm
+
+                conversation.set_confirmation_policy(AlwaysConfirm())
+            else:
+                decision = resume.resolved_decision
+                if decision is None:
+                    raise OpenHandsResumeError(
+                        "resuming segment has no structured decision"
+                    )
+                if decision.kind == "reject":
+                    conversation.reject_pending_actions(OPENHANDS_REJECTION_REASON)
+
+            try:
+                conversation.run()
+            except _RunAborted as abort:
+                cost, pt, ct = self._safe_metrics(conversation)
+                raise WorkerRunAborted(
+                    abort.reason,
+                    cost_usd=cost,
+                    prompt_tokens=pt,
+                    completion_tokens=ct,
+                ) from abort
+
+            cost, prompt_tokens, completion_tokens = self._metrics(conversation)
+            status = self._execution_status(conversation)
+            if status == "waiting":
+                summary, fingerprint = self._pending_action(conversation)
+                decision_id = uuid.uuid4().hex
+                artifact = self._capture_artifact(
+                    runtime.workspace,
+                    state,
+                    kind="paused",
+                )
+                return WorkerPaused(
+                    conversation_id=resume.conversation_id,
+                    segment_id=resume.segment_id,
+                    decision_id=decision_id,
+                    pending_action_summary=summary,
+                    pending_action_fingerprint=fingerprint,
+                    workspace_artifact=artifact,
+                    cumulative_cost=cost,
+                    cumulative_prompt_tokens=prompt_tokens,
+                    cumulative_completion_tokens=completion_tokens,
+                )
+            if status != "finished":
+                raise OpenHandsResumeError(
+                    "OpenHands segment returned an unsupported execution status"
+                )
+
+            title, body = self._read_pr_file(workspace, state)
+            artifact = self._capture_artifact(
+                runtime.workspace,
+                state,
+                kind="final",
+                pr_title=title,
+                pr_body=body,
+            )
+            return WorkerEdit(
+                title=title,
+                body=body,
+                cost_usd=cost,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                workspace_artifact=artifact,
+            )
+        finally:
+            close = getattr(conversation, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:  # noqa: BLE001
+                    logger.warning("openhands conversation close failed", exc_info=True)
+            try:
+                runtime.cleanup()
+            except Exception:  # noqa: BLE001
+                logger.warning("openhands runtime cleanup failed", exc_info=True)
+
+    def _open_cold_runtime(
+        self, workspace: Path, state: "WorkerState", callbacks: list
+    ) -> _ColdRuntime:
+        """Create a disposable server and create/attach the durable conversation."""
+        from openhands.sdk import Conversation
+
+        assert self._docker_adapter is not None
+        resume = state.openhands_resume
+        assert resume is not None
+        agent = self._build_agent()
+        target = self._docker_adapter.create(workspace, state.job_id)
+        try:
+            conversation_id = uuid.UUID(resume.conversation_id)
+            if resume.status == "running":
+                conversation = Conversation(
+                    agent=agent,
+                    workspace=target,
+                    conversation_id=conversation_id,
+                    callbacks=callbacks,
+                    max_iteration_per_run=self.max_iterations,
+                    visualizer=None,
+                    delete_on_close=False,
+                )
+            else:
+                conversation = self._docker_adapter.attach_conversation(
+                    target,
+                    agent=agent,
+                    conversation_id=conversation_id,
+                    callbacks=callbacks,
+                    max_iterations=self.max_iterations,
+                )
+        except BaseException:
+            target.cleanup()
+            raise
+        return _ColdRuntime(conversation, target, target.cleanup)
+
+    def _build_agent(self):
+        from openhands.sdk import LLM, Agent, Tool
+        from openhands.tools.file_editor import FileEditorTool
+        from openhands.tools.terminal import TerminalTool
+
+        return Agent(
+            llm=LLM(model=self.model, api_key=self._api_key),
+            tools=[Tool(name=TerminalTool.name), Tool(name=FileEditorTool.name)],
+        )
+
+    @staticmethod
+    def _metrics(conversation) -> tuple[float, int, int]:
+        metrics = conversation.conversation_stats.get_combined_metrics()
+        usage = metrics.accumulated_token_usage
+        return (
+            float(metrics.accumulated_cost or 0.0),
+            int(usage.prompt_tokens or 0) if usage else 0,
+            int(usage.completion_tokens or 0) if usage else 0,
+        )
+
+    @staticmethod
+    def _execution_status(conversation) -> str:
+        status = conversation.state.execution_status
+        rendered = f"{getattr(status, 'name', '')} {getattr(status, 'value', '')} {status}"
+        if "WAITING_FOR_CONFIRMATION" in rendered.upper():
+            return "waiting"
+        if "FINISHED" in rendered.upper():
+            return "finished"
+        return "unknown"
+
+    @staticmethod
+    def _pending_action(conversation) -> tuple[str, str]:
+        events = list(getattr(conversation.state, "events", ()))
+        action = next(
+            (event for event in reversed(events) if "Action" in type(event).__name__),
+            None,
+        )
+        if action is None:
+            raise OpenHandsResumeError(
+                "OpenHands confirmation wait has no pending action event"
+            )
+        tool = getattr(action, "tool_name", None) or getattr(action, "name", None)
+        tool = str(tool) if tool is not None else type(action).__name__
+        safe_tool = re.sub(r"[^A-Za-z0-9_. -]", "", tool).strip()[:100]
+        summary = f"OpenHands requests confirmation for {safe_tool or 'a tool action'}"
+        fingerprint = hashlib.sha256(repr(action).encode("utf-8")).hexdigest()
+        return summary, fingerprint
+
+    def _capture_artifact(
+        self,
+        runtime_workspace: object,
+        state: "WorkerState",
+        *,
+        kind: str,
+        pr_title: str | None = None,
+        pr_body: str | None = None,
+    ) -> WorkspaceArtifactRef:
+        from openloop.tools.openhands_artifacts import (
+            WorkspaceArtifactIdentity,
+            WorkspaceArtifactManifest,
+        )
+
+        assert self._docker_adapter is not None
+        assert self.artifact_store is not None
+        resume = state.openhands_resume
+        assert resume is not None
+        identity = WorkspaceArtifactIdentity(
+            state.job_id,
+            resume.conversation_id,
+            resume.segment_id,
+            kind,
+        )
+        with tempfile.TemporaryFile(mode="w+b") as plaintext:
+            archived = self._docker_adapter.stream_git_delta(
+                runtime_workspace,
+                plaintext,
+                base_ref=resume.resolved_base_commit,
+            )
+            if archived.base_commit != resume.resolved_base_commit:
+                raise OpenHandsResumeError("OpenHands artifact base commit mismatch")
+            plaintext.seek(0)
+            descriptor = self.artifact_store.put_atomic(
+                identity,
+                plaintext,
+                WorkspaceArtifactManifest(
+                    format="git-delta",
+                    base_commit=archived.base_commit,
+                    pr_title=pr_title,
+                    pr_body=pr_body,
+                ),
+            )
+        return WorkspaceArtifactRef(
+            artifact=descriptor,
+            format="git-delta",
+            base_commit=archived.base_commit,
         )
 
     def _drive(

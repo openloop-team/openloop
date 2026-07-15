@@ -338,7 +338,14 @@ def _args_for_execute(tool: Tool, request: ApprovalRequest) -> dict:
     """
     if tool.describe(request.permission).version is None:
         return request.args
-    return {**request.args, "args_schema": request.args_schema}
+    return {
+        **request.args,
+        "args_schema": request.args_schema,
+        # Internal surface identity, added only after approval resolution. Native
+        # typed tools may persist it for later authorization; it was never part
+        # of model-facing arguments.
+        "approved_by": (request.decided_by or "").lstrip("@") or None,
+    }
 
 
 def _workflow_invocation(instance) -> Invocation:

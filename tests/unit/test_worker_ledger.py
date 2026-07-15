@@ -128,6 +128,33 @@ async def test_settle_with_idempotency_key_records_once():
     assert await usage.monthly_total("ws:acme:agent:dev-platform") == 0.12
 
 
+async def test_segment_settle_records_delta_but_caps_cumulative_spend():
+    usage = InMemoryUsageStore()
+    ledger = _ledger(usage, per_task_usd=0.50)
+
+    await ledger.settle(
+        job_id="j1",
+        idempotency_key="j1:conversation:segment-1",
+        record_cost_usd=0.30,
+        record_prompt_tokens=100,
+        record_completion_tokens=20,
+        cap_cost_usd=0.30,
+    )
+    with pytest.raises(WorkerBudgetExceeded):
+        await ledger.settle(
+            job_id="j1",
+            idempotency_key="j1:conversation:segment-2",
+            record_cost_usd=0.25,
+            record_prompt_tokens=70,
+            record_completion_tokens=10,
+            cap_cost_usd=0.55,
+        )
+
+    assert [record.cost_usd for record in usage.records] == [0.30, 0.25]
+    assert usage.records[-1].outcome == "over_task_budget"
+    assert await usage.monthly_total("ws:acme:agent:dev-platform") == 0.55
+
+
 async def test_settle_attributes_to_the_invoking_agent():
     usage = InMemoryUsageStore()
     agents = {

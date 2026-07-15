@@ -28,7 +28,12 @@ from openloop.sessions import (
     ThreadRecordStore,
 )
 from openloop.sessions.threads import thread_scope_key
-from openloop.surfaces.approvals import APPROVE_ACTION, DENY_ACTION
+from openloop.surfaces.approvals import (
+    APPROVE_ACTION,
+    DENY_ACTION,
+    OPENHANDS_ACCEPT_ACTION,
+    OPENHANDS_REJECT_ACTION,
+)
 
 if TYPE_CHECKING:
     from openloop.analysis import ArtifactStore, UploadStore
@@ -240,6 +245,38 @@ def build_slack_app(
     @app.action(DENY_ACTION)
     async def on_deny(ack, body, action):  # type: ignore[no-untyped-def]
         await _on_decision(ack, body, action, approve=False)
+
+    async def _on_openhands(ack, body, action, kind):  # type: ignore[no-untyped-def]
+        await ack()
+        try:
+            job_id, decision_id = action["value"].split("|", 1)
+        except (KeyError, ValueError):
+            logger.warning("invalid OpenHands Slack action payload")
+            return
+        actor = _approver_handle(body.get("user", {})).lstrip("@")
+        event_id = (
+            action.get("action_ts")
+            or (body.get("container") or {}).get("message_ts")
+            or body.get("trigger_id")
+        )
+        if not actor or not event_id:
+            logger.warning("incomplete OpenHands Slack decision identity")
+            return
+        await runner.resolve_openhands_decision(
+            job_id,
+            decision_id,
+            kind=kind,
+            actor_id=actor,
+            event_id=str(event_id),
+        )
+
+    @app.action(OPENHANDS_ACCEPT_ACTION)
+    async def on_openhands_accept(ack, body, action):  # type: ignore[no-untyped-def]
+        await _on_openhands(ack, body, action, "accept")
+
+    @app.action(OPENHANDS_REJECT_ACTION)
+    async def on_openhands_reject(ack, body, action):  # type: ignore[no-untyped-def]
+        await _on_openhands(ack, body, action, "reject")
 
     return app
 

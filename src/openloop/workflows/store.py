@@ -47,6 +47,15 @@ class WorkflowStore(Protocol):
 
     async def upsert(self, instance: WorkflowInstance) -> None: ...
 
+    async def claim_event(
+        self,
+        instance_id: str,
+        event: str,
+        payload: dict,
+        *,
+        leased_until: datetime,
+    ) -> WorkflowInstance | None: ...
+
     async def recent(self, limit: int = 100) -> list[WorkflowInstance]: ...
 
 
@@ -65,6 +74,30 @@ class InMemoryWorkflowStore:
             instance.created_at = existing.created_at
         instance.updated_at = _now()
         self._by_id[instance.id] = instance
+
+    async def claim_event(
+        self,
+        instance_id: str,
+        event: str,
+        payload: dict,
+        *,
+        leased_until: datetime,
+    ) -> WorkflowInstance | None:
+        # No await between compare and mutation: atomic within one event loop.
+        instance = self._by_id.get(instance_id)
+        if (
+            instance is None
+            or instance.status != "waiting"
+            or instance.waiting_on != event
+        ):
+            return None
+        instance.state.setdefault("events", {})[event] = payload
+        instance.completed_steps.append(event)
+        instance.status = "running"
+        instance.waiting_on = None
+        instance.leased_until = leased_until
+        await self.upsert(instance)
+        return instance
 
     async def recent(self, limit: int = 100) -> list[WorkflowInstance]:
         ordered = sorted(

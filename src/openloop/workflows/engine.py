@@ -94,6 +94,14 @@ class Workflow:
     steps: list[Step]
 
 
+class WorkflowPark(Exception):
+    """A running step reached a durable, dynamically named wait boundary."""
+
+    def __init__(self, event: str) -> None:
+        super().__init__(event)
+        self.event = event
+
+
 class WorkflowEngine:
     """Runs workflows durably: checkpoint per step, park on wait, resume on event."""
 
@@ -113,6 +121,9 @@ class WorkflowEngine:
             Callable[[WorkflowInstance], Awaitable[None]]
         ] = []
         self._progress_callbacks: list[
+            Callable[[WorkflowInstance], Awaitable[None]]
+        ] = []
+        self._park_callbacks: list[
             Callable[[WorkflowInstance], Awaitable[None]]
         ] = []
         # Strong refs to in-flight progress notifications, keyed by instance so a
@@ -139,6 +150,12 @@ class WorkflowEngine:
         checkpoint path, so a slow callback can't delay a lease renewal.
         """
         self._progress_callbacks.append(callback)
+
+    def add_park_callback(
+        self, callback: Callable[[WorkflowInstance], Awaitable[None]]
+    ) -> None:
+        """Run after a dynamic wait is durable (used for decision delivery)."""
+        self._park_callbacks.append(callback)
 
     async def checkpoint(self, instance: WorkflowInstance) -> None:
         """Persist mid-step state (e.g. after an idempotent write inside a step)."""
@@ -176,19 +193,17 @@ class WorkflowEngine:
         drive: bool = True,
     ) -> WorkflowInstance | None:
         """Deliver an awaited event, optionally driving the instance inline."""
-        instance = await self.store.get(instance_id)
+        leased_until = _now() + timedelta(seconds=self.lease_seconds)
+        instance = await self.store.claim_event(
+            instance_id,
+            event,
+            payload or {},
+            leased_until=leased_until,
+        )
         if instance is None:
-            return None
-        if instance.status != "waiting" or instance.waiting_on != event:
-            # Idempotent: the event was already consumed, or the instance moved
-            # past this wait (e.g. a double-approve). Nothing to do.
-            return instance
-        instance.state.setdefault("events", {})[event] = payload or {}
-        instance.completed_steps.append(event)
-        instance.status = "running"
-        instance.waiting_on = None
-        self._renew_lease(instance)
-        await self.store.upsert(instance)
+            # Idempotent: missing, already consumed, or waiting on a newer
+            # decision. Most importantly, a losing replica never drives.
+            return await self.store.get(instance_id)
         if not drive:
             return instance
         return await self._drive(instance)
@@ -314,6 +329,19 @@ class WorkflowEngine:
                 self._renew_lease(instance)
                 await self.store.upsert(instance)
                 await self._run_step_with_lease(step, ctx)
+            except WorkflowPark as park:
+                instance.status = "waiting"
+                instance.waiting_on = park.event
+                instance.leased_until = None
+                await self.store.upsert(instance)
+                for callback in list(self._park_callbacks):
+                    try:
+                        await callback(instance)
+                    except Exception:
+                        logger.exception(
+                            "workflow park callback failed for %s", instance.id
+                        )
+                return instance
             except Exception as exc:  # noqa: BLE001 — record failure, don't crash caller
                 instance.status = "failed"
                 instance.error = str(exc)

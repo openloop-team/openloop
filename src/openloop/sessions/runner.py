@@ -194,6 +194,8 @@ class SessionRunner:
             engine.add_terminal_callback(self._on_workflow_terminal)
             if hasattr(engine, "add_progress_callback"):
                 engine.add_progress_callback(self._on_workflow_progress)
+            if hasattr(engine, "add_park_callback"):
+                engine.add_park_callback(self._on_workflow_parked)
 
     async def run(self, task: Task, target: SurfaceTarget) -> SurfaceSession:
         """Create/resume a session for ``task`` and deliver its outcome.
@@ -724,6 +726,104 @@ class SessionRunner:
             return
         self._progress_seen.pop(session.id, None)
         await self._deliver_terminal_approval(session)
+
+    async def _on_workflow_parked(self, instance) -> None:
+        """Deliver an OpenHands decision only after its parked state is durable."""
+        waiting_on = getattr(instance, "waiting_on", None) or ""
+        if not waiting_on.startswith("openhands_decision:"):
+            return
+        state = getattr(instance, "state", {}) or {}
+        decision = state.get("openhands_decision") or {}
+        decision_id = decision.get("decision_id")
+        summary = decision.get("summary")
+        if not decision_id or not summary:
+            return
+        approval_id = _approval_id_for_instance(instance)
+        if not approval_id:
+            return
+        session = await self.sessions.get_by_approval(approval_id)
+        if session is None or session.status != "waiting":
+            return
+        update = getattr(self.delivery, "update_openhands_decision", None)
+        post = getattr(self.delivery, "post_openhands_decision", None)
+        if session.progress_message_id is not None and update is not None:
+            await update(
+                session.target,
+                session.progress_message_id,
+                instance.id,
+                decision_id,
+                summary,
+            )
+            return
+        if post is not None:
+            session.progress_message_id = await post(
+                session.target,
+                instance.id,
+                decision_id,
+                summary,
+                key=f"{session.id}:openhands:{decision_id}",
+            )
+            await self.sessions.upsert(session)
+
+    async def resolve_openhands_decision(
+        self,
+        job_id: str,
+        decision_id: str,
+        *,
+        kind: str,
+        actor_id: str,
+        event_id: str,
+    ) -> str:
+        """Authorize, durably record, and asynchronously drive a Slack action."""
+        from openloop.tools.openhands_resume import OpenHandsResumeState, ResumeDecision
+
+        engine = getattr(self.runtime, "engine", None)
+        if engine is None:
+            return "⛔ OpenHands resume is unavailable"
+        instance = await engine.store.get(job_id)
+        event = f"openhands_decision:{decision_id}"
+        if (
+            instance is None
+            or instance.status != "waiting"
+            or instance.waiting_on != event
+        ):
+            return "⛔ That OpenHands decision is stale or already resolved."
+        raw_worker = (instance.state or {}).get("worker_state") or {}
+        raw_resume = raw_worker.get("openhands_resume")
+        try:
+            resume = OpenHandsResumeState.from_dict(raw_resume)
+        except Exception:
+            return "⛔ The parked OpenHands state is invalid."
+        if resume.decision_id != decision_id:
+            return "⛔ That OpenHands decision is stale."
+        if actor_id != resume.slack_requester_id:
+            return "⛔ Only the user who approved this worker may decide."
+        decision = ResumeDecision(
+            kind=kind,
+            decision_id=decision_id,
+            event_id=event_id,
+            actor_id=actor_id,
+        )
+        await engine.send_event(job_id, event, decision.to_dict(), drive=False)
+        approval_id = _approval_id_for_instance(instance)
+        session = (
+            await self.sessions.get_by_approval(approval_id)
+            if approval_id is not None
+            else None
+        )
+        if session is not None and session.progress_message_id is not None:
+            label = "accepted" if kind == "accept" else "rejected"
+            try:
+                await self.delivery.update_approval(
+                    session.target,
+                    session.progress_message_id,
+                    f"OpenHands action {label} by @{actor_id}; resuming…",
+                    [],
+                )
+            except Exception:  # noqa: BLE001 — decision is already durable
+                logger.warning("failed to collapse OpenHands decision card", exc_info=True)
+        engine.drive_background(job_id)
+        return "✅ Decision recorded; OpenHands is resuming."
 
     async def _on_workflow_progress(self, instance) -> None:
         """Relay a running workflow's progress phrase as a transient status.

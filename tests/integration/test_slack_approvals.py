@@ -6,7 +6,10 @@ from openloop.runtime import Runtime, Task
 from openloop.surfaces.approvals import (
     APPROVE_ACTION,
     DENY_ACTION,
+    OPENHANDS_ACCEPT_ACTION,
+    OPENHANDS_REJECT_ACTION,
     approval_blocks,
+    openhands_decision_blocks,
     resolve_from_action,
 )
 from openloop.tools import ToolGateway
@@ -54,6 +57,18 @@ async def test_approval_blocks_have_approve_and_deny_buttons():
     assert action_ids == {APPROVE_ACTION, DENY_ACTION}
     # Buttons carry the approval id so the click can resolve it.
     assert all(e["value"] == req.id for e in actions[0]["elements"])
+
+
+def test_openhands_decision_blocks_are_explicit_and_opaque():
+    blocks = openhands_decision_blocks("job-1", "decision-1", "Run tests")
+    actions = next(block for block in blocks if block["type"] == "actions")
+    assert {button["action_id"] for button in actions["elements"]} == {
+        OPENHANDS_ACCEPT_ACTION,
+        OPENHANDS_REJECT_ACTION,
+    }
+    assert all(
+        button["value"] == "job-1|decision-1" for button in actions["elements"]
+    )
 
 
 async def test_resolve_approve_executes():

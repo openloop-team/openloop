@@ -1,17 +1,25 @@
 """Unit tests for the OpenHands worker backend (SDK faked at the factory seam)."""
 
 import asyncio
+import base64
 import time
 
 import pytest
 
 import openloop.tools.openhands_worker as ohmod
 from openloop.tools.coding_worker import WorkerRunAborted, WorkerState
+from openloop.tools.openhands_artifacts import WorkspaceArtifactStore
+from openloop.tools.openhands_resume import ResumeDecision, WorkerPaused
+from openloop.tools.openhands_state import OpenHandsKeyDeriver, OpenHandsStateLayout
 from openloop.tools.openhands_worker import (
     PR_FILE,
+    _ColdRuntime,
     OpenHandsCodingWorker,
     OpenHandsUnavailable,
 )
+
+
+BASE = "a" * 40
 
 
 def _state(instruction="add retries to the fetcher"):
@@ -317,3 +325,153 @@ def test_defaults_are_the_safe_ones():
     assert worker.docker is False
     assert worker.max_iterations == 100
     assert worker.server_image == ohmod._DEFAULT_SERVER_IMAGE
+
+
+class _ColdAdapter:
+    def stream_git_delta(self, workspace, sink, *, base_ref):
+        sink.write(b"")
+
+        class Archived:
+            base_commit = base_ref
+
+        return Archived()
+
+
+class _ColdConversation(FakeConversation):
+    def __init__(self, workspace, callbacks, status):
+        super().__init__(workspace, callbacks, pr_text=None)
+        self.state = type("State", (), {})()
+        self.state.execution_status = status
+        self.state.events = [type("TerminalAction", (), {"tool_name": "terminal"})()]
+        self.policy = None
+        self.rejection = None
+
+    def set_confirmation_policy(self, policy):
+        self.policy = policy
+
+    def reject_pending_actions(self, reason):
+        self.rejection = reason
+
+    def run(self):
+        for cb in self.callbacks:
+            cb(self.state.events[-1])
+
+
+def _cold_worker(tmp_path, conversation):
+    layout = OpenHandsStateLayout(tmp_path / "state")
+    keys = OpenHandsKeyDeriver.from_base64(
+        base64.b64encode(bytes(range(32))).decode(), master_key_id="key-v1"
+    )
+    store = WorkspaceArtifactStore(layout, keys, scratch_root=tmp_path / "scratch")
+    adapter = _ColdAdapter()
+    worker = OpenHandsCodingWorker(
+        "anthropic/m",
+        docker=True,
+        docker_adapter=adapter,
+        artifact_store=store,
+        cold_resume_enabled=True,
+    )
+    worker._git_head = lambda workspace: BASE
+    worker._open_cold_runtime = lambda workspace, state, callbacks: _ColdRuntime(
+        conversation(workspace, callbacks), object(), lambda: None
+    )
+    return worker, store
+
+
+async def test_cold_run_durably_allocates_identity_and_returns_pause(tmp_path):
+    created = []
+
+    def conversation(workspace, callbacks):
+        conv = _ColdConversation(workspace, callbacks, "WAITING_FOR_CONFIRMATION")
+        created.append(conv)
+        return conv
+
+    worker, store = _cold_worker(tmp_path, conversation)
+    state = _state()
+    state.requester_id = "U123"
+    checkpoints = []
+
+    async def checkpoint(current):
+        checkpoints.append(current.to_dict())
+
+    result = await worker.run(tmp_path, state, checkpoint)
+
+    assert isinstance(result, WorkerPaused)
+    assert checkpoints[0]["openhands_resume"]["status"] == "running"
+    assert state.openhands_resume.resolved_base_commit == BASE
+    assert result.workspace_artifact.artifact.identity.kind == "paused"
+    assert result.pending_action_summary.endswith("terminal")
+    assert created[0].prompt.count("add retries") == 1
+    assert created[0].policy is not None
+    with store.open_verified(
+        result.workspace_artifact.artifact,
+        result.workspace_artifact.artifact.identity,
+    ) as verified:
+        assert verified.manifest.base_commit == BASE
+    assert created[0].closed
+
+
+async def test_cold_reject_resume_sends_no_second_prompt_and_captures_final(tmp_path):
+    created = []
+
+    def conversation(workspace, callbacks):
+        conv = _ColdConversation(workspace, callbacks, "FINISHED")
+
+        def finish():
+            for cb in callbacks:
+                cb(conv.state.events[-1])
+            (workspace / PR_FILE).write_text("Resume complete\nBody")
+
+        conv.run = finish
+        created.append(conv)
+        return conv
+
+    worker, _ = _cold_worker(tmp_path, conversation)
+    state = _state()
+    state.requester_id = "U123"
+    # First allocate a compatible durable identity, then model the already
+    # parked state being accepted by the orchestrator as a new segment.
+    state.openhands_resume = ohmod.OpenHandsResumeState(
+        status="running",
+        conversation_id="00000000-0000-0000-0000-000000000001",
+        segment_id="segment-1",
+        base_ref="main",
+        resolved_base_commit=BASE,
+        image_digest=worker.server_image,
+        master_key_id="key-v1",
+        slack_requester_id="U123",
+    )
+    paused_worker, _ = _cold_worker(
+        tmp_path / "paused",
+        lambda workspace, callbacks: _ColdConversation(
+            workspace, callbacks, "WAITING_FOR_CONFIRMATION"
+        ),
+    )
+    paused_worker.server_image = worker.server_image
+    paused = await paused_worker.run(tmp_path, state)
+    state.openhands_resume.transition_to(
+        "parking",
+        decision_id=paused.decision_id,
+        pending_action_summary=paused.pending_action_summary,
+        pending_action_fingerprint=paused.pending_action_fingerprint,
+        workspace_artifact=paused.workspace_artifact,
+        cumulative_cost=paused.cumulative_cost,
+        cumulative_prompt_tokens=paused.cumulative_prompt_tokens,
+        cumulative_completion_tokens=paused.cumulative_completion_tokens,
+    )
+    state.openhands_resume.transition_to("parked")
+    decision = ResumeDecision("reject", paused.decision_id, "Ev123", "U123")
+    state.openhands_resume.transition_to(
+        "resuming",
+        segment_id="segment-2",
+        resolved_event_id=decision.event_id,
+        resolved_decision=decision,
+    )
+
+    edit = await worker.run(tmp_path, state)
+
+    assert edit.title == "Resume complete"
+    assert edit.workspace_artifact.artifact.identity.kind == "final"
+    assert created[0].prompt is None
+    assert created[0].rejection == ohmod.OPENHANDS_REJECTION_REASON
+    assert not (tmp_path / PR_FILE).exists()

@@ -113,9 +113,10 @@ class Settings(BaseSettings):
     # Slack, GitHub, or provider secret here.
     coding_worker_openhands_state_master_key: SecretStr | None = None
     coding_worker_openhands_master_key_id: str = "key-v1"
-    # Phase 0 installs only the safe foundation. Parking/resume remains
-    # unreachable while this flag is false (the default).
-    coding_worker_openhands_cold_resume_enabled: bool = False
+    # OpenHands Docker runs park at confirmation boundaries and resume in a
+    # fresh container by default. Set false only as an operational rollback;
+    # the authenticated runtime and encrypted state foundation remain active.
+    coding_worker_openhands_cold_resume_enabled: bool = True
     # Where the worker's model-influenced execution (applying generated edits)
     # runs:
     #   "host"   (default) — a plain subprocess in this process's environment.

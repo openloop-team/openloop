@@ -34,10 +34,9 @@ helper both durable paths (this connector's checkpoint fallback and the
 workflow in :mod:`openloop.workflows.coding_worker`) call. Git auth rides an
 ephemeral ``http.extraHeader`` on each command, so no token is ever written
 into the workspace (no token-in-URL clone, nothing in ``.git/config``): the
-worker sandbox is credential-free by construction. The whole attempt is one
-**opaque replay unit** — interrupted before the push boundary, a resume runs a
-fresh attempt (re-provision, re-run; a regenerated diff is acceptable); after
-it, the branch/PR are reconciled idempotently (force-push + ``find_pull``).
+worker sandbox is credential-free by construction. Legacy workers replay a
+clean attempt before push; OpenHands cold resume restores only authenticated
+pause/final boundaries and refuses to replay an interrupted active segment.
 """
 
 from __future__ import annotations
@@ -59,9 +58,16 @@ from openloop.checkpoints.store import CheckpointStore, WorkerCheckpoint
 from openloop.credentials import CredentialResolver, CredentialScope
 from openloop.tools.base import ActionSpec, ToolResult
 from openloop.tools.github import GitHubClient
+from openloop.tools.openhands_resume import (
+    OpenHandsResumeError,
+    OpenHandsResumeState,
+    ResumeDecision,
+    WorkerPaused,
+)
 
 if TYPE_CHECKING:
     from openloop.sandbox import Sandbox
+    from openloop.tools.openhands_resume import WorkspaceArtifactRef
     from openloop.tools.workspace_pool import WarmWorkspacePool
     from openloop.usage.ledger import WorkerSpendLedger
 
@@ -154,6 +160,9 @@ class WorkerState:
     title: str | None = None
     body: str | None = None
     agent: str | None = None
+    # Human who approved/initiated the durable worker on its surface. Cold
+    # resume uses this stable identity to authorize later action decisions.
+    requester_id: str | None = None
     # Warm-context key (Phase B): the requesting thread's durable scope key,
     # stamped by the gateway from the invoking turn. When a warm-workspace pool is
     # wired, the orchestrator reuses this thread's kept checkout instead of cloning
@@ -166,6 +175,9 @@ class WorkerState:
     # itself near the cap instead of blowing past it. Transient — recomputed each
     # attempt, deliberately not round-tripped through the checkpoint (from_dict).
     budget_usd: float | None = None
+    # Versioned cold-resume facts. Legacy checkpoints omit this key entirely;
+    # schema-first recovery must parse it before considering a legacy replay.
+    openhands_resume: OpenHandsResumeState | None = None
 
     def push_key(self) -> str:
         """Idempotency key for the branch push — never a single global key."""
@@ -176,15 +188,26 @@ class WorkerState:
         return f"{self.job_id}:open_pr:{self.repo}:{self.branch}"
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        data["openhands_resume"] = (
+            self.openhands_resume.to_dict()
+            if self.openhands_resume is not None
+            else None
+        )
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "WorkerState":
         fields = {
             "job_id", "repo", "instruction", "base", "branch",
             "completed_steps", "title", "body", "agent", "warm_key",
+            "requester_id", "openhands_resume",
         }
-        return cls(**{k: v for k, v in data.items() if k in fields})
+        values = {k: v for k, v in data.items() if k in fields}
+        resume = values.get("openhands_resume")
+        if resume is not None:
+            values["openhands_resume"] = OpenHandsResumeState.from_dict(resume)
+        return cls(**values)
 
 
 @dataclass(slots=True)
@@ -216,6 +239,9 @@ class WorkerEdit:
     cost_usd: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # OpenHands captures a final authenticated delta before its live container
+    # disappears. Other worker backends leave this unset.
+    workspace_artifact: "WorkspaceArtifactRef | None" = None
 
 
 @runtime_checkable
@@ -234,7 +260,7 @@ class CodingWorker(Protocol):
         workspace: Path,
         state: WorkerState,
         on_step: StepCallback | None = None,
-    ) -> WorkerEdit: ...
+    ) -> WorkerEdit | WorkerPaused: ...
 
 
 @runtime_checkable
@@ -242,13 +268,20 @@ class AttemptRunner(Protocol):
     """What the durable paths depend on: one attempt → pushed branch + outcome.
 
     :class:`GitWorkspaceOrchestrator` is the real implementation; tests use
-    in-memory fakes. The attempt is an opaque replay unit — safe to re-run from
-    clean (force-push to the job-exclusive branch keeps the retry idempotent).
+    in-memory fakes. Implementations may return a durable pause and accept a
+    later structured decision; legacy workers still replay from clean.
     """
 
     async def run_attempt(
         self, state: WorkerState, on_step: StepCallback | None = None
-    ) -> WorkerOutcome: ...
+    ) -> WorkerOutcome | WorkerPaused: ...
+
+    async def resume_attempt(
+        self,
+        state: WorkerState,
+        decision: ResumeDecision,
+        on_step: StepCallback | None = None,
+    ) -> WorkerOutcome | WorkerPaused: ...
 
 
 def _branch_for(job_id: str) -> str:
@@ -287,6 +320,27 @@ def _opened_result(cp: WorkerCheckpoint) -> ToolResult:
             "pr_url": cp.pr_url,
             "completed_steps": cp.completed_steps,
             "resumed": True,
+        },
+    )
+
+
+def _parked_result(state: WorkerState) -> ToolResult:
+    resume = state.openhands_resume
+    assert resume is not None and resume.status == "parked"
+    return ToolResult(
+        ok=True,
+        summary=(
+            f"coding worker job {state.job_id} is waiting for confirmation: "
+            f"{resume.pending_action_summary}"
+        ),
+        data={
+            "job_id": state.job_id,
+            "status": "parked",
+            "branch": state.branch,
+            "decision_id": resume.decision_id,
+            "pending_action_summary": resume.pending_action_summary,
+            "pending_action_fingerprint": resume.pending_action_fingerprint,
+            "completed_steps": state.completed_steps,
         },
     )
 
@@ -391,8 +445,13 @@ class CodingWorkerConnector:
                 base=base,
                 branch=_branch_for(job_id),
                 agent=args.get("agent"),
+                requester_id=args.get("approved_by"),
                 warm_key=args.get("warm_key"),
             )
+
+        resume = state.openhands_resume
+        if resume is not None and resume.status == "parked":
+            return _parked_result(state)
 
         # The two side effects run after resolve() already marked the approval
         # approved, so neither may raise out of execute() — that would surface as
@@ -404,12 +463,27 @@ class CodingWorkerConnector:
             state.completed_steps = []
             await self._save(state, "running")
             try:
-                outcome = await self.orchestrator.run_attempt(
-                    state, on_step=self._checkpointer()
-                )
+                if resume is not None and resume.status == "terminal":
+                    deliver = getattr(self.orchestrator, "deliver_terminal", None)
+                    if deliver is None:
+                        raise OpenHandsResumeError(
+                            "terminal OpenHands recovery is unavailable"
+                        )
+                    outcome = await deliver(state, on_step=self._checkpointer())
+                elif resume is not None:
+                    raise OpenHandsResumeError(
+                        f"active OpenHands {resume.status} segment cannot be replayed"
+                    )
+                else:
+                    outcome = await self.orchestrator.run_attempt(
+                        state, on_step=self._checkpointer()
+                    )
             except Exception as exc:  # noqa: BLE001
                 await self._save(state, "failed", error=str(exc))
                 return _failed(job_id, state, "failed", exc)
+            if isinstance(outcome, WorkerPaused):
+                await self._save(state, "parked")
+                return _parked_result(state)
             state.title, state.body = outcome.title, outcome.body
             cost = (outcome.cost_usd, outcome.prompt_tokens, outcome.completion_tokens)
             await self._save(state, "pushed")
@@ -430,6 +504,15 @@ class CodingWorkerConnector:
         await self._save(
             state, "opened", pr_number=pull.get("number"), pr_url=pull.get("html_url")
         )
+        cleanup = getattr(self.orchestrator, "cleanup_attempt", None)
+        if cleanup is not None and state.openhands_resume is not None:
+            await cleanup(state, on_step=self._checkpointer())
+            await self._save(
+                state,
+                "opened",
+                pr_number=pull.get("number"),
+                pr_url=pull.get("html_url"),
+            )
         return ToolResult(
             ok=True,
             summary=(
@@ -453,6 +536,73 @@ class CodingWorkerConnector:
                 },
             },
         )
+
+    async def resolve_openhands(
+        self, job_id: str, decision: ResumeDecision
+    ) -> ToolResult:
+        """Drive one typed accept/reject decision in checkpoint-only mode."""
+        if self.checkpoints is None:
+            return ToolResult(ok=False, summary="coding-worker checkpoints unavailable")
+        cp = await self.checkpoints.get(job_id)
+        if cp is None:
+            return ToolResult(ok=False, summary=f"unknown coding worker job {job_id}")
+        if cp.status == "opened":
+            return _opened_result(cp)
+        try:
+            state = WorkerState.from_dict(cp.state_json)
+            resume = state.openhands_resume
+            if resume is None or resume.status != "parked":
+                raise OpenHandsResumeError("coding worker job is not awaiting a decision")
+            outcome = await self.orchestrator.resume_attempt(
+                state,
+                decision,
+                on_step=self._checkpointer(),
+            )
+            if isinstance(outcome, WorkerPaused):
+                await self._save(state, "parked")
+                return _parked_result(state)
+            state.title, state.body = outcome.title, outcome.body
+            await self._save(state, "pushed")
+            pull = await self._open_pr(state, outcome)
+            await self._save(
+                state,
+                "opened",
+                pr_number=pull.get("number"),
+                pr_url=pull.get("html_url"),
+            )
+            cleanup = getattr(self.orchestrator, "cleanup_attempt", None)
+            if cleanup is not None:
+                await cleanup(state, on_step=self._checkpointer())
+                await self._save(
+                    state,
+                    "opened",
+                    pr_number=pull.get("number"),
+                    pr_url=pull.get("html_url"),
+                )
+            return ToolResult(
+                ok=True,
+                summary=(
+                    f"opened draft PR #{pull.get('number')} in {state.repo} "
+                    f"(job {job_id})"
+                ),
+                data={
+                    "job_id": job_id,
+                    "status": "opened",
+                    "branch": outcome.branch,
+                    "pr_number": pull.get("number"),
+                    "pr_url": pull.get("html_url"),
+                    "completed_steps": state.completed_steps,
+                    "cost_usd": outcome.cost_usd,
+                    "prompt_tokens": outcome.prompt_tokens,
+                    "completion_tokens": outcome.completion_tokens,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            state = locals().get("state")
+            if isinstance(state, WorkerState):
+                await self._save(state, "failed", error=str(exc))
+                return _failed(job_id, state, "failed", exc)
+            return ToolResult(ok=False, summary=f"coding worker job {job_id} failed: {exc}")
 
     async def _open_pr(self, state: WorkerState, outcome: WorkerOutcome) -> dict:
         """Open the draft PR, reusing an existing one for this head if present.
@@ -509,6 +659,54 @@ class CodingWorkerConnector:
         for cp in await self.checkpoints.recent(limit=1000):
             if cp.status in self._LEGACY_TERMINAL:
                 continue
+            if isinstance(cp.state_json, dict) and cp.state_json.get(
+                "openhands_resume"
+            ) is not None:
+                state: WorkerState | None = None
+                try:
+                    state = WorkerState.from_dict(cp.state_json)
+                    resume = state.openhands_resume
+                    assert resume is not None
+                    if resume.status in {"parked", "cleaned"}:
+                        continue
+                    if resume.status == "parking":
+                        reconcile = getattr(
+                            self.orchestrator, "reconcile_parking", None
+                        )
+                        if reconcile is None:
+                            raise OpenHandsResumeError(
+                                "OpenHands parking reconciler is unavailable"
+                            )
+                        await reconcile(state, on_step=self._checkpointer())
+                        await self._save(state, "parked")
+                        resumed.append(cp.job_id)
+                        continue
+                    if resume.status == "terminal":
+                        await self.execute(
+                            "pr:write",
+                            {
+                                "job_id": cp.job_id,
+                                "repo": cp.repo,
+                                "instruction": cp.instruction,
+                                "base": cp.base,
+                            },
+                        )
+                        resumed.append(cp.job_id)
+                        continue
+                    raise OpenHandsResumeError(
+                        f"active OpenHands {resume.status} segment was "
+                        "interrupted and cannot be replayed safely"
+                    )
+                except Exception as exc:  # noqa: BLE001 — quarantine typed state
+                    logger.error(
+                        "typed reconciler failing closed coding-worker "
+                        "checkpoint %s: %s",
+                        cp.job_id,
+                        exc,
+                    )
+                    if state is not None:
+                        await self._save(state, "failed", error=str(exc))
+                    continue
             if not isinstance(cp.state_json, dict) or (
                 self._VERSIONED_STATE_KEYS.intersection(cp.state_json)
             ):
@@ -546,7 +744,12 @@ class CodingWorkerConnector:
             return None
 
         async def on_step(state: WorkerState) -> None:
-            await self._save(state, "running")
+            status = (
+                state.openhands_resume.status
+                if state.openhands_resume is not None
+                else "running"
+            )
+            await self._save(state, status)
 
         return on_step
 
@@ -600,9 +803,9 @@ class GitWorkspaceOrchestrator:
     the plain URL). The worker only sees the prepared workspace: it is
     credential-free by construction, not by discipline.
 
-    The attempt is one opaque replay unit: the workspace is a throwaway temp
-    dir removed after each run, so a resumed job re-provisions from clean, and
-    force-push to the job-exclusive branch keeps the retry idempotent.
+    Legacy workers use one opaque replay unit over a throwaway workspace.
+    OpenHands cold resume instead makes pause/final artifacts the replay-safe
+    boundaries: an active segment is never guessed or re-executed after a crash.
 
     SPEND (hardening Phases 4+5): when a
     :class:`~openloop.usage.ledger.WorkerSpendLedger` is wired, the invoking
@@ -646,7 +849,7 @@ class GitWorkspaceOrchestrator:
 
     async def run_attempt(
         self, state: WorkerState, on_step: StepCallback | None = None
-    ) -> WorkerOutcome:
+    ) -> WorkerOutcome | WorkerPaused:
         async def step(name: str) -> None:
             state.completed_steps.append(name)
             if on_step is not None:
@@ -738,6 +941,13 @@ class GitWorkspaceOrchestrator:
                 # settle() raises on an over-cap spend; a deadline abort under the
                 # cap won't, so re-raise to fail closed regardless.
                 raise
+            if isinstance(edit, WorkerPaused):
+                await self._park(state, edit, on_step)
+                # A paused checkout is never reusable warm state. The encrypted
+                # cumulative delta is now the source of truth.
+                if lease is not None:
+                    await lease.discard()
+                return edit
             # Persist title/body so a post-push crash can still open the PR.
             state.title, state.body = edit.title, edit.body
 
@@ -746,7 +956,9 @@ class GitWorkspaceOrchestrator:
             # Raises out of the attempt (both durable paths mark the job
             # failed — terminal, so no resume loop re-spends), and the
             # workspace teardown in `finally` discards the over-budget edit.
-            if self._ledger is not None:
+            if state.openhands_resume is not None:
+                await self._record_terminal(state, edit, on_step)
+            elif self._ledger is not None:
                 await self._ledger.settle(
                     agent=state.agent,
                     job_id=state.job_id,
@@ -755,6 +967,10 @@ class GitWorkspaceOrchestrator:
                     completion_tokens=edit.completion_tokens,
                 )
 
+            if (workspace / "OPENLOOP_PR.md").exists():
+                raise OpenHandsResumeError(
+                    "reserved OPENLOOP_PR.md survived the terminal capture"
+                )
             await self._git("add", "-A", cwd=workspace)
             await self._git(
                 "-c", "user.email=worker@openloop.team",
@@ -814,13 +1030,450 @@ class GitWorkspaceOrchestrator:
             else:
                 shutil.rmtree(workspace, ignore_errors=True)
 
+    async def resume_attempt(
+        self,
+        state: WorkerState,
+        decision: ResumeDecision,
+        on_step: StepCallback | None = None,
+    ) -> WorkerOutcome | WorkerPaused:
+        """Continue one parked OpenHands job from its authenticated artifact.
+
+        This path deliberately never acquires the mutable warm pool. It fetches
+        the recorded base object into a fresh checkout and applies only the
+        fully verified cumulative delta before attaching the conversation.
+        """
+        resume = state.openhands_resume
+        if resume is None or resume.status != "parked":
+            raise OpenHandsResumeError("only a parked OpenHands job can resume")
+        if decision.decision_id != resume.decision_id:
+            raise OpenHandsResumeError("stale OpenHands resume decision")
+        if decision.actor_id != resume.slack_requester_id:
+            raise OpenHandsResumeError("OpenHands resume decision is unauthorized")
+
+        worker_image = getattr(self.worker, "server_image", None)
+        artifact_store = getattr(self.worker, "artifact_store", None)
+        if worker_image != resume.image_digest:
+            raise OpenHandsResumeError("OpenHands resume image digest mismatch")
+        if artifact_store is None or (
+            artifact_store.keys.master_key_id != resume.master_key_id
+        ):
+            raise OpenHandsResumeError("OpenHands resume master-key mismatch")
+        artifact_ref = resume.workspace_artifact
+        if artifact_ref is None:
+            raise OpenHandsResumeError("parked OpenHands job has no workspace artifact")
+
+        resume.transition_to(
+            "resuming",
+            segment_id=uuid.uuid4().hex,
+            resolved_event_id=decision.event_id,
+            resolved_decision=decision,
+        )
+        state.completed_steps = []
+        if on_step is not None:
+            await on_step(state)
+
+        if self._ledger is not None:
+            await self._ledger.check_monthly(state.agent, job_id=state.job_id)
+            state.budget_usd = self._ledger.per_task_usd_for(state.agent)
+        token = await self._credentials.resolve(self._scope)
+        if self._workspace_root is not None:
+            self._workspace_root.mkdir(parents=True, exist_ok=True)
+        workspace = Path(
+            tempfile.mkdtemp(
+                prefix=f"openloop-{state.job_id}-resume-",
+                dir=self._workspace_root,
+            )
+        )
+
+        async def step(name: str) -> None:
+            state.completed_steps.append(name)
+            if on_step is not None:
+                await on_step(state)
+
+        try:
+            await self._git("init", cwd=workspace)
+            await self._git(
+                "remote",
+                "add",
+                "origin",
+                f"{self._remote_base}/{state.repo}.git",
+                cwd=workspace,
+            )
+            await self._git(
+                *_auth_config(token),
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                artifact_ref.base_commit,
+                cwd=workspace,
+                redact=_auth_secrets(token),
+            )
+            await step("clone")
+            await self._git("checkout", "-B", state.branch, "FETCH_HEAD", cwd=workspace)
+            await step("branch")
+            await self._restore_artifact(workspace, artifact_ref)
+
+            try:
+                edit = await self.worker.run(workspace, state, on_step)
+            except WorkerRunAborted as aborted:
+                await self._settle_cumulative(
+                    state,
+                    aborted.cost_usd,
+                    aborted.prompt_tokens,
+                    aborted.completion_tokens,
+                )
+                raise
+            if isinstance(edit, WorkerPaused):
+                await self._park(state, edit, on_step)
+                return edit
+
+            state.title, state.body = edit.title, edit.body
+            await self._record_terminal(state, edit, on_step)
+            if (workspace / "OPENLOOP_PR.md").exists():
+                raise OpenHandsResumeError(
+                    "reserved OPENLOOP_PR.md survived the terminal capture"
+                )
+            await self._git("add", "-A", cwd=workspace)
+            await self._git(
+                "-c",
+                "user.email=worker@openloop.team",
+                "-c",
+                "user.name=OpenLoop coding worker",
+                "commit",
+                "-m",
+                edit.title,
+                cwd=workspace,
+            )
+            await step("commit")
+            push_token = await self._credentials.resolve(self._scope)
+            await self._git(
+                *_auth_config(push_token),
+                "push",
+                "--force",
+                "origin",
+                state.branch,
+                cwd=workspace,
+                redact=_auth_secrets(push_token),
+            )
+            await step("push")
+            return WorkerOutcome(
+                branch=state.branch,
+                title=edit.title,
+                body=edit.body,
+                cost_usd=edit.cost_usd,
+                prompt_tokens=edit.prompt_tokens,
+                completion_tokens=edit.completion_tokens,
+            )
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    async def _restore_artifact(
+        self, workspace: Path, artifact_ref: "WorkspaceArtifactRef"
+    ):
+        store = getattr(self.worker, "artifact_store", None)
+        if store is None:
+            raise OpenHandsResumeError("OpenHands artifact store is unavailable")
+        identity = artifact_ref.artifact.identity
+        with store.open_verified(artifact_ref.artifact, identity) as verified:
+            if (
+                verified.manifest.format != "git-delta"
+                or verified.manifest.base_commit != artifact_ref.base_commit
+            ):
+                raise OpenHandsResumeError("OpenHands artifact manifest mismatch")
+            try:
+                patch = verified.stream.read().decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise OpenHandsResumeError("OpenHands git delta is not valid") from exc
+        if patch:
+            await self._git("apply", "--binary", "-", cwd=workspace, stdin=patch)
+        return verified.manifest
+
+    async def deliver_terminal(
+        self,
+        state: WorkerState,
+        on_step: StepCallback | None = None,
+    ) -> WorkerOutcome:
+        """Reconstruct and push a terminal artifact without another model call."""
+        resume = state.openhands_resume
+        if (
+            resume is None
+            or resume.status != "terminal"
+            or resume.workspace_artifact is None
+            or resume.workspace_artifact.artifact.identity.kind != "final"
+        ):
+            raise OpenHandsResumeError("no recoverable terminal OpenHands artifact")
+        artifact_ref = resume.workspace_artifact
+        token = await self._credentials.resolve(self._scope)
+        if self._workspace_root is not None:
+            self._workspace_root.mkdir(parents=True, exist_ok=True)
+        workspace = Path(
+            tempfile.mkdtemp(
+                prefix=f"openloop-{state.job_id}-terminal-",
+                dir=self._workspace_root,
+            )
+        )
+
+        async def step(name: str) -> None:
+            if name not in state.completed_steps:
+                state.completed_steps.append(name)
+            if on_step is not None:
+                await on_step(state)
+
+        try:
+            await self._git("init", cwd=workspace)
+            await self._git(
+                "remote",
+                "add",
+                "origin",
+                f"{self._remote_base}/{state.repo}.git",
+                cwd=workspace,
+            )
+            await self._git(
+                *_auth_config(token),
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                artifact_ref.base_commit,
+                cwd=workspace,
+                redact=_auth_secrets(token),
+            )
+            await step("clone")
+            await self._git("checkout", "-B", state.branch, "FETCH_HEAD", cwd=workspace)
+            await step("branch")
+            manifest = await self._restore_artifact(workspace, artifact_ref)
+            if manifest.pr_title is None:
+                raise OpenHandsResumeError("final artifact has no PR metadata")
+            state.title = manifest.pr_title
+            state.body = manifest.pr_body or ""
+            if (workspace / "OPENLOOP_PR.md").exists():
+                raise OpenHandsResumeError(
+                    "reserved OPENLOOP_PR.md exists in final artifact"
+                )
+            await self._git("add", "-A", cwd=workspace)
+            await self._git(
+                "-c",
+                "user.email=worker@openloop.team",
+                "-c",
+                "user.name=OpenLoop coding worker",
+                "commit",
+                "-m",
+                state.title,
+                cwd=workspace,
+            )
+            await step("commit")
+            push_token = await self._credentials.resolve(self._scope)
+            await self._git(
+                *_auth_config(push_token),
+                "push",
+                "--force",
+                "origin",
+                state.branch,
+                cwd=workspace,
+                redact=_auth_secrets(push_token),
+            )
+            await step("push")
+            return WorkerOutcome(
+                branch=state.branch,
+                title=state.title,
+                body=state.body,
+                cost_usd=resume.cumulative_cost,
+                prompt_tokens=resume.cumulative_prompt_tokens,
+                completion_tokens=resume.cumulative_completion_tokens,
+            )
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    async def cleanup_attempt(
+        self,
+        state: WorkerState,
+        on_step: StepCallback | None = None,
+    ) -> None:
+        """Delete terminal OpenHands state after the draft PR is durable."""
+        resume = state.openhands_resume
+        if resume is None or resume.status == "cleaned":
+            return
+        if resume.status != "terminal":
+            raise OpenHandsResumeError("cannot clean a non-terminal OpenHands job")
+        store = getattr(self.worker, "artifact_store", None)
+        if store is None:
+            raise OpenHandsResumeError("OpenHands artifact store is unavailable")
+        paths = store.layout.for_job(state.job_id)
+        shutil.rmtree(paths.root, ignore_errors=True)
+        resume.transition_to(
+            "cleaned",
+            workspace_artifact=None,
+            pending_action_summary=None,
+            pending_action_fingerprint=None,
+        )
+        if on_step is not None:
+            await on_step(state)
+
+    async def _park(
+        self,
+        state: WorkerState,
+        paused: WorkerPaused,
+        on_step: StepCallback | None,
+    ) -> None:
+        resume = state.openhands_resume
+        if resume is None or resume.status not in {"running", "resuming"}:
+            raise OpenHandsResumeError("cannot park inactive OpenHands segment")
+        if (
+            paused.conversation_id != resume.conversation_id
+            or paused.segment_id != resume.segment_id
+        ):
+            raise OpenHandsResumeError("OpenHands paused result identity mismatch")
+        resume.transition_to(
+            "parking",
+            decision_id=paused.decision_id,
+            pending_action_summary=paused.pending_action_summary,
+            pending_action_fingerprint=paused.pending_action_fingerprint,
+            workspace_artifact=paused.workspace_artifact,
+            cumulative_cost=paused.cumulative_cost,
+            cumulative_prompt_tokens=paused.cumulative_prompt_tokens,
+            cumulative_completion_tokens=paused.cumulative_completion_tokens,
+            resolved_event_id=None,
+            resolved_decision=None,
+        )
+        if on_step is not None:
+            await on_step(state)
+        await self._settle_cumulative(
+            state,
+            paused.cumulative_cost,
+            paused.cumulative_prompt_tokens,
+            paused.cumulative_completion_tokens,
+        )
+        resume.transition_to(
+            "parked",
+            last_settled_cumulative_cost=paused.cumulative_cost,
+            last_settled_cumulative_prompt_tokens=paused.cumulative_prompt_tokens,
+            last_settled_cumulative_completion_tokens=(
+                paused.cumulative_completion_tokens
+            ),
+        )
+        if on_step is not None:
+            await on_step(state)
+
+    async def reconcile_parking(
+        self,
+        state: WorkerState,
+        on_step: StepCallback | None = None,
+    ) -> WorkerPaused:
+        """Finish a crash-interrupted parking transition without model work."""
+        resume = state.openhands_resume
+        if (
+            resume is None
+            or resume.status != "parking"
+            or resume.workspace_artifact is None
+            or not resume.decision_id
+            or not resume.pending_action_summary
+            or not resume.pending_action_fingerprint
+        ):
+            raise OpenHandsResumeError("OpenHands parking state is incomplete")
+        store = getattr(self.worker, "artifact_store", None)
+        if store is None:
+            raise OpenHandsResumeError("OpenHands artifact store is unavailable")
+        identity = resume.workspace_artifact.artifact.identity
+        with store.open_verified(resume.workspace_artifact.artifact, identity) as verified:
+            if verified.manifest.base_commit != resume.resolved_base_commit:
+                raise OpenHandsResumeError("OpenHands parking artifact base mismatch")
+        await self._settle_cumulative(
+            state,
+            resume.cumulative_cost,
+            resume.cumulative_prompt_tokens,
+            resume.cumulative_completion_tokens,
+        )
+        resume.transition_to(
+            "parked",
+            last_settled_cumulative_cost=resume.cumulative_cost,
+            last_settled_cumulative_prompt_tokens=resume.cumulative_prompt_tokens,
+            last_settled_cumulative_completion_tokens=(
+                resume.cumulative_completion_tokens
+            ),
+        )
+        if on_step is not None:
+            await on_step(state)
+        return WorkerPaused(
+            conversation_id=resume.conversation_id,
+            segment_id=resume.segment_id,
+            decision_id=resume.decision_id,
+            pending_action_summary=resume.pending_action_summary,
+            pending_action_fingerprint=resume.pending_action_fingerprint,
+            workspace_artifact=resume.workspace_artifact,
+            cumulative_cost=resume.cumulative_cost,
+            cumulative_prompt_tokens=resume.cumulative_prompt_tokens,
+            cumulative_completion_tokens=resume.cumulative_completion_tokens,
+        )
+
+    async def _record_terminal(
+        self,
+        state: WorkerState,
+        edit: WorkerEdit,
+        on_step: StepCallback | None,
+    ) -> None:
+        resume = state.openhands_resume
+        if resume is None or edit.workspace_artifact is None:
+            raise OpenHandsResumeError("terminal OpenHands edit has no final artifact")
+        if edit.workspace_artifact.artifact.identity.kind != "final":
+            raise OpenHandsResumeError("terminal OpenHands artifact has wrong kind")
+        await self._settle_cumulative(
+            state,
+            edit.cost_usd,
+            edit.prompt_tokens,
+            edit.completion_tokens,
+        )
+        resume.transition_to(
+            "terminal",
+            workspace_artifact=edit.workspace_artifact,
+            cumulative_cost=edit.cost_usd,
+            cumulative_prompt_tokens=edit.prompt_tokens,
+            cumulative_completion_tokens=edit.completion_tokens,
+            last_settled_cumulative_cost=edit.cost_usd,
+            last_settled_cumulative_prompt_tokens=edit.prompt_tokens,
+            last_settled_cumulative_completion_tokens=edit.completion_tokens,
+        )
+        if on_step is not None:
+            await on_step(state)
+
+    async def _settle_cumulative(
+        self,
+        state: WorkerState,
+        cost: float,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> None:
+        resume = state.openhands_resume
+        if resume is None:
+            return
+        deltas = (
+            cost - resume.last_settled_cumulative_cost,
+            prompt_tokens - resume.last_settled_cumulative_prompt_tokens,
+            completion_tokens - resume.last_settled_cumulative_completion_tokens,
+        )
+        if min(deltas) < 0:
+            raise OpenHandsResumeError("OpenHands cumulative metrics moved backwards")
+        if self._ledger is not None:
+            await self._ledger.settle(
+                agent=state.agent,
+                job_id=state.job_id,
+                idempotency_key=(
+                    f"{state.job_id}:{resume.conversation_id}:{resume.segment_id}"
+                ),
+                record_cost_usd=deltas[0],
+                record_prompt_tokens=deltas[1],
+                record_completion_tokens=deltas[2],
+                cap_cost_usd=cost,
+            )
+
     async def _git(
         self,
         *args: str,
         cwd: Path | None = None,
+        stdin: str | None = None,
         redact: "str | tuple[str, ...] | None" = None,
     ) -> str:
-        return await self._run("git", *args, cwd=cwd, redact=redact)
+        return await self._run("git", *args, cwd=cwd, stdin=stdin, redact=redact)
 
     async def _run(
         self,

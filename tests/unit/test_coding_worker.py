@@ -17,6 +17,16 @@ from openloop.tools.coding_worker import (
     _pr_body,
     _redact,
 )
+from openloop.tools.openhands_artifacts import (
+    WorkspaceArtifact,
+    WorkspaceArtifactIdentity,
+)
+from openloop.tools.openhands_docker import DEFAULT_OPENHANDS_SERVER_IMAGE
+from openloop.tools.openhands_resume import (
+    OpenHandsResumeState,
+    WorkerPaused,
+    WorkspaceArtifactRef,
+)
 from openloop.testing import FakeCodingWorker, FakeGitHub, FakeWorkerOrchestrator
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
@@ -242,6 +252,64 @@ async def test_attempt_provisions_edits_commits_and_pushes(monkeypatch):
     # Commit message comes from the worker's edit.
     commit_cmd = next(cmd for cmd, _ in commands if "commit" in cmd)
     assert "t" in commit_cmd
+
+
+async def test_parked_openhands_attempt_never_stages_commits_or_pushes(monkeypatch):
+    class PausingWorker:
+        async def run(self, workspace, state, on_step=None):
+            state.openhands_resume = OpenHandsResumeState(
+                status="running",
+                conversation_id="conversation-1",
+                segment_id="segment-1",
+                base_ref="main",
+                resolved_base_commit="a" * 40,
+                image_digest=DEFAULT_OPENHANDS_SERVER_IMAGE,
+                master_key_id="key-v1",
+                slack_requester_id="U123",
+            )
+            identity = WorkspaceArtifactIdentity(
+                state.job_id, "conversation-1", "segment-1", "paused"
+            )
+            descriptor = WorkspaceArtifact(
+                identity=identity,
+                key="jobs/j1/artifacts/conversation-1/segment-1.paused.artifact",
+                ciphertext_sha256="b" * 64,
+                ciphertext_bytes=10,
+                envelope_version=1,
+                master_key_id="key-v1",
+            )
+            return WorkerPaused(
+                conversation_id="conversation-1",
+                segment_id="segment-1",
+                decision_id="decision-1",
+                pending_action_summary="OpenHands requests terminal",
+                pending_action_fingerprint="c" * 64,
+                workspace_artifact=WorkspaceArtifactRef(
+                    descriptor, "git-delta", "a" * 40
+                ),
+                cumulative_cost=0.2,
+                cumulative_prompt_tokens=100,
+                cumulative_completion_tokens=20,
+            )
+
+    orch = GitWorkspaceOrchestrator(
+        PausingWorker(), EnvCredentialResolver({"github": "t"})
+    )
+    commands = []
+
+    async def fake_run(*cmd, cwd=None, stdin=None, redact=None):
+        commands.append(cmd)
+        return ""
+
+    monkeypatch.setattr(orch, "_run", fake_run)
+    state = _state()
+    state.requester_id = "U123"
+
+    result = await orch.run_attempt(state)
+
+    assert isinstance(result, WorkerPaused)
+    assert state.openhands_resume.status == "parked"
+    assert not any("add" in cmd or "commit" in cmd or "push" in cmd for cmd in commands)
 
 
 async def test_worker_sees_no_credential(monkeypatch):

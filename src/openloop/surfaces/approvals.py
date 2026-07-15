@@ -11,6 +11,8 @@ from openloop.tools import ToolGateway
 
 APPROVE_ACTION = "openloop_approve"
 DENY_ACTION = "openloop_deny"
+OPENHANDS_ACCEPT_ACTION = "openloop_openhands_accept"
+OPENHANDS_REJECT_ACTION = "openloop_openhands_reject"
 
 
 def approval_blocks(requests: list[ApprovalRequest]) -> list[dict]:
@@ -50,6 +52,42 @@ def approval_blocks(requests: list[ApprovalRequest]) -> list[dict]:
             }
         )
     return blocks
+
+
+def openhands_decision_blocks(
+    job_id: str, decision_id: str, summary: str
+) -> list[dict]:
+    """Explicit accept/reject controls for one parked OpenHands action."""
+    value = f"{job_id}|{decision_id}"
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"⏸️ *OpenHands needs confirmation:* {summary}",
+            },
+        },
+        {
+            "type": "actions",
+            "block_id": f"openhands:{decision_id}",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": OPENHANDS_ACCEPT_ACTION,
+                    "text": {"type": "plain_text", "text": "Accept"},
+                    "style": "primary",
+                    "value": value,
+                },
+                {
+                    "type": "button",
+                    "action_id": OPENHANDS_REJECT_ACTION,
+                    "text": {"type": "plain_text", "text": "Reject"},
+                    "style": "danger",
+                    "value": value,
+                },
+            ],
+        },
+    ]
 
 
 def resolution_message(inv, approver: str) -> str:

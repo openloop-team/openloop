@@ -53,7 +53,13 @@ def _path(store, descriptor):
 def test_encrypted_round_trip_and_private_files(tmp_path):
     store = _store(tmp_path)
     plaintext = b"diff --git a/secret b/secret\n+plaintext-marker\n"
-    descriptor = store.put_atomic(_identity(), io.BytesIO(plaintext), _manifest())
+    manifest = WorkspaceArtifactManifest(
+        format="git-delta",
+        base_commit=BASE,
+        pr_title="Cold resume proof",
+        pr_body="Recovered from the encrypted final envelope.",
+    )
+    descriptor = store.put_atomic(_identity(), io.BytesIO(plaintext), manifest)
     artifact_path = _path(store, descriptor)
 
     assert artifact_path.stat().st_mode & 0o777 == 0o600
@@ -61,6 +67,10 @@ def test_encrypted_round_trip_and_private_files(tmp_path):
     with store.open_verified(descriptor, _identity()) as verified:
         assert verified.manifest.format == "git-delta"
         assert verified.manifest.base_commit == BASE
+        assert verified.manifest.pr_title == "Cold resume proof"
+        assert verified.manifest.pr_body == (
+            "Recovered from the encrypted final envelope."
+        )
         assert verified.stream.read() == plaintext
 
 

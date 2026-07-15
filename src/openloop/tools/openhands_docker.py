@@ -6,13 +6,14 @@ import importlib.metadata
 import inspect
 import logging
 import os
+import platform as host_platform
 import re
 import secrets
 import subprocess
 import threading
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
 
@@ -28,6 +29,16 @@ DEFAULT_OPENHANDS_SERVER_IMAGE = (
     "ghcr.io/openhands/agent-server@"
     "sha256:08d3994f9287f8d52b07907ac1575ecfaa48b972697ddae4f1cb5c2f03713fab"
 )
+_DEFAULT_PLATFORM_IMAGES = {
+    "linux/amd64": (
+        "ghcr.io/openhands/agent-server@"
+        "sha256:5148763c47960d7f6f020d4fc1587e830e408057f64e96610a770c51d29e47c9"
+    ),
+    "linux/arm64": (
+        "ghcr.io/openhands/agent-server@"
+        "sha256:639932fed2077ceca4d758fb0c62c165d9c6cb386c129d5f6cc05c3a69ec0a8e"
+    ),
+}
 CONVERSATION_LEASE_TTL_SECONDS = "45"
 
 _DIGEST_IMAGE = re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}\Z")
@@ -37,6 +48,12 @@ _REQUIRED_DISTRIBUTIONS = (
     "openhands-workspace",
     "openhands-agent-server",
 )
+_NATIVE_DOCKER_PLATFORMS = {
+    "aarch64": "linux/arm64",
+    "amd64": "linux/amd64",
+    "arm64": "linux/arm64",
+    "x86_64": "linux/amd64",
+}
 
 
 class HardenedDockerWorkspaceError(RuntimeError):
@@ -51,6 +68,36 @@ def require_immutable_server_image(image: str) -> str:
     return image
 
 
+def native_docker_platform(machine: str | None = None) -> str:
+    """Select the pinned OCI index's native Linux manifest.
+
+    The 1.31.0 image digest is a multi-platform OCI index. Forcing amd64 on an
+    arm64 host runs ``tmux`` under QEMU, whose jemalloc warning is treated as a
+    fatal error by pinned ``libtmux``. Selecting the matching immutable child
+    manifest avoids emulation and is also the correct production default.
+    """
+    selected = (machine or host_platform.machine()).lower()
+    try:
+        return _NATIVE_DOCKER_PLATFORMS[selected]
+    except KeyError as exc:
+        raise HardenedDockerWorkspaceError(
+            f"unsupported OpenHands Docker host architecture: {selected!r}"
+        ) from exc
+
+
+def runtime_server_image(image: str, platform: str) -> str:
+    """Resolve the pinned index to its immutable platform child manifest."""
+    require_immutable_server_image(image)
+    if image != DEFAULT_OPENHANDS_SERVER_IMAGE:
+        return image
+    try:
+        return _DEFAULT_PLATFORM_IMAGES[platform]
+    except KeyError as exc:
+        raise HardenedDockerWorkspaceError(
+            f"the pinned OpenHands image has no supported {platform!r} manifest"
+        ) from exc
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class HardenedDockerLaunch:
     """One container launch. Secret values never appear in its command or repr."""
@@ -62,7 +109,7 @@ class HardenedDockerLaunch:
     session_api_key: str
     conversation_secret: str
     network: str | None = None
-    platform: str = "linux/amd64"
+    platform: str = field(default_factory=native_docker_platform)
 
     def __post_init__(self) -> None:
         require_immutable_server_image(self.image)
@@ -70,6 +117,10 @@ class HardenedDockerLaunch:
             raise HardenedDockerWorkspaceError("invalid OpenHands host port")
         if not self.session_api_key or not self.conversation_secret:
             raise HardenedDockerWorkspaceError("missing OpenHands runtime key")
+        if self.platform not in set(_NATIVE_DOCKER_PLATFORMS.values()):
+            raise HardenedDockerWorkspaceError(
+                f"unsupported OpenHands Docker platform: {self.platform!r}"
+            )
 
     def environment(self) -> dict[str, str]:
         return {
@@ -77,6 +128,12 @@ class HardenedDockerLaunch:
             "OH_SECRET_KEY": self.conversation_secret,
             "OH_CONVERSATIONS_PATH": "/openhands-state/conversations",
             "OH_LEASE_TTL_SECONDS": CONVERSATION_LEASE_TTL_SECONDS,
+            # Bind mounts retain the host owner, which differs from the image's
+            # non-root user. Scope Git's trust exception to the one checkout;
+            # do not mutate global config inside the long-lived state mount.
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "safe.directory",
+            "GIT_CONFIG_VALUE_0": "/workspace",
         }
 
     def command(self, *, container_name: str) -> list[str]:
@@ -144,6 +201,7 @@ class HardenedDockerWorkspace:
         workspace_factory: WorkspaceFactory | None = None,
         command_runner: CommandRunner | None = None,
         port_allocator: Callable[[], int] | None = None,
+        platform: str | None = None,
     ) -> None:
         self.layout = layout
         self.keys = keys
@@ -152,6 +210,7 @@ class HardenedDockerWorkspace:
         self._command_runner = command_runner or self._run_command
         self._port_allocator = port_allocator or self._find_loopback_port
         self._workspace_factory = workspace_factory or self._create_sdk_workspace
+        self.platform = platform or native_docker_platform()
 
     def probe(self) -> None:
         """Fail closed if the exact pinned SDK seam is not present."""
@@ -197,13 +256,14 @@ class HardenedDockerWorkspace:
                 "no loopback port available for OpenHands agent-server"
             )
         launch = HardenedDockerLaunch(
-            image=self.server_image,
+            image=runtime_server_image(self.server_image, self.platform),
             workspace=resolved_workspace,
             state_dir=paths.agent_server,
             host_port=port,
             session_api_key=secrets.token_urlsafe(32),
             conversation_secret=self.keys.conversation_secret(job_id),
             network=self.network,
+            platform=self.platform,
         )
         return self._workspace_factory(launch)
 
@@ -214,7 +274,7 @@ class HardenedDockerWorkspace:
         *,
         base_ref: str,
     ) -> ArchiveStreamResult:
-        """Stream the authenticated ``GET /file/archive`` response to a host sink."""
+        """Stream authenticated ``GET /api/file/archive`` bytes to a host sink."""
         if not base_ref or base_ref.startswith("-"):
             raise HardenedDockerWorkspaceError("invalid git-delta base ref")
         client = getattr(workspace, "client", None)
@@ -226,7 +286,7 @@ class HardenedDockerWorkspace:
         written = 0
         with client.stream(
             "GET",
-            "/file/archive",
+            "/api/file/archive",
             params={
                 "path": "/workspace",
                 "format": "git-delta",
@@ -250,6 +310,56 @@ class HardenedDockerWorkspace:
                 written += len(chunk)
         return ArchiveStreamResult(
             base_commit=base_commit, base_ref=base_ref, bytes_written=written
+        )
+
+    def attach_conversation(
+        self,
+        workspace: object,
+        *,
+        agent: object,
+        conversation_id: uuid.UUID,
+        callbacks: list | None = None,
+        max_iterations: int = 500,
+    ) -> object:
+        """Attach only to an already-loaded persisted conversation.
+
+        Pinned ``RemoteConversation`` creates a new conversation with the
+        caller-supplied ID after a 404. During the stale lease window that would
+        replace a conversation the new server has deliberately not acquired.
+        The hardened boundary therefore performs an authenticated existence
+        check and refuses to call the SDK constructor unless attachment is safe.
+        """
+        client = getattr(workspace, "client", None)
+        api_key = getattr(workspace, "api_key", None)
+        if client is None or not api_key:
+            raise HardenedDockerWorkspaceError(
+                "authenticated OpenHands workspace client is unavailable"
+            )
+        response = client.get(f"/api/conversations/{conversation_id}")
+        if response.status_code == 404:
+            raise HardenedDockerWorkspaceError(
+                "persisted OpenHands conversation is not available for attach; "
+                "its ownership lease may still be active"
+            )
+        try:
+            response.raise_for_status()
+        except Exception as exc:
+            raise HardenedDockerWorkspaceError(
+                "failed to verify persisted OpenHands conversation"
+            ) from exc
+
+        from openhands.sdk.conversation.impl.remote_conversation import (
+            RemoteConversation,
+        )
+
+        return RemoteConversation(
+            agent=agent,
+            workspace=workspace,
+            conversation_id=conversation_id,
+            callbacks=callbacks,
+            max_iteration_per_run=max_iterations,
+            visualizer=None,
+            delete_on_close=False,
         )
 
     def _create_sdk_workspace(self, launch: HardenedDockerLaunch) -> object:

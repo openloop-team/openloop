@@ -389,13 +389,17 @@ the workflow.
   capped **fail-closed** by the owning agent's `per_task_usd` before anything
   is pushed — on both durable paths — and the agentic backend refuses to
   register without that cap
-- [x] OpenHands cold-resume runtime foundation (Phase 0) — the Docker
+- [x] OpenHands cold resume — the Docker
   agent-server is digest-pinned, loopback-only, and authenticated; conversation
   state lives in a private per-job mount outside the checkout; independent
-  per-job keys protect conversation state and AES-GCM workspace artifacts; and
-  startup recovery uses a positive legacy allowlist. The cold-resume feature
-  flag remains off: confirmation parking, fresh-container attachment, and Slack
-  Accept/Reject land in the proof-gated later phases.
+  per-job keys protect conversation state and AES-GCM workspace artifacts.
+  Confirmation boundaries park without staging or pushing, settle cumulative
+  spend once per segment, discard the container, and expose explicit Slack
+  Accept/Reject actions. Resume reconstructs a fresh checkout from the recorded
+  base SHA and authenticated delta, attaches without resending the prompt, and
+  retains a final artifact until the draft PR is durable. Enabled by default for
+  Docker OpenHands; set `CODING_WORKER_OPENHANDS_COLD_RESUME_ENABLED=false` as
+  an operational rollback.
 - [x] Claude Code worker backend (`CODING_WORKER_BACKEND=claude`) —
   **experimental, personal use only**: drives the `claude` CLI in headless mode
   (`claude -p`) over the same prepared, credential-free workspace, authenticating

@@ -62,6 +62,10 @@ def test_default_backend_is_the_builtin_diff_worker_with_ledger_attached():
     assert orchestrator._ledger.per_task_usd_for(None) == 0.50
 
 
+def test_openhands_cold_resume_flag_defaults_on():
+    assert Settings().coding_worker_openhands_cold_resume_enabled is True
+
+
 @pytest.mark.parametrize("retired", ["git", "diff"])
 def test_retired_backend_names_fail_closed(retired, caplog):
     # Both pre-release names of the builtin backend are dead values now: a
@@ -105,6 +109,7 @@ def test_openhands_registers_with_cap_and_probe(monkeypatch, tmp_path):
     assert worker._api_key == "sk-test"
     assert worker._docker_adapter is not None
     assert worker.artifact_store is not None
+    assert worker.cold_resume_enabled is True
     assert worker._docker_adapter.layout.root == (
         tmp_path / "openhands-state"
     ).resolve()
@@ -172,7 +177,10 @@ def test_openhands_without_per_task_cap_fails_closed(monkeypatch, caplog):
 
     with caplog.at_level("ERROR"):
         gateway = _gateway(
-            _settings(coding_worker_backend="openhands"),
+            _settings(
+                coding_worker_backend="openhands",
+                coding_worker_openhands_cold_resume_enabled=False,
+            ),
             agents={"dev-platform": agent},
         )
 
@@ -193,7 +201,10 @@ def test_openhands_requires_a_cap_on_every_worker_agent(monkeypatch, caplog):
 
     with caplog.at_level("ERROR"):
         gateway = _gateway(
-            _settings(coding_worker_backend="openhands"),
+            _settings(
+                coding_worker_backend="openhands",
+                coding_worker_openhands_cold_resume_enabled=False,
+            ),
             agents={"dev-platform": capped, "docs-bot": uncapped},
         )
 
@@ -215,7 +226,10 @@ def test_openhands_ignores_uncapped_agent_without_worker_action(monkeypatch):
             tool.permissions = []
 
     gateway = _gateway(
-        _settings(coding_worker_backend="openhands"),
+        _settings(
+            coding_worker_backend="openhands",
+            coding_worker_openhands_cold_resume_enabled=False,
+        ),
         agents={"docs-bot": observer, "dev-platform": capped},
     )
 
@@ -229,7 +243,10 @@ def test_openhands_without_usage_store_fails_closed(monkeypatch, caplog):
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
     with caplog.at_level("ERROR"):
         gateway = appmod.build_tool_gateway(
-            _settings(coding_worker_backend="openhands"),
+            _settings(
+                coding_worker_backend="openhands",
+                coding_worker_openhands_cold_resume_enabled=False,
+            ),
             {"dev-platform": load_agent(AGENT_YAML)},
             InMemoryApprovalStore(),
             InMemoryCheckpointStore(),
@@ -246,7 +263,12 @@ def test_openhands_probe_failure_fails_closed(monkeypatch, caplog):
 
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", boom)
     with caplog.at_level("ERROR"):
-        gateway = _gateway(_settings(coding_worker_backend="openhands"))
+        gateway = _gateway(
+            _settings(
+                coding_worker_backend="openhands",
+                coding_worker_openhands_cold_resume_enabled=False,
+            )
+        )
     assert "coding_worker" not in gateway._tools
     assert "openhands backend probe failed" in caplog.text
     assert "CODING WORKER DISABLED" in caplog.text

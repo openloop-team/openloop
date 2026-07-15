@@ -14,7 +14,9 @@ from openloop.tools.openhands_docker import (
     HardenedDockerLaunch,
     HardenedDockerWorkspace,
     HardenedDockerWorkspaceError,
+    native_docker_platform,
     require_immutable_server_image,
+    runtime_server_image,
 )
 from openloop.tools.openhands_state import OpenHandsKeyDeriver, OpenHandsStateLayout
 
@@ -27,6 +29,33 @@ def _keys():
 def test_default_image_is_an_immutable_multiplatform_digest():
     assert require_immutable_server_image(DEFAULT_OPENHANDS_SERVER_IMAGE) == (
         DEFAULT_OPENHANDS_SERVER_IMAGE
+    )
+
+
+@pytest.mark.parametrize(
+    ("machine", "expected"),
+    [("x86_64", "linux/amd64"), ("amd64", "linux/amd64"),
+     ("arm64", "linux/arm64"), ("aarch64", "linux/arm64")],
+)
+def test_native_platform_selects_matching_immutable_manifest(machine, expected):
+    assert native_docker_platform(machine) == expected
+
+
+def test_unknown_native_platform_fails_closed():
+    with pytest.raises(HardenedDockerWorkspaceError, match="architecture"):
+        native_docker_platform("riscv64")
+
+
+def test_default_index_resolves_to_pinned_platform_child():
+    assert runtime_server_image(
+        DEFAULT_OPENHANDS_SERVER_IMAGE, "linux/amd64"
+    ).endswith(
+        "@sha256:5148763c47960d7f6f020d4fc1587e830e408057f64e96610a770c51d29e47c9"
+    )
+    assert runtime_server_image(
+        DEFAULT_OPENHANDS_SERVER_IMAGE, "linux/arm64"
+    ).endswith(
+        "@sha256:639932fed2077ceca4d758fb0c62c165d9c6cb386c129d5f6cc05c3a69ec0a8e"
     )
 
 
@@ -57,6 +86,7 @@ def test_launch_is_loopback_authenticated_and_mount_limited(tmp_path):
         session_api_key="session-secret",
         conversation_secret="conversation-secret",
         network="egress-proxy",
+        platform="linux/amd64",
     )
 
     command = launch.command(container_name="agent-server-test")
@@ -65,6 +95,7 @@ def test_launch_is_loopback_authenticated_and_mount_limited(tmp_path):
     assert f"{workspace}:/workspace:rw" in command
     assert f"{state}:/openhands-state:rw" in command
     assert "--network egress-proxy" in rendered
+    assert command[command.index("--platform") + 1] == "linux/amd64"
     assert command[-3:] == ["--host", "0.0.0.0", "--port", "8000"][-3:]
     assert "session-secret" not in rendered
     assert "conversation-secret" not in rendered
@@ -73,10 +104,14 @@ def test_launch_is_loopback_authenticated_and_mount_limited(tmp_path):
         "OH_SECRET_KEY",
         "OH_CONVERSATIONS_PATH",
         "OH_LEASE_TTL_SECONDS",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
     }
     assert launch.environment()["OH_LEASE_TTL_SECONDS"] == (
         CONVERSATION_LEASE_TTL_SECONDS
     )
+    assert launch.environment()["GIT_CONFIG_VALUE_0"] == "/workspace"
     assert "redacted" in repr(launch)
     assert "session-secret" not in repr(launch)
 
@@ -91,6 +126,7 @@ def test_adapter_builds_per_job_launch_without_exposing_artifacts(tmp_path):
         keys=_keys(),
         workspace_factory=lambda launch: captured.append(launch) or object(),
         port_allocator=lambda: 32123,
+        platform="linux/amd64",
     )
 
     adapter.create(checkout, "job-1")
@@ -103,6 +139,10 @@ def test_adapter_builds_per_job_launch_without_exposing_artifacts(tmp_path):
         launch.command(container_name="agent-server-test")
     )
     assert launch.conversation_secret == _keys().conversation_secret("job-1")
+    assert launch.platform == "linux/amd64"
+    assert launch.image.endswith(
+        "@sha256:5148763c47960d7f6f020d4fc1587e830e408057f64e96610a770c51d29e47c9"
+    )
 
 
 def test_adapter_rejects_state_root_inside_checkout(tmp_path):
@@ -164,7 +204,7 @@ def test_archive_stream_uses_authenticated_client_and_explicit_base(tmp_path):
     assert workspace.client.requests == [
         (
             "GET",
-            "/file/archive",
+            "/api/file/archive",
             {"path": "/workspace", "format": "git-delta", "base_ref": "deadbeef"},
         )
     ]
@@ -181,3 +221,33 @@ def test_archive_stream_refuses_unauthenticated_workspace(tmp_path):
 
     with pytest.raises(HardenedDockerWorkspaceError, match="authenticated"):
         adapter.stream_git_delta(workspace, io.BytesIO(), base_ref="main")
+
+
+def test_attach_refuses_to_replace_a_conversation_missing_during_lease(tmp_path):
+    class MissingResponse:
+        status_code = 404
+
+        def raise_for_status(self):
+            raise AssertionError("404 must be normalized before raise_for_status")
+
+    class MissingClient:
+        def get(self, path):
+            assert path == "/api/conversations/00000000-0000-0000-0000-000000000001"
+            return MissingResponse()
+
+    workspace = _Workspace()
+    workspace.client = MissingClient()
+    adapter = HardenedDockerWorkspace(
+        layout=OpenHandsStateLayout(tmp_path / "state"),
+        keys=_keys(),
+        workspace_factory=lambda launch: object(),
+    )
+
+    import uuid
+
+    with pytest.raises(HardenedDockerWorkspaceError, match="lease"):
+        adapter.attach_conversation(
+            workspace,
+            agent=object(),
+            conversation_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+        )

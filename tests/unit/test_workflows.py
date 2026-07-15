@@ -82,6 +82,29 @@ async def test_send_event_is_idempotent_after_completion():
     assert inst.state["log"] == ["a", "b"]
 
 
+async def test_two_replicas_claim_a_wait_event_once():
+    store = InMemoryWorkflowStore()
+    calls = 0
+
+    async def side_effect(ctx):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0)
+
+    workflow = Workflow("t", [Step("gate", wait=True), Step("work", side_effect)])
+    first = WorkflowEngine(store, {"t": workflow})
+    second = WorkflowEngine(store, {"t": workflow})
+    await first.start("t", "replicated", {})
+
+    await asyncio.gather(
+        first.send_event("replicated", "gate", {"event": "one"}),
+        second.send_event("replicated", "gate", {"event": "two"}),
+    )
+
+    assert calls == 1
+    assert (await store.get("replicated")).status == "completed"
+
+
 async def test_send_event_for_wrong_node_is_noop():
     engine, store = _engine()
     await engine.start("t", "i1", {})

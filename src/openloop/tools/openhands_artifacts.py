@@ -12,7 +12,7 @@ import struct
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Iterator
 
 from cryptography.exceptions import InvalidTag
@@ -76,6 +76,8 @@ class WorkspaceArtifactManifest:
     format: str
     base_commit: str
     plaintext_sha256: str | None = None
+    pr_title: str | None = None
+    pr_body: str | None = None
 
     def __post_init__(self) -> None:
         validate_state_identifier(self.format, field="artifact format")
@@ -91,12 +93,25 @@ class WorkspaceArtifactManifest:
             or any(c not in "0123456789abcdef" for c in self.plaintext_sha256)
         ):
             raise WorkspaceArtifactError("invalid artifact plaintext SHA-256")
+        if self.pr_title is not None:
+            if not self.pr_title.strip() or len(self.pr_title) > 512:
+                raise WorkspaceArtifactError("invalid artifact PR title")
+            if "\0" in self.pr_title:
+                raise WorkspaceArtifactError("invalid artifact PR title")
+        if self.pr_body is not None and (
+            len(self.pr_body) > 65_536 or "\0" in self.pr_body
+        ):
+            raise WorkspaceArtifactError("invalid artifact PR body")
+        if self.pr_body is not None and self.pr_title is None:
+            raise WorkspaceArtifactError("artifact PR body requires a title")
 
     def with_plaintext_sha256(self, digest: str) -> "WorkspaceArtifactManifest":
         return WorkspaceArtifactManifest(
             format=self.format,
             base_commit=self.base_commit,
             plaintext_sha256=digest,
+            pr_title=self.pr_title,
+            pr_body=self.pr_body,
         )
 
 
@@ -108,6 +123,56 @@ class WorkspaceArtifact:
     ciphertext_bytes: int
     envelope_version: int
     master_key_id: str
+
+    def __post_init__(self) -> None:
+        key = PurePosixPath(self.key)
+        if (
+            not self.key
+            or key.is_absolute()
+            or ".." in key.parts
+            or "." in key.parts
+            or "\\" in self.key
+        ):
+            raise WorkspaceArtifactError("invalid artifact descriptor key")
+        if (
+            len(self.ciphertext_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in self.ciphertext_sha256)
+        ):
+            raise WorkspaceArtifactError("invalid artifact ciphertext SHA-256")
+        if self.ciphertext_bytes <= 0 or self.envelope_version <= 0:
+            raise WorkspaceArtifactError("invalid artifact descriptor")
+        validate_state_identifier(self.master_key_id, field="master_key_id")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "identity": self.identity.to_dict(),
+            "key": self.key,
+            "ciphertext_sha256": self.ciphertext_sha256,
+            "ciphertext_bytes": self.ciphertext_bytes,
+            "envelope_version": self.envelope_version,
+            "master_key_id": self.master_key_id,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "WorkspaceArtifact":
+        if not isinstance(raw, dict):
+            raise WorkspaceArtifactError("invalid artifact descriptor")
+        identity = raw.get("identity")
+        if not isinstance(identity, dict):
+            raise WorkspaceArtifactError("invalid artifact identity descriptor")
+        return cls(
+            identity=WorkspaceArtifactIdentity(
+                job_id=identity.get("job_id"),
+                conversation_id=identity.get("conversation_id"),
+                segment_id=identity.get("segment_id"),
+                kind=identity.get("kind"),
+            ),
+            key=str(raw.get("key", "")),
+            ciphertext_sha256=str(raw.get("ciphertext_sha256", "")),
+            ciphertext_bytes=int(raw.get("ciphertext_bytes", 0)),
+            envelope_version=int(raw.get("envelope_version", 0)),
+            master_key_id=str(raw.get("master_key_id", "")),
+        )
 
 
 class VerifiedWorkspaceArtifact:
@@ -417,6 +482,8 @@ class WorkspaceArtifactStore:
                 "format": manifest.format,
                 "base_commit": manifest.base_commit,
                 "plaintext_sha256": manifest.plaintext_sha256,
+                "pr_title": manifest.pr_title,
+                "pr_body": manifest.pr_body,
             }
         )
         fd, raw_path = tempfile.mkstemp(
@@ -521,6 +588,8 @@ class WorkspaceArtifactStore:
                 format=raw["format"],
                 base_commit=raw["base_commit"],
                 plaintext_sha256=raw["plaintext_sha256"],
+                pr_title=raw.get("pr_title"),
+                pr_body=raw.get("pr_body"),
             )
         except WorkspaceArtifactVerificationError:
             raise
