@@ -42,6 +42,10 @@ githubapp = [
 # The SDK needs Python >=3.12 (the project floor stays 3.11; on 3.11 the
 # extra resolves empty and the backend probe fails closed at boot).
 openhands = [
+    # Pin the server package directly: openhands-workspace only declares a
+    # compatible lower bound, so plain pip would otherwise install a newer
+    # agent-server than the private 1.31.0 adapter supports.
+    "openhands-agent-server==1.31.0; python_version >= '3.12'",
     "openhands-sdk==1.31.0; python_version >= '3.12'",
     "openhands-tools==1.31.0; python_version >= '3.12'",
     "openhands-workspace==1.31.0; python_version >= '3.12'",
