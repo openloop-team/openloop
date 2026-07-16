@@ -19,6 +19,13 @@ services:
     #   stat -c '%g' /var/run/docker.sock
     group_add:
       - ${DOCKER_GID:-0}
+    # The runtime keeps the stack network (postgres et al.) and additionally
+    # joins the agents network so it can dial sibling agent-server containers
+    # by name — their loopback publish would land on the daemon host, which
+    # this container cannot reach.
+    networks:
+      - default
+      - openloop-agents
     environment:
       # Sibling containers resolve bind mounts on the Docker daemon's host.
       # Both workers therefore use children of the same host-visible root that
@@ -31,6 +38,12 @@ services:
       # empty and the non-root agent-server dies at boot writing
       # /openhands-state.
       CODING_WORKER_OPENHANDS_STATE_DIR: ${OPENLOOP_SANDBOX_ROOT:?Set OPENLOOP_SANDBOX_ROOT to a pre-created absolute host path}/openhands-state
+      # Sibling agent containers publish no ports; the runtime dials them by
+      # container name on the shared agents network below. Known interim
+      # limits (the container-broker design in docs/ removes them): agents on
+      # this shared network can reach each other and the runtime's own ports.
+      CODING_WORKER_OPENHANDS_CONNECT: network
+      CODING_WORKER_OPENHANDS_NETWORK: openloop-agents
     volumes:
       - type: bind
         source: ${DOCKER_SOCKET:-/var/run/docker.sock}
@@ -38,3 +51,11 @@ services:
       - type: bind
         source: ${OPENLOOP_SANDBOX_ROOT:?Set OPENLOOP_SANDBOX_ROOT to a pre-created absolute host path}
         target: ${OPENLOOP_SANDBOX_ROOT:?Set OPENLOOP_SANDBOX_ROOT to a pre-created absolute host path}
+
+networks:
+  openloop-agents:
+    # Fixed name so the raw `docker run --network openloop-agents` launch
+    # matches regardless of the Compose project prefix. A regular (non
+    # internal) user-defined bridge: agents keep egress to the model provider
+    # and Docker's embedded DNS resolves sibling container names.
+    name: openloop-agents

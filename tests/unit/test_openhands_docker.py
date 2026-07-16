@@ -119,6 +119,54 @@ def test_launch_is_loopback_authenticated_and_mount_limited(tmp_path):
     assert "session-secret" not in repr(launch)
 
 
+def _network_launch(tmp_path, **overrides):
+    workspace = tmp_path / "checkout"
+    state = tmp_path / "state"
+    workspace.mkdir(exist_ok=True)
+    state.mkdir(exist_ok=True)
+    kwargs = dict(
+        image=DEFAULT_OPENHANDS_SERVER_IMAGE,
+        workspace=workspace,
+        state_dir=state,
+        host_port=32123,
+        session_api_key="session-secret",
+        conversation_secret="conversation-secret",
+        network="openloop-agents",
+        platform="linux/amd64",
+        connect="network",
+    )
+    kwargs.update(overrides)
+    return HardenedDockerLaunch(**kwargs)
+
+
+def test_network_connect_mode_publishes_no_daemon_host_ports(tmp_path):
+    command = _network_launch(tmp_path).command(container_name="agent-server-test")
+    rendered = " ".join(command)
+
+    assert "-p" not in command
+    assert "127.0.0.1" not in rendered
+    assert "--network openloop-agents" in rendered
+
+
+def test_network_connect_mode_requires_a_network(tmp_path):
+    with pytest.raises(HardenedDockerWorkspaceError, match="network"):
+        _network_launch(tmp_path, network=None)
+
+
+def test_unknown_connect_mode_is_rejected(tmp_path):
+    with pytest.raises(HardenedDockerWorkspaceError, match="connect mode"):
+        _network_launch(tmp_path, connect="host-gateway")
+
+
+def test_adapter_fails_closed_on_network_connect_without_a_network(tmp_path):
+    with pytest.raises(HardenedDockerWorkspaceError, match="NETWORK"):
+        HardenedDockerWorkspace(
+            layout=OpenHandsStateLayout(tmp_path / "state"),
+            keys=_keys(),
+            connect="network",
+        )
+
+
 def test_adapter_builds_per_job_launch_without_exposing_artifacts(tmp_path):
     checkout = tmp_path / "checkout"
     checkout.mkdir()

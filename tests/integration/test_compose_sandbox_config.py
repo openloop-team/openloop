@@ -45,6 +45,19 @@ def test_both_worker_roots_are_isolated_children_of_the_shared_mount():
     )
 
 
+def test_runtime_reaches_sibling_agents_by_name_on_a_dedicated_network():
+    compose = _compose(OVERRIDE)
+    runtime = compose["services"]["runtime"]
+    environment = runtime["environment"]
+
+    assert environment["CODING_WORKER_OPENHANDS_CONNECT"] == "network"
+    assert environment["CODING_WORKER_OPENHANDS_NETWORK"] == "openloop-agents"
+    # The runtime must keep the stack network (postgres) and join the agents
+    # network; the raw `docker run --network` launch needs the fixed name.
+    assert set(runtime["networks"]) == {"default", "openloop-agents"}
+    assert compose["networks"]["openloop-agents"]["name"] == "openloop-agents"
+
+
 def test_base_stacks_remain_safe_and_document_the_opt_in_override():
     for filename in ("docker-compose.yml", "docker-compose.deploy.yml"):
         path = ROOT / filename

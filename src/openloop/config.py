@@ -104,6 +104,15 @@ class Settings(BaseSettings):
     # the model provider — "none" would break it). Point at an egress-proxy
     # network to move to an allowlist model.
     coding_worker_openhands_network: str | None = None
+    # How the runtime reaches the agent-server:
+    #   "loopback" (default) — publish 127.0.0.1:<port> on the Docker daemon
+    #       host; correct when the runtime runs on that host.
+    #   "network" — publish nothing; dial the container by name over
+    #       CODING_WORKER_OPENHANDS_NETWORK (required — a user-defined network
+    #       shared with the runtime container). Use for sibling-container
+    #       Compose deployments, where the daemon host's loopback is
+    #       unreachable from the runtime's network namespace.
+    coding_worker_openhands_connect: str = "loopback"
     # Phase 0 cold-resume foundation. The root defaults beneath the system temp
     # directory; production may point it at storage shared by resume-capable
     # replicas. It always stays outside Git checkouts.

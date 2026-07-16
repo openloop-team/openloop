@@ -517,6 +517,7 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
                     keys=keys,
                     server_image=settings.coding_worker_openhands_image,
                     network=settings.coding_worker_openhands_network,
+                    connect=settings.coding_worker_openhands_connect,
                 )
             except Exception as exc:  # noqa: BLE001 — boot gate normalizes errors
                 log.error(

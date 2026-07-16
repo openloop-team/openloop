@@ -110,6 +110,12 @@ class HardenedDockerLaunch:
     conversation_secret: str
     network: str | None = None
     platform: str = field(default_factory=native_docker_platform)
+    # "loopback" publishes 127.0.0.1:<host_port> on the Docker daemon host —
+    # correct when the runtime runs on that host. "network" publishes nothing;
+    # the runtime dials the container by name over a shared user-defined
+    # network (sibling-container/Compose deployments, where the daemon host's
+    # loopback is unreachable).
+    connect: str = "loopback"
 
     def __post_init__(self) -> None:
         require_immutable_server_image(self.image)
@@ -120,6 +126,15 @@ class HardenedDockerLaunch:
         if self.platform not in set(_NATIVE_DOCKER_PLATFORMS.values()):
             raise HardenedDockerWorkspaceError(
                 f"unsupported OpenHands Docker platform: {self.platform!r}"
+            )
+        if self.connect not in ("loopback", "network"):
+            raise HardenedDockerWorkspaceError(
+                f"unsupported OpenHands connect mode: {self.connect!r}"
+            )
+        if self.connect == "network" and not self.network:
+            raise HardenedDockerWorkspaceError(
+                "connect='network' requires a user-defined Docker network "
+                "shared with the runtime container"
             )
 
     def environment(self) -> dict[str, str]:
@@ -155,9 +170,11 @@ class HardenedDockerLaunch:
             f"{self.workspace}:/workspace:rw",
             "-v",
             f"{self.state_dir}:/openhands-state:rw",
-            "-p",
-            f"127.0.0.1:{self.host_port}:8000",
         ]
+        if self.connect == "loopback":
+            # Only loopback mode exposes a daemon-host port. Network mode is
+            # reached in-network by container name and publishes nothing.
+            command.extend(("-p", f"127.0.0.1:{self.host_port}:8000"))
         for variable in self.environment():
             # Docker copies only these named values from the subprocess
             # environment; no ambient controller variable enters the container,
@@ -174,7 +191,8 @@ class HardenedDockerLaunch:
             f"image={self.image!r}, workspace={str(self.workspace)!r}, "
             f"state_dir={str(self.state_dir)!r}, host_port={self.host_port}, "
             "session_api_key=<redacted>, conversation_secret=<redacted>, "
-            f"network={self.network!r}, platform={self.platform!r})"
+            f"network={self.network!r}, platform={self.platform!r}, "
+            f"connect={self.connect!r})"
         )
 
 
@@ -205,11 +223,23 @@ class HardenedDockerWorkspace:
         command_runner: CommandRunner | None = None,
         port_allocator: Callable[[], int] | None = None,
         platform: str | None = None,
+        connect: str = "loopback",
     ) -> None:
         self.layout = layout
         self.keys = keys
         self.server_image = require_immutable_server_image(server_image)
         self.network = network
+        # Fail closed at construction so the boot gate reports a bad connect
+        # configuration instead of the first job discovering it.
+        if connect not in ("loopback", "network"):
+            raise HardenedDockerWorkspaceError(
+                f"unsupported OpenHands connect mode: {connect!r}"
+            )
+        if connect == "network" and not network:
+            raise HardenedDockerWorkspaceError(
+                "connect='network' requires CODING_WORKER_OPENHANDS_NETWORK"
+            )
+        self.connect = connect
         self._command_runner = command_runner or self._run_command
         self._port_allocator = port_allocator or self._find_loopback_port
         self._workspace_factory = workspace_factory or self._create_sdk_workspace
@@ -267,6 +297,7 @@ class HardenedDockerWorkspace:
             conversation_secret=self.keys.conversation_secret(job_id),
             network=self.network,
             platform=self.platform,
+            connect=self.connect,
         )
         return self._workspace_factory(launch)
 
@@ -410,9 +441,18 @@ class HardenedDockerWorkspace:
                     )
                     self._logs_thread.start()
 
-                object.__setattr__(
-                    self, "host", f"http://127.0.0.1:{self.host_port}"
-                )
+                if launch.connect == "network":
+                    # Sibling-container mode: the runtime shares a
+                    # user-defined network with the agent and resolves it by
+                    # container name; the daemon host's loopback is not
+                    # reachable from this network namespace.
+                    object.__setattr__(
+                        self, "host", f"http://{container_name}:8000"
+                    )
+                else:
+                    object.__setattr__(
+                        self, "host", f"http://127.0.0.1:{self.host_port}"
+                    )
                 # Deliberately preserve ``self.api_key``. Pinned upstream sets it
                 # to None here, silently disabling client authentication.
                 try:
