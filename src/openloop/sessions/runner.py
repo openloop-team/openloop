@@ -354,7 +354,7 @@ class SessionRunner:
 
         tools = getattr(self.runtime, "tools", None)
         if tools is None:
-            return "⛔ approvals are not available"
+            return "⛔ Approvals are not available right now."
         inv = await tools.resolve(approval_id, approver, approve=approve)
         message = resolution_message(inv, approver)
 
@@ -779,7 +779,7 @@ class SessionRunner:
 
         engine = getattr(self.runtime, "engine", None)
         if engine is None:
-            return "⛔ OpenHands resume is unavailable"
+            return "⛔ This task can't be resumed right now."
         instance = await engine.store.get(job_id)
         event = f"openhands_decision:{decision_id}"
         if (
@@ -787,17 +787,17 @@ class SessionRunner:
             or instance.status != "waiting"
             or instance.waiting_on != event
         ):
-            return "⛔ That OpenHands decision is stale or already resolved."
+            return "⛔ That decision is stale or already resolved."
         raw_worker = (instance.state or {}).get("worker_state") or {}
         raw_resume = raw_worker.get("openhands_resume")
         try:
             resume = OpenHandsResumeState.from_dict(raw_resume)
         except Exception:
-            return "⛔ The parked OpenHands state is invalid."
+            return "⛔ The paused task state is invalid."
         if resume.decision_id != decision_id:
-            return "⛔ That OpenHands decision is stale."
+            return "⛔ That decision is stale."
         if actor_id != resume.slack_requester_id:
-            return "⛔ Only the user who approved this worker may decide."
+            return "⛔ Only the user who approved this task may decide."
         decision = ResumeDecision(
             kind=kind,
             decision_id=decision_id,
@@ -817,13 +817,13 @@ class SessionRunner:
                 await self.delivery.update_approval(
                     session.target,
                     session.progress_message_id,
-                    f"OpenHands action {label} by @{actor_id}; resuming…",
+                    f"Action {label} by @{actor_id}; resuming…",
                     [],
                 )
             except Exception:  # noqa: BLE001 — decision is already durable
                 logger.warning("failed to collapse OpenHands decision card", exc_info=True)
         engine.drive_background(job_id)
-        return "✅ Decision recorded; OpenHands is resuming."
+        return "✅ Decision recorded; resuming work."
 
     async def _on_workflow_progress(self, instance) -> None:
         """Relay a running workflow's progress phrase as a transient status.

@@ -386,7 +386,7 @@ class SlackSurfaceDelivery:
     ) -> str:
         from openloop.surfaces.approvals import openhands_decision_blocks
 
-        text = f"OpenHands needs confirmation: {summary}"
+        text = f"Confirmation needed: {summary}"
         return await self._post(
             target,
             text=text,
@@ -403,7 +403,7 @@ class SlackSurfaceDelivery:
         await self.client.chat_update(
             channel=target.channel,
             ts=message_id,
-            text=f"OpenHands needs confirmation: {summary}",
+            text=f"Confirmation needed: {summary}",
             blocks=openhands_decision_blocks(job_id, decision_id, summary),
         )
 

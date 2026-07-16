@@ -64,7 +64,7 @@ def openhands_decision_blocks(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"⏸️ *OpenHands needs confirmation:* {summary}",
+                "text": f"⏸️ *Confirmation needed:* {summary}",
             },
         },
         {
