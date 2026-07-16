@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 from contextlib import contextmanager
 
 import pytest
@@ -100,6 +101,10 @@ def test_launch_is_loopback_authenticated_and_mount_limited(tmp_path):
     # No --rm: a boot crash must leave the exited container behind so
     # ``docker logs`` has evidence; cleanup() removes it explicitly instead.
     assert "--rm" not in command
+    # The agent runs as the launching uid — the owner of both bind mounts.
+    # The image's non-root user cannot traverse the 0700 workspace/state
+    # directories on a real Linux daemon.
+    assert command[command.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
     assert "session-secret" not in rendered
     assert "conversation-secret" not in rendered
     assert set(launch.environment()) == {
@@ -107,10 +112,12 @@ def test_launch_is_loopback_authenticated_and_mount_limited(tmp_path):
         "OH_SECRET_KEY",
         "OH_CONVERSATIONS_PATH",
         "OH_LEASE_TTL_SECONDS",
+        "HOME",
         "GIT_CONFIG_COUNT",
         "GIT_CONFIG_KEY_0",
         "GIT_CONFIG_VALUE_0",
     }
+    assert launch.environment()["HOME"] == "/tmp"
     assert launch.environment()["OH_LEASE_TTL_SECONDS"] == (
         CONVERSATION_LEASE_TTL_SECONDS
     )

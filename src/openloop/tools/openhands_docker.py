@@ -143,9 +143,14 @@ class HardenedDockerLaunch:
             "OH_SECRET_KEY": self.conversation_secret,
             "OH_CONVERSATIONS_PATH": "/openhands-state/conversations",
             "OH_LEASE_TTL_SECONDS": CONVERSATION_LEASE_TTL_SECONDS,
-            # Bind mounts retain the host owner, which differs from the image's
-            # non-root user. Scope Git's trust exception to the one checkout;
-            # do not mutate global config inside the long-lived state mount.
+            # command() overrides the image user with the launching uid, so
+            # the image user's home directory is unusable and the image sets
+            # no HOME of its own. /tmp is container-local and world-writable.
+            "HOME": "/tmp",
+            # Kept as belt-and-braces: with the uid override the checkout
+            # owner normally matches the process, but scope Git's trust
+            # exception to the one checkout anyway; do not mutate global
+            # config inside the long-lived state mount.
             "GIT_CONFIG_COUNT": "1",
             "GIT_CONFIG_KEY_0": "safe.directory",
             "GIT_CONFIG_VALUE_0": "/workspace",
@@ -162,6 +167,14 @@ class HardenedDockerLaunch:
             # container behind so ``docker logs`` (which upstream embeds in
             # its health-failure error) still has evidence. cleanup() removes
             # the container explicitly instead.
+            #
+            # Run as the launching uid — the owner of both bind mounts. The
+            # image's non-root ``openhands`` user cannot traverse the 0700
+            # mkdtemp workspace or the state directory on a real Linux
+            # daemon (Docker Desktop's file sharing masks this on macOS).
+            # Same approach as the sealed sandbox (sandbox/runner.py).
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
             "--ulimit",
             "nofile=65536:65536",
             "--name",
