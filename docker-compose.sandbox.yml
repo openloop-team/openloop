@@ -25,6 +25,12 @@ services:
       # is mounted into this controller at an identical absolute path.
       CODING_WORKER_WORKSPACE_DIR: ${OPENLOOP_SANDBOX_ROOT:?Set OPENLOOP_SANDBOX_ROOT to a pre-created absolute host path}/coding
       ANALYSIS_WORKER_WORKSPACE_DIR: ${OPENLOOP_SANDBOX_ROOT:?Set OPENLOOP_SANDBOX_ROOT to a pre-created absolute host path}/analysis
+      # The OpenHands agent-server state mount follows the same rule. Left
+      # unset it defaults beneath this container's private /tmp — a bind
+      # source the daemon host lacks, so dockerd creates it root-owned and
+      # empty and the non-root agent-server dies at boot writing
+      # /openhands-state.
+      CODING_WORKER_OPENHANDS_STATE_DIR: ${OPENLOOP_SANDBOX_ROOT:?Set OPENLOOP_SANDBOX_ROOT to a pre-created absolute host path}/openhands-state
     volumes:
       - type: bind
         source: ${DOCKER_SOCKET:-/var/run/docker.sock}

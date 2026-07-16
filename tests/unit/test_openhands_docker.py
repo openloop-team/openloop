@@ -97,6 +97,9 @@ def test_launch_is_loopback_authenticated_and_mount_limited(tmp_path):
     assert "--network egress-proxy" in rendered
     assert command[command.index("--platform") + 1] == "linux/amd64"
     assert command[-3:] == ["--host", "0.0.0.0", "--port", "8000"][-3:]
+    # No --rm: a boot crash must leave the exited container behind so
+    # ``docker logs`` has evidence; cleanup() removes it explicitly instead.
+    assert "--rm" not in command
     assert "session-secret" not in rendered
     assert "conversation-secret" not in rendered
     assert set(launch.environment()) == {

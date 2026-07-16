@@ -40,6 +40,9 @@ def test_both_worker_roots_are_isolated_children_of_the_shared_mount():
 
     assert environment["CODING_WORKER_WORKSPACE_DIR"] == f"{SANDBOX_ROOT}/coding"
     assert environment["ANALYSIS_WORKER_WORKSPACE_DIR"] == f"{SANDBOX_ROOT}/analysis"
+    assert environment["CODING_WORKER_OPENHANDS_STATE_DIR"] == (
+        f"{SANDBOX_ROOT}/openhands-state"
+    )
 
 
 def test_base_stacks_remain_safe_and_document_the_opt_in_override():

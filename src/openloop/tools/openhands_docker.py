@@ -143,7 +143,10 @@ class HardenedDockerLaunch:
             "-d",
             "--platform",
             self.platform,
-            "--rm",
+            # Deliberately no --rm: a boot crash must leave the exited
+            # container behind so ``docker logs`` (which upstream embeds in
+            # its health-failure error) still has evidence. cleanup() removes
+            # the container explicitly instead.
             "--ulimit",
             "nofile=65536:65536",
             "--name",
@@ -418,6 +421,25 @@ class HardenedDockerWorkspace:
                 except BaseException:
                     self.cleanup()
                     raise
+
+            def cleanup(self) -> None:
+                # ``command()`` omits ``--rm`` so a crashed container keeps
+                # its logs until this point; upstream cleanup only stops the
+                # container, so remove it explicitly afterwards.
+                container_id = getattr(self, "_container_id", None)
+                try:
+                    super().cleanup()
+                finally:
+                    if container_id:
+                        try:
+                            runner(
+                                ["docker", "rm", "-f", container_id], None, 30.0
+                            )
+                        except Exception:
+                            logger.warning(
+                                "failed to remove agent-server container %s",
+                                container_id,
+                            )
 
         return _PinnedHardenedDockerWorkspace(
             server_image=launch.image,
