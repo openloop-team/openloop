@@ -1,0 +1,470 @@
+import asyncio
+from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
+
+import pytest
+
+from openloop.broker.errors import (
+    IdempotencyConflict,
+    InvalidTransition,
+    JobNotFound,
+    OperationMismatch,
+    OwnerMismatch,
+    ReceiptBindingMismatch,
+    StaleGeneration,
+)
+from openloop.broker.ledger import BrokerLedger
+from openloop.broker.memory import InMemoryBrokerRepository
+from openloop.broker.models import (
+    CommandKind,
+    GenerationState,
+    JobState,
+    OperationSource,
+    OperationStatus,
+    ReleaseTarget,
+    TerminalOutcome,
+)
+from tests.support.broker_repository_contract import (
+    CAPABILITY_DIGEST,
+    DURABLE_DIGEST,
+    OTHER_OWNER,
+    OWNER,
+    MutableClock,
+    SequenceIds,
+    exercise_complete_lifecycle,
+    mark_generation_running,
+    quiesce_generation,
+    receipt_for,
+)
+
+
+@pytest.fixture
+def clock():
+    return MutableClock()
+
+
+@pytest.fixture
+def repository(clock):
+    return InMemoryBrokerRepository(clock=clock)
+
+
+@pytest.fixture
+def ledger(repository):
+    return BrokerLedger(repository, id_factory=SequenceIds())
+
+
+async def _create(ledger, key="memory-create-0001"):
+    return await ledger.create_job(OWNER, key, "default", "docker", "postgres")
+
+
+async def _create_running(ledger, *, create_key="memory-create-0001"):
+    created = await _create(ledger, create_key)
+    start = await ledger.begin_start(
+        OWNER, "memory-start-00001", created.job_id, 0, 30
+    )
+    await mark_generation_running(
+        ledger,
+        job_id=created.job_id,
+        operation_id=start.operation_id,
+        generation=1,
+    )
+    return created, start
+
+
+async def test_complete_park_resume_finalize_terminal_lifecycle(ledger, repository):
+    trace = await exercise_complete_lifecycle(ledger)
+    states = [snapshot.state for snapshot in trace.snapshots]
+    assert states == [
+        JobState.CREATED,
+        JobState.CREATED,
+        JobState.ACTIVE,
+        JobState.ACTIVE,
+        JobState.PARKED,
+        JobState.FINALIZING,
+        JobState.TERMINAL,
+    ]
+    assert trace.snapshots[1].generation_record.state is GenerationState.STARTING
+    assert trace.snapshots[3].generation_record.state is GenerationState.RELEASING
+    assert trace.snapshots[4].generation_record.state is GenerationState.RELEASED
+    assert trace.snapshots[-1].generation == 2
+    assert trace.snapshots[-1].current_generation is None
+    assert trace.snapshots[-1].terminal_outcome is TerminalOutcome.SUCCESS
+    assert len(await repository.audit_records_for_test()) == 15
+
+
+async def test_create_exact_replay_returns_original_ids_without_audit(ledger, repository):
+    first = await _create(ledger)
+    replay = await _create(ledger)
+    assert replay.replayed is True
+    assert replay.operation_id == first.operation_id
+    assert replay.job_id == first.job_id
+    assert replay.conversation_id == first.conversation_id
+    assert len(await repository.audit_records_for_test()) == 1
+    assert len(await repository.operations_for_test()) == 1
+
+
+async def test_conflicting_idempotency_reuse_is_rejected(ledger, repository):
+    await _create(ledger)
+    with pytest.raises(IdempotencyConflict):
+        await ledger.create_job(
+            OWNER, "memory-create-0001", "gpu", "docker", "postgres"
+        )
+    assert len(await repository.audit_records_for_test()) == 1
+
+
+async def test_owner_and_expected_generation_are_fenced(ledger, repository):
+    created = await _create(ledger)
+    with pytest.raises(OwnerMismatch):
+        await ledger.inspect_job(OTHER_OWNER, created.job_id)
+    with pytest.raises(JobNotFound):
+        await ledger.inspect_job(
+            OWNER, UUID("f0000000-0000-4000-8000-000000000001")
+        )
+    with pytest.raises(StaleGeneration):
+        await ledger.begin_start(
+            OWNER, "memory-start-stale", created.job_id, 1, 30
+        )
+    assert len(await repository.audit_records_for_test()) == 1
+
+
+async def test_clock_sets_exact_execution_deadline(ledger, repository, clock):
+    created = await _create(ledger)
+    clock.now = datetime(2026, 7, 17, 13, 0, tzinfo=UTC)
+    await ledger.begin_start(
+        OWNER, "memory-start-clock", created.job_id, 0, 86_400
+    )
+    recovery = await ledger.inspect_job_for_recovery(OWNER, created.job_id)
+    assert recovery.generation_record.execution_lease_deadline == (
+        clock.now + timedelta(days=1)
+    )
+    audit = await repository.audit_records_for_test()
+    assert audit[-1].created_at == clock.now
+
+
+async def test_receipt_must_bind_owner_job_conversation_generation_and_barrier(
+    ledger, repository
+):
+    created, _ = await _create_running(ledger)
+    _, _, barrier = await quiesce_generation(
+        ledger, job_id=created.job_id, generation=1, suffix="bind"
+    )
+    valid = dict(
+        job_id=created.job_id,
+        conversation_id=created.conversation_id,
+        generation=1,
+        barrier_id=barrier,
+        suffix="bind",
+    )
+    variants = [
+        receipt_for(**{**valid, "job_id": UUID(int=99)}),
+        receipt_for(**{**valid, "conversation_id": UUID(int=100)}),
+        receipt_for(**{**valid, "generation": 2}),
+        receipt_for(**{**valid, "barrier_id": "barrier-wrong"}),
+    ]
+    for index, receipt in enumerate(variants):
+        with pytest.raises(ReceiptBindingMismatch):
+            await ledger.begin_release(
+                OWNER,
+                f"memory-release-bad-{index:02d}",
+                created.job_id,
+                1,
+                receipt,
+                ReleaseTarget.PARKED,
+            )
+    assert (await ledger.inspect_job(OWNER, created.job_id)).generation_record.state is (
+        GenerationState.QUIESCED
+    )
+    assert len(await repository.audit_records_for_test()) == 5
+
+
+async def test_start_failure_abandons_and_never_reuses_generation(ledger, repository):
+    created = await _create(ledger)
+    first = await ledger.begin_start(
+        OWNER, "memory-start-fail1", created.job_id, 0, 30
+    )
+    abandoned = await ledger.abandon_generation(
+        OWNER,
+        created.job_id,
+        1,
+        GenerationState.STARTING,
+        "start_failed",
+    )
+    snapshot = await ledger.inspect_job(OWNER, created.job_id)
+    assert snapshot.state is JobState.CREATED
+    assert snapshot.generation == 1
+    assert snapshot.current_generation is None
+    assert snapshot.generation_record.state is GenerationState.ABANDONED
+
+    second = await ledger.begin_start(
+        OWNER, "memory-start-after", created.job_id, 1, 30
+    )
+    assert second.generation == 2
+    assert first.operation_id != second.operation_id
+
+    replay = await ledger.abandon_generation(
+        OWNER,
+        created.job_id,
+        1,
+        GenerationState.STARTING,
+        "start_failed",
+        replay_operation_id=abandoned.operation_id,
+    )
+    assert replay.replayed is True
+    assert len(await repository.audit_records_for_test()) == 4
+
+
+async def test_unknown_abandonment_replay_operation_cannot_mutate(ledger, repository):
+    created = await _create(ledger)
+    await ledger.begin_start(OWNER, "memory-start-00001", created.job_id, 0, 30)
+    with pytest.raises(OperationMismatch):
+        await ledger.abandon_generation(
+            OWNER,
+            created.job_id,
+            1,
+            GenerationState.STARTING,
+            "start_failed",
+            replay_operation_id=UUID(
+                "f0000000-0000-4000-8000-000000000002"
+            ),
+        )
+    assert (await ledger.inspect_job(OWNER, created.job_id)).generation_record.state is (
+        GenerationState.STARTING
+    )
+    assert len(await repository.audit_records_for_test()) == 2
+
+
+async def test_active_abandonment_finalizes_with_bounded_outcome(ledger, repository):
+    created, _ = await _create_running(ledger)
+    abandoned = await ledger.abandon_generation(
+        OWNER,
+        created.job_id,
+        1,
+        GenerationState.RUNNING,
+        "runtime_lost",
+        TerminalOutcome.FAILED,
+    )
+    snapshot = await ledger.inspect_job(OWNER, created.job_id)
+    assert snapshot.state is JobState.FINALIZING
+    assert snapshot.terminal_outcome is TerminalOutcome.FAILED
+    assert snapshot.current_generation is None
+    assert snapshot.generation_record.state is GenerationState.ABANDONED
+    replay = await ledger.abandon_generation(
+        OWNER,
+        created.job_id,
+        1,
+        GenerationState.RUNNING,
+        "runtime_lost",
+        TerminalOutcome.FAILED,
+        replay_operation_id=abandoned.operation_id,
+    )
+    assert replay.replayed is True
+    assert len(await repository.audit_records_for_test()) == 4
+
+
+async def test_exact_completion_replays_after_aggregate_advances(ledger, repository):
+    created, start = await _create_running(ledger)
+    await quiesce_generation(
+        ledger, job_id=created.job_id, generation=1, suffix="advance"
+    )
+    replay = await mark_generation_running(
+        ledger,
+        job_id=created.job_id,
+        operation_id=start.operation_id,
+        generation=1,
+    )
+    assert replay.replayed is True
+    assert replay.generation_state is GenerationState.RUNNING
+    assert (await ledger.inspect_job(OWNER, created.job_id)).generation_record.state is (
+        GenerationState.QUIESCED
+    )
+    assert len(await repository.audit_records_for_test()) == 5
+
+
+async def test_running_completion_replay_uses_original_generation_metadata(
+    ledger, repository
+):
+    created, first = await _create_running(ledger)
+    _, _, barrier = await quiesce_generation(
+        ledger, job_id=created.job_id, generation=1, suffix="old"
+    )
+    receipt = receipt_for(
+        job_id=created.job_id,
+        conversation_id=created.conversation_id,
+        generation=1,
+        barrier_id=barrier,
+        suffix="old",
+    )
+    release = await ledger.begin_release(
+        OWNER,
+        "memory-release-old1",
+        created.job_id,
+        1,
+        receipt,
+        ReleaseTarget.PARKED,
+    )
+    await ledger.mark_released(OWNER, release.operation_id, created.job_id, 1)
+    second = await ledger.begin_start(
+        OWNER, "memory-start-new001", created.job_id, 1, 30
+    )
+    await ledger.mark_running(
+        OWNER,
+        second.operation_id,
+        created.job_id,
+        2,
+        "runtime://generation-2",
+        "durable://generation-2",
+        "runtime-key-v2",
+        "durable-key-v2",
+        "f" * 64,
+        "0" * 64,
+    )
+
+    replay = await mark_generation_running(
+        ledger,
+        job_id=created.job_id,
+        operation_id=first.operation_id,
+        generation=1,
+    )
+    assert replay.replayed is True
+    assert replay.generation == 1
+    assert (await ledger.inspect_job(OWNER, created.job_id)).current_generation == 2
+    assert len(await repository.audit_records_for_test()) == 9
+
+
+async def test_completion_replay_requires_exact_metadata(ledger, repository):
+    created, start = await _create_running(ledger)
+    with pytest.raises(OperationMismatch):
+        await ledger.mark_running(
+            OWNER,
+            start.operation_id,
+            created.job_id,
+            1,
+            "runtime://different",
+            "durable://generation-1",
+            "runtime-key-v1",
+            "durable-key-v1",
+            CAPABILITY_DIGEST,
+            DURABLE_DIGEST,
+        )
+    assert len(await repository.audit_records_for_test()) == 3
+
+
+async def test_direct_finalize_from_created(ledger, repository):
+    created = await _create(ledger)
+    ticket = await ledger.begin_finalize(
+        OWNER,
+        "memory-finalize-01",
+        created.job_id,
+        0,
+        TerminalOutcome.CANCELLED,
+    )
+    pending = await ledger.inspect_job(OWNER, created.job_id)
+    assert pending.state is JobState.FINALIZING
+    assert pending.pending_operation_id == ticket.operation_id
+    await ledger.mark_terminal(OWNER, ticket.operation_id, created.job_id)
+    assert (await ledger.inspect_job(OWNER, created.job_id)).state is JobState.TERMINAL
+    assert len(await repository.audit_records_for_test()) == 3
+
+
+async def test_terminal_job_and_released_generation_are_immutable(ledger):
+    trace = await exercise_complete_lifecycle(ledger)
+    with pytest.raises(InvalidTransition):
+        await ledger.begin_finalize(
+            OWNER,
+            "memory-finalize-late",
+            trace.job_id,
+            2,
+            TerminalOutcome.SUCCESS,
+        )
+    with pytest.raises(InvalidTransition):
+        await ledger.abandon_generation(
+            OWNER,
+            trace.job_id,
+            2,
+            GenerationState.RELEASED,
+            "too_late",
+            TerminalOutcome.FAILED,
+        )
+
+
+async def test_concurrent_same_key_start_is_one_mutation_plus_replay(
+    ledger, repository
+):
+    created = await _create(ledger)
+    first, second = await asyncio.gather(
+        ledger.begin_start(
+            OWNER, "memory-concurrent-1", created.job_id, 0, 30
+        ),
+        ledger.begin_start(
+            OWNER, "memory-concurrent-1", created.job_id, 0, 30
+        ),
+    )
+    assert {first.replayed, second.replayed} == {False, True}
+    assert first.operation_id == second.operation_id
+    assert first.generation == second.generation == 1
+    assert len(await repository.audit_records_for_test()) == 2
+
+
+async def test_concurrent_different_start_intents_have_one_winner(
+    ledger, repository
+):
+    created = await _create(ledger)
+    results = await asyncio.gather(
+        ledger.begin_start(
+            OWNER, "memory-concurrent-a", created.job_id, 0, 30
+        ),
+        ledger.begin_start(
+            OWNER, "memory-concurrent-b", created.job_id, 0, 30
+        ),
+        return_exceptions=True,
+    )
+    assert sum(not isinstance(result, BaseException) for result in results) == 1
+    assert sum(
+        isinstance(result, (InvalidTransition, StaleGeneration)) for result in results
+    ) == 1
+    assert len(await repository.audit_records_for_test()) == 2
+    snapshot = await ledger.inspect_job(OWNER, created.job_id)
+    assert snapshot.generation == 1
+    assert snapshot.generation_record.state is GenerationState.STARTING
+
+
+async def test_audit_and_public_results_contain_no_protected_values(
+    ledger, repository
+):
+    created, _ = await _create_running(ledger)
+    public = await ledger.inspect_job(OWNER, created.job_id)
+    audit = await repository.audit_records_for_test()
+    rendered = repr((asdict(public), audit))
+    for protected in (
+        "runtime://generation-1",
+        "durable://generation-1",
+        CAPABILITY_DIGEST,
+        DURABLE_DIGEST,
+    ):
+        assert protected not in rendered
+    assert all(item.owner == OWNER for item in audit)
+    assert [item.command for item in audit] == [
+        CommandKind.CREATE_JOB,
+        CommandKind.BEGIN_START,
+        CommandKind.MARK_RUNNING,
+    ]
+
+
+async def test_abandonment_fails_the_superseded_pending_operation(
+    ledger, repository
+):
+    created = await _create(ledger)
+    start = await ledger.begin_start(
+        OWNER, "memory-start-00001", created.job_id, 0, 30
+    )
+    await ledger.abandon_generation(
+        OWNER,
+        created.job_id,
+        1,
+        GenerationState.STARTING,
+        "start_failed",
+    )
+    operation = await repository.operation_for_test(start.operation_id)
+    assert operation.source is OperationSource.CALLER
+    assert operation.status is OperationStatus.FAILED
