@@ -35,8 +35,12 @@ def test_default_image_is_an_immutable_multiplatform_digest():
 
 @pytest.mark.parametrize(
     ("machine", "expected"),
-    [("x86_64", "linux/amd64"), ("amd64", "linux/amd64"),
-     ("arm64", "linux/arm64"), ("aarch64", "linux/arm64")],
+    [
+        ("x86_64", "linux/amd64"),
+        ("amd64", "linux/amd64"),
+        ("arm64", "linux/arm64"),
+        ("aarch64", "linux/arm64"),
+    ],
 )
 def test_native_platform_selects_matching_immutable_manifest(machine, expected):
     assert native_docker_platform(machine) == expected
@@ -48,15 +52,11 @@ def test_unknown_native_platform_fails_closed():
 
 
 def test_default_index_resolves_to_pinned_platform_child():
-    assert runtime_server_image(
-        DEFAULT_OPENHANDS_SERVER_IMAGE, "linux/amd64"
-    ).endswith(
-        "@sha256:5148763c47960d7f6f020d4fc1587e830e408057f64e96610a770c51d29e47c9"
+    assert runtime_server_image(DEFAULT_OPENHANDS_SERVER_IMAGE, "linux/amd64").endswith(
+        "@sha256:c21e0323cdc3691b54f9f6d980667a375a5df0e21e4c9c40ecb804f2455dd2ff"
     )
-    assert runtime_server_image(
-        DEFAULT_OPENHANDS_SERVER_IMAGE, "linux/arm64"
-    ).endswith(
-        "@sha256:639932fed2077ceca4d758fb0c62c165d9c6cb386c129d5f6cc05c3a69ec0a8e"
+    assert runtime_server_image(DEFAULT_OPENHANDS_SERVER_IMAGE, "linux/arm64").endswith(
+        "@sha256:d619a0ccffd4ca657c5becab28eccc61b6eea4ea9f1aeda27f39829bbaca8161"
     )
 
 
@@ -64,7 +64,7 @@ def test_default_index_resolves_to_pinned_platform_child():
     "image",
     [
         "ghcr.io/openhands/agent-server:latest-python",
-        "ghcr.io/openhands/agent-server:1.31.0-python",
+        "ghcr.io/openhands/agent-server:1.36.0-python",
         "ghcr.io/openhands/agent-server@sha256:short",
         "",
     ],
@@ -199,7 +199,7 @@ def test_adapter_builds_per_job_launch_without_exposing_artifacts(tmp_path):
     assert launch.conversation_secret == _keys().conversation_secret("job-1")
     assert launch.platform == "linux/amd64"
     assert launch.image.endswith(
-        "@sha256:5148763c47960d7f6f020d4fc1587e830e408057f64e96610a770c51d29e47c9"
+        "@sha256:c21e0323cdc3691b54f9f6d980667a375a5df0e21e4c9c40ecb804f2455dd2ff"
     )
 
 

@@ -1,4 +1,4 @@
-"""Private, authenticated adapter for OpenHands 1.31.0 ``DockerWorkspace``."""
+"""Private, authenticated adapter for OpenHands 1.36.0 ``DockerWorkspace``."""
 
 from __future__ import annotations
 
@@ -24,19 +24,19 @@ from openloop.tools.openhands_state import OpenHandsKeyDeriver, OpenHandsStateLa
 
 logger = logging.getLogger(__name__)
 
-PINNED_OPENHANDS_VERSION = "1.31.0"
+PINNED_OPENHANDS_VERSION = "1.36.0"
 DEFAULT_OPENHANDS_SERVER_IMAGE = (
     "ghcr.io/openhands/agent-server@"
-    "sha256:08d3994f9287f8d52b07907ac1575ecfaa48b972697ddae4f1cb5c2f03713fab"
+    "sha256:7a308731fed9ba6ace79e97fbab0b6e11fa48b8fe49510c5124163bc03ddf9d5"
 )
 _DEFAULT_PLATFORM_IMAGES = {
     "linux/amd64": (
         "ghcr.io/openhands/agent-server@"
-        "sha256:5148763c47960d7f6f020d4fc1587e830e408057f64e96610a770c51d29e47c9"
+        "sha256:c21e0323cdc3691b54f9f6d980667a375a5df0e21e4c9c40ecb804f2455dd2ff"
     ),
     "linux/arm64": (
         "ghcr.io/openhands/agent-server@"
-        "sha256:639932fed2077ceca4d758fb0c62c165d9c6cb386c129d5f6cc05c3a69ec0a8e"
+        "sha256:d619a0ccffd4ca657c5becab28eccc61b6eea4ea9f1aeda27f39829bbaca8161"
     ),
 }
 CONVERSATION_LEASE_TTL_SECONDS = "45"
@@ -71,7 +71,7 @@ def require_immutable_server_image(image: str) -> str:
 def native_docker_platform(machine: str | None = None) -> str:
     """Select the pinned OCI index's native Linux manifest.
 
-    The 1.31.0 image digest is a multi-platform OCI index. Forcing amd64 on an
+    The 1.36.0 image digest is a multi-platform OCI index. Forcing amd64 on an
     arm64 host runs ``tmux`` under QEMU, whose jemalloc warning is treated as a
     fatal error by pinned ``libtmux``. Selecting the matching immutable child
     manifest avoids emulation and is also the correct production default.
@@ -289,10 +289,9 @@ class HardenedDockerWorkspace:
     def create(self, workspace: Path, job_id: str) -> object:
         paths = self.layout.for_job(job_id)
         resolved_workspace = workspace.resolve(strict=True)
-        if (
-            paths.root.is_relative_to(resolved_workspace)
-            or resolved_workspace.is_relative_to(paths.root)
-        ):
+        if paths.root.is_relative_to(
+            resolved_workspace
+        ) or resolved_workspace.is_relative_to(paths.root):
             raise HardenedDockerWorkspaceError(
                 "OpenHands state directory must be disjoint from the Git checkout"
             )
@@ -459,9 +458,7 @@ class HardenedDockerWorkspace:
                     # user-defined network with the agent and resolves it by
                     # container name; the daemon host's loopback is not
                     # reachable from this network namespace.
-                    object.__setattr__(
-                        self, "host", f"http://{container_name}:8000"
-                    )
+                    object.__setattr__(self, "host", f"http://{container_name}:8000")
                 else:
                     object.__setattr__(
                         self, "host", f"http://127.0.0.1:{self.host_port}"
@@ -485,9 +482,7 @@ class HardenedDockerWorkspace:
                 finally:
                     if container_id:
                         try:
-                            runner(
-                                ["docker", "rm", "-f", container_id], None, 30.0
-                            )
+                            runner(["docker", "rm", "-f", container_id], None, 30.0)
                         except Exception:
                             logger.warning(
                                 "failed to remove agent-server container %s",

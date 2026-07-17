@@ -44,11 +44,12 @@ githubapp = [
 openhands = [
     # Pin the server package directly: openhands-workspace only declares a
     # compatible lower bound, so plain pip would otherwise install a newer
-    # agent-server than the private 1.31.0 adapter supports.
-    "openhands-agent-server==1.31.0; python_version >= '3.12'",
-    "openhands-sdk==1.31.0; python_version >= '3.12'",
-    "openhands-tools==1.31.0; python_version >= '3.12'",
-    "openhands-workspace==1.31.0; python_version >= '3.12'",
+    # agent-server than the private 1.36.0 adapter supports.
+    "openhands-agent-server==1.36.0; python_version >= '3.12'",
+    # websocket client factory
+    "openhands-sdk @ git+https://github.com/openloop-team/software-agent-sdk.git@d4e3d7be3c66336e834cde63ed62f22fbccc274f#subdirectory=openhands-sdk ; python_version >= '3.12'",
+    "openhands-tools==1.36.0; python_version >= '3.12'",
+    "openhands-workspace==1.36.0; python_version >= '3.12'",
     # Direct dependency: Phase 0 workspace artifacts use streaming AES-256-GCM.
     "cryptography>=42; python_version >= '3.12'",
 ]
@@ -59,6 +60,9 @@ openloop = "openloop.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/openloop"]
