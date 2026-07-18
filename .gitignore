@@ -71,6 +71,8 @@ instance/
 # Superpowers
 .superpowers/
 docs/superpowers/
+docs/2026-07-18-broker-checkpoint-recovery-design.md
+docs/2026-07-18-broker-checkpoint-recovery-implementation-plan.md
 
 # Sphinx documentation
 docs/_build/
