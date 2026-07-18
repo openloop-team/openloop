@@ -7,9 +7,10 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from openloop.tools.openhands_docker import (
+from openloop.openhands.runtime_profile import (
     CONVERSATION_LEASE_TTL_SECONDS,
     DEFAULT_OPENHANDS_SERVER_IMAGE,
+    SUPPORTED_DOCKER_PLATFORMS,
     native_docker_platform,
     require_immutable_server_image,
     runtime_server_image,
@@ -137,7 +138,7 @@ class DockerRuntimeConfig:
         ) is None:
             raise ValueError("HAProxy relay image must be pinned by sha256 digest")
         selected_platform = self.platform or native_docker_platform()
-        if selected_platform not in ("linux/amd64", "linux/arm64"):
+        if selected_platform not in SUPPORTED_DOCKER_PLATFORMS:
             raise ValueError("unsupported Docker runtime platform")
         object.__setattr__(self, "platform", selected_platform)
         if isinstance(self.uid, bool) or not isinstance(self.uid, int):

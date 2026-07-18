@@ -11,7 +11,7 @@ from typing import Self
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from openloop.tools.openhands_docker import DEFAULT_OPENHANDS_SERVER_IMAGE
+from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
 
 
 # Temporary smoke-test default: the official multi-platform Python 3.12 slim

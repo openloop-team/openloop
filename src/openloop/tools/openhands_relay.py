@@ -8,7 +8,7 @@ import os
 
 import httpx
 
-from openloop.tools.openhands_docker import PINNED_OPENHANDS_VERSION
+from openloop.openhands.runtime_profile import PINNED_OPENHANDS_VERSION
 from openloop.tools.openhands_relay_client import (
     AGENT_SESSION_HEADER,
     LOGICAL_RELAY_HOST,
