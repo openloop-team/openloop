@@ -163,7 +163,7 @@ class WarmWorkspacePool:
         """Wire (or rewire) the durable ``context_ref`` sink after construction.
 
         Used by the app to bridge the pool to the current thread-record store,
-        which may be repointed on a Postgres fallback."""
+        selected by the composition root."""
         self._on_change = sink
 
     async def acquire(self, warm_key: str, repo: str) -> WarmLease:

@@ -41,6 +41,7 @@ services:
     # localhost example value can't leak in.
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-openloop}
+      STORAGE_MODE: postgres
     # Socket Mode opens an OUTBOUND WebSocket to Slack — no inbound port.
     command: openloop slack socket
     depends_on:

@@ -6,7 +6,7 @@ slice needs is wired up here; more lands as the runtime grows.
 
 from __future__ import annotations
 
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -235,8 +235,8 @@ class Settings(BaseSettings):
 
     # Cross-process coordination for multi-replica deploys — which lock backend
     # leads startup recovery:
-    #   "auto"     (default) — follow memory_backend: Postgres advisory lock when
-    #              memory_backend=postgres (no extra service), else in-process.
+    #   "auto"     (default) — follow effective_storage_mode: Postgres advisory
+    #              lock for auto/postgres storage, else in-process.
     #   "memory"   — force a process-local lock (single replica).
     #   "postgres" — force Postgres advisory locks (reuses database_url).
     #   "redis"    — force a Redis lock (needs redis_url + the `redis` extra).
@@ -255,8 +255,12 @@ class Settings(BaseSettings):
     agents_dir: str = "agents"
 
     # Memory
+    # Canonical storage policy. ``None`` preserves the legacy MEMORY_BACKEND
+    # input during migration; all runtime consumers use effective_storage_mode.
+    storage_mode: Literal["auto", "postgres", "memory"] | None = None
     # Backend: "memory" (process-local, default — runs without a DB) or
-    # "postgres" (pgvector-backed, persistent).
+    # "postgres" (pgvector-backed, persistent). Deprecated: prefer
+    # STORAGE_MODE; retained as a derived-only compatibility input.
     memory_backend: str = "memory"
     # Set to false to disable semantic recall (recency-only memory).
     embeddings_enabled: bool = True
@@ -310,6 +314,13 @@ class Settings(BaseSettings):
         if self.openrouter_api_key:
             providers.append("openrouter")
         return providers
+
+    @property
+    def effective_storage_mode(self) -> Literal["auto", "postgres", "memory"]:
+        """Resolve the canonical storage policy, including the legacy input."""
+        if self.storage_mode is not None:
+            return self.storage_mode
+        return "auto" if self.memory_backend == "postgres" else "memory"
 
 
 _settings: Settings | None = None

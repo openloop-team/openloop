@@ -10,7 +10,7 @@ from pathlib import Path
 import base64
 import pytest
 
-import openloop.app as appmod
+from openloop.wiring import builders as appmod
 from openloop.agents import load_agent
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore

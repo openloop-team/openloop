@@ -4,8 +4,30 @@ These helpers are intentionally network-free and database-free. They are used
 by OpenLoop's own tests and can also support downstream integration tests.
 """
 
+from contextlib import asynccontextmanager
+from typing import Any
+
+from openloop.config import Settings
+
 from openloop.memory.embeddings import Embedder
 from openloop.models.gateway import ModelResponse, ToolCall
+
+
+@asynccontextmanager
+async def memory_context(
+    settings: Settings | None = None,
+    agents=None,
+    *,
+    overrides: dict[str, Any] | None = None,
+):
+    """Compose the real application graph with explicitly process-local stores."""
+    from openloop.wiring import compose
+
+    configured = (settings or Settings()).model_copy(
+        update={"storage_mode": "memory"}
+    )
+    async with compose(configured, agents, overrides=overrides) as ctx:
+        yield ctx
 
 
 def tool_call_response(model: str, calls: list[tuple[str, str, dict]]) -> ModelResponse:

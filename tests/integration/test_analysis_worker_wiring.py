@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-import openloop.app as appmod
+from openloop.wiring import builders as appmod
 from openloop.agents import load_agent
 from openloop.agents.schema import Tool
 from openloop.approvals import InMemoryApprovalStore

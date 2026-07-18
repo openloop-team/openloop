@@ -3,7 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from openloop.app import app
+from openloop.app import create_app
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
 from openloop.testing import FakeGitHub
@@ -13,7 +13,13 @@ from openloop.testing import FakeGitHub
 def client():
     # Inject a gateway with a fake GitHub client (no network).
     fake = FakeGitHub()
-    app.state.tools = ToolGateway(tools=[GitHubConnector(fake)])
+    app = create_app(
+        compose_overrides={
+            "tools_factory": lambda stores: ToolGateway(
+                tools=[GitHubConnector(fake)], approvals=stores.approvals
+            )
+        }
+    )
     with TestClient(app) as c:
         c.fake_github = fake  # type: ignore[attr-defined]
         yield c

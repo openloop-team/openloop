@@ -17,9 +17,8 @@ logger = logging.getLogger("openloop.slack_socket")
 async def run_socket() -> None:
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
-    # Imported here so the module loads without constructing the app.
-    from openloop.app import app
     from openloop.config import get_settings
+    from openloop.wiring import compose
 
     settings = get_settings()
     if not settings.slack_app_token:
@@ -27,16 +26,13 @@ async def run_socket() -> None:
             "Socket Mode needs SLACK_APP_TOKEN (xapp-…). Set it in .env."
         )
 
-    slack_app = getattr(app.state, "slack_app", None)
-    if slack_app is None:
-        raise SystemExit(
-            "No Slack app built. Set SLACK_BOT_TOKEN and ensure an agent has a "
-            "Slack surface."
-        )
-
-    # Run the FastAPI lifespan so stores/tools are set up, then start the socket.
-    async with app.router.lifespan_context(app):
-        handler = AsyncSocketModeHandler(slack_app, settings.slack_app_token)
+    async with compose(settings) as ctx:
+        if ctx.slack_app is None:
+            raise SystemExit(
+                "No Slack app built. Set SLACK_BOT_TOKEN and ensure an agent has "
+                "a Slack surface."
+            )
+        handler = AsyncSocketModeHandler(ctx.slack_app, settings.slack_app_token)
         logger.info("starting Slack Socket Mode — mention the bot to test")
         await handler.start_async()
 

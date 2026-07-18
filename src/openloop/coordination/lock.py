@@ -246,10 +246,18 @@ class PostgresLock:
     async def setup(self) -> None:
         import asyncpg  # noqa: PLC0415 — optional until a Postgres deploy needs it
 
-        # min_size=0 so an idle single-replica process holds no lock connections.
-        self._pool = await asyncpg.create_pool(
+        # min_size=0 keeps idle usage at zero, so explicitly borrow once here:
+        # pool construction is lazy and is not itself a connectivity probe.
+        pool = await asyncpg.create_pool(
             self.dsn, min_size=0, max_size=self._max_size
         )
+        try:
+            async with pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+        except BaseException:
+            await pool.close()
+            raise
+        self._pool = pool
 
     @staticmethod
     def _lock_id(key: str) -> int:

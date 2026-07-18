@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from openloop import app as appmod
 from openloop.config import Settings
 from openloop.coordination import InProcessLock, PostgresLock, RedisLock
+from openloop.wiring import builders
 
 pytestmark = pytest.mark.integration
 
@@ -42,17 +43,21 @@ class _SpyRunner:
 def test_build_lock_auto_follows_memory_backend():
     # auto + in-memory stores → process-local; auto + postgres → advisory lock
     # (reuses the DB the deploy already runs, no extra service).
-    auto_mem = appmod.build_lock(Settings(lock_backend="auto", memory_backend="memory"))
-    auto_pg = appmod.build_lock(Settings(lock_backend="auto", memory_backend="postgres"))
+    auto_mem = builders.build_lock(
+        Settings(lock_backend="auto", memory_backend="memory")
+    )
+    auto_pg = builders.build_lock(
+        Settings(lock_backend="auto", memory_backend="postgres")
+    )
     assert isinstance(auto_mem, InProcessLock)
     assert isinstance(auto_pg, PostgresLock)
 
 
 def test_build_lock_explicit_overrides_memory_backend():
-    forced_mem = appmod.build_lock(
+    forced_mem = builders.build_lock(
         Settings(lock_backend="memory", memory_backend="postgres")
     )
-    forced_pg = appmod.build_lock(
+    forced_pg = builders.build_lock(
         Settings(lock_backend="postgres", memory_backend="memory")
     )
     assert isinstance(forced_mem, InProcessLock)
@@ -71,7 +76,9 @@ async def test_explicit_backend_setup_failure_logs_loudly(caplog):
     # An operator who asked for cross-process coordination must SEE it was disabled.
     lock = _FailingSetupLock()
     with caplog.at_level(logging.ERROR):
-        resolved = await appmod._setup_coordination(lock, Settings(lock_backend="redis"))
+        resolved = await builders._setup_coordination(
+            lock, Settings(lock_backend="redis")
+        )
     assert isinstance(resolved, InProcessLock)
     assert "CROSS-PROCESS COORDINATION DISABLED" in caplog.text
 
@@ -80,7 +87,9 @@ async def test_auto_backend_setup_failure_degrades_quietly(caplog):
     # auto wasn't an explicit coordination request → quiet degrade, no loud banner.
     lock = _FailingSetupLock()
     with caplog.at_level(logging.ERROR):
-        resolved = await appmod._setup_coordination(lock, Settings(lock_backend="auto"))
+        resolved = await builders._setup_coordination(
+            lock, Settings(lock_backend="auto")
+        )
     assert isinstance(resolved, InProcessLock)
     assert "CROSS-PROCESS COORDINATION DISABLED" not in caplog.text
 
@@ -92,7 +101,9 @@ def test_build_lock_redis_missing_package_falls_back(monkeypatch):
         raise ImportError("no redis")
 
     monkeypatch.setattr(RedisLock, "from_url", classmethod(lambda cls, url, **kw: boom(url)))
-    lock = appmod.build_lock(Settings(lock_backend="redis", redis_url="redis://x"))
+    lock = builders.build_lock(
+        Settings(lock_backend="redis", redis_url="redis://x")
+    )
     assert isinstance(lock, InProcessLock)
 
 
@@ -108,12 +119,12 @@ def test_lifespan_falls_back_when_redis_ping_fails(monkeypatch):
     # A configured-but-unreachable Redis must not break startup: the lifespan pings,
     # falls back to an in-process lock, and still runs recovery as the leader.
     monkeypatch.setattr(
-        appmod, "build_lock", lambda settings: RedisLock(_PingFailRedis())
+        builders, "build_lock", lambda settings: RedisLock(_PingFailRedis())
     )
 
     app = appmod.create_app()
     with TestClient(app):  # runs the lifespan → ping fails → fallback
-        assert isinstance(app.state.coordinator, InProcessLock)
+        assert isinstance(app.state.ctx.coordinator, InProcessLock)
 
 
 # --- recovery pass: leader runs, contended retries (Finding #1) ----------
@@ -122,7 +133,7 @@ async def test_recovery_pass_leads_and_runs_reconcilers():
     engine, runner = _SpyEngine(), _SpyRunner()
     tools = _SpyTools(engine)
 
-    led = await appmod.run_recovery_pass(InProcessLock(), tools, runner)
+    led = await builders.run_recovery_pass(InProcessLock(), tools, runner)
 
     assert led is True
     assert engine.calls == 1 and runner.calls == 1
@@ -138,9 +149,9 @@ async def test_recovery_pass_sweeps_expired_sealed_analysis_containers(monkeypat
         calls += 1
         return ["openloop-expired"]
 
-    monkeypatch.setattr(appmod, "sweep_expired_sandboxes", sweep)
+    monkeypatch.setattr(builders, "sweep_expired_sandboxes", sweep)
 
-    assert await appmod.run_recovery_pass(InProcessLock(), tools, runner) is True
+    assert await builders.run_recovery_pass(InProcessLock(), tools, runner) is True
     assert calls == 1
 
 
@@ -155,13 +166,13 @@ async def test_recovery_pass_skips_when_contended_but_retries_after_release():
     held = await coordinator.acquire("startup-recovery", ttl_seconds=120)
     assert held is not None
 
-    skipped = await appmod.run_recovery_pass(coordinator, tools, runner)
+    skipped = await builders.run_recovery_pass(coordinator, tools, runner)
     assert skipped is False
     assert engine.calls == 0 and runner.calls == 0
 
     # The holder goes away (crash + TTL expiry / release) → the next pass leads.
     await coordinator.release("startup-recovery", held)
-    led = await appmod.run_recovery_pass(coordinator, tools, runner)
+    led = await builders.run_recovery_pass(coordinator, tools, runner)
     assert led is True
     assert engine.calls == 1 and runner.calls == 1
 
@@ -176,10 +187,10 @@ async def test_recovery_loop_reruns_until_cancelled(monkeypatch):
         calls += 1
         return True
 
-    monkeypatch.setattr(appmod, "run_recovery_pass", spy)
+    monkeypatch.setattr(builders, "run_recovery_pass", spy)
 
     task = asyncio.create_task(
-        appmod._recovery_loop(InProcessLock(), object(), None, interval=0.001)
+        builders._recovery_loop(InProcessLock(), object(), None, interval=0.001)
     )
     for _ in range(200):  # bounded wait for a few iterations
         if calls >= 3:

@@ -34,10 +34,9 @@ def test_build_slack_app_http_mode_with_signing_secret():
     assert isinstance(app, AsyncApp)
 
 
-def test_session_store_postgres_fallback_repoints_slack_runner(monkeypatch):
-    # If the Postgres session store fails to set up, the lifespan must repoint the
-    # already-built Slack runner (which captured the store by reference) at the
-    # in-memory fallback — otherwise background mentions hit an un-setup pool.
+def test_session_store_fallback_settles_before_slack_runner_is_built(monkeypatch):
+    # No runner exists before startup. The composition root settles the fallback
+    # first, then builds the runner against that final instance.
     from openloop import app as appmod
     from openloop.config import get_settings
 
@@ -49,22 +48,16 @@ def test_session_store_postgres_fallback_repoints_slack_runner(monkeypatch):
         async def setup(self, pool):
             raise RuntimeError("no postgres")
 
-    monkeypatch.setattr(
-        appmod,
-        "build_surface_session_store",
-        lambda s: FailingPgSessions(),
+    app = appmod.create_app(
+        compose_overrides={"sessions": FailingPgSessions()}
     )
+    assert getattr(app.state, "ctx", None) is None
 
-    app = appmod.create_app()
-    runner = app.state.session_runner
-    assert runner is not None
-    # Before startup the runner holds the (un-setup) Postgres store.
-    assert isinstance(runner.sessions, PostgresSurfaceSessionStore)
-
-    with TestClient(app):  # runs the lifespan → setup fails → fallback
-        assert isinstance(app.state.sessions, InMemorySurfaceSessionStore)
-        # The runner now shares the same in-memory fallback instance.
-        assert app.state.session_runner.sessions is app.state.sessions
+    with TestClient(app):
+        ctx = app.state.ctx
+        assert isinstance(ctx.sessions, InMemorySurfaceSessionStore)
+        assert ctx.session_runner is not None
+        assert ctx.session_runner.sessions is ctx.sessions
 
 
 async def test_run_socket_requires_app_token(monkeypatch):

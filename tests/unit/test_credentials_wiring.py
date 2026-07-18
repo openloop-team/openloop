@@ -4,7 +4,7 @@ import sys
 import types
 
 from openloop.agents.schema import Agent
-from openloop.app import build_github_credentials, build_tool_gateway
+from openloop.wiring.builders import build_github_credentials, build_tool_gateway
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.config import Settings
@@ -13,7 +13,14 @@ from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 
 
 def _settings(**kwargs) -> Settings:
-    return Settings(_env_file=None, **kwargs)
+    values = {
+        "github_token": None,
+        "github_app_id": None,
+        "github_app_private_key_path": None,
+        "github_app_installation_id": None,
+    }
+    values.update(kwargs)
+    return Settings(_env_file=None, **values)
 
 
 def test_token_only_selects_env_resolver():

@@ -10,6 +10,7 @@ OPENLOOP_ROOT = SOURCE_ROOT / "openloop"
 BROKER_ROOT = OPENLOOP_ROOT / "broker"
 BROKER_RPC_ROOT = OPENLOOP_ROOT / "broker_rpc"
 APP_MODULE = OPENLOOP_ROOT / "app.py"
+WIRING_ROOT = OPENLOOP_ROOT / "wiring"
 CODING_WORKER_MODULES = (
     OPENLOOP_ROOT / "tools" / "coding_worker.py",
     OPENLOOP_ROOT / "workflows" / "coding_worker.py",
@@ -182,13 +183,14 @@ def test_broker_rpc_imports_core_one_way_and_no_runtime_layers():
 
 
 def test_application_does_not_wire_privileged_broker_runtime_yet():
-    tree = ast.parse(APP_MODULE.read_text(encoding="utf-8"), filename=str(APP_MODULE))
     imports = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imports.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imports.append(node.module)
+    for path in (APP_MODULE, *sorted(WIRING_ROOT.glob("*.py"))):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imports.append(node.module)
     assert not any(
         name.startswith(
             ("openloop.broker_control", "openloop.broker_runtime")

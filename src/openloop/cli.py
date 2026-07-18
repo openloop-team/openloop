@@ -86,16 +86,14 @@ def _cmd_analysis_stage(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    # Mirrors app.build_analysis_input_store's backend dispatch, without
-    # importing openloop.app (whose import boots the whole application).
     # Only the durable store makes sense here: staging into a process-local
-    # in-memory store would be invisible to the runtime that later
-    # materializes the inputs.
+    # in-memory store would be invisible to the runtime that later materializes
+    # the inputs.
     settings = get_settings()
-    if settings.memory_backend != "postgres":
+    if settings.effective_storage_mode == "memory":
         print(
             "error: cross-process staging needs the durable input store. Set "
-            "MEMORY_BACKEND=postgres and DATABASE_URL so the CLI and the "
+            "STORAGE_MODE=postgres and DATABASE_URL so the CLI and the "
             "runtime share it.",
             file=sys.stderr,
         )

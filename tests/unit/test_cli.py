@@ -132,7 +132,7 @@ def test_stage_refuses_the_process_local_backend(monkeypatch, tmp_path, capsys):
     ])
 
     assert rc == 1
-    assert "MEMORY_BACKEND=postgres" in capsys.readouterr().err
+    assert "STORAGE_MODE=postgres" in capsys.readouterr().err
 
 
 def test_stage_with_nothing_to_stage_errors(capsys):

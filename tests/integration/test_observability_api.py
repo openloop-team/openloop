@@ -3,17 +3,15 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from openloop.app import app
+from openloop.app import create_app
 from openloop.usage import InMemoryUsageStore, UsageRecord
 
 
 @pytest.fixture
 def client():
     usage = InMemoryUsageStore()
-    app.state.usage = usage
+    app = create_app(compose_overrides={"usage": usage})
     with TestClient(app) as c:
-        # TestClient's startup may rebuild some state; set after entering.
-        app.state.usage = usage
         c.usage = usage  # type: ignore[attr-defined]
         yield c
 

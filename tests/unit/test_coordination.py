@@ -6,6 +6,8 @@ cross-replica guarantee that only one of two processes leads a piece of work.
 """
 
 import asyncio
+import sys
+import types
 
 import pytest
 
@@ -230,3 +232,43 @@ def test_postgres_lock_id_is_deterministic_and_in_bigint_range():
     assert a == PostgresLock._lock_id("startup-recovery")  # stable across calls
     assert -(2**63) <= a < 2**63  # fits the signed bigint pg_advisory_lock takes
     assert PostgresLock._lock_id("other-key") != a
+
+
+async def test_postgres_lock_setup_probes_lazy_pool(monkeypatch):
+    queries = []
+
+    class Connection:
+        async def fetchval(self, query):
+            queries.append(query)
+            return 1
+
+    class Acquire:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+        async def close(self):
+            pass
+
+    pool = Pool()
+
+    async def create_pool(*args, **kwargs):
+        return pool
+
+    monkeypatch.setitem(
+        sys.modules,
+        "asyncpg",
+        types.SimpleNamespace(create_pool=create_pool),
+    )
+    lock = PostgresLock("postgresql://test")
+
+    await lock.setup()
+
+    assert queries == ["SELECT 1"]
+    assert lock._pool is pool

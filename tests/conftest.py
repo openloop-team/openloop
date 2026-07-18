@@ -1,9 +1,7 @@
 """Suite-wide test environment.
 
-``openloop.app`` builds its module-level ``app = create_app()`` at import time,
-loading agents from ``settings.agents_dir`` (default: the shipped ``agents/``
-examples). Point it at the test fixture instead — this file is imported before
-any test module, so the env var is set before that import can happen — keeping
+``openloop.app`` still loads route-shaping agent metadata at import time. Point
+it at the test fixture before any test module imports the ASGI shell, keeping
 tests decoupled from ``agents/dev-platform.yaml``.
 """
 

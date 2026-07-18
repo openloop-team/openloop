@@ -206,9 +206,7 @@ def build_slack_app(
         runtime, sessions, SlackSurfaceDelivery(app.client), threads=threads,
         artifacts=artifacts, uploads=uploads,
     )
-    # Exposed so the app lifespan can repoint the runner's session store after a
-    # Postgres-setup fallback (mirrors how the workflow engine's store is swapped)
-    # — and so the approval handler can reach the runner in a later slice.
+    # Exposed so the composition root and approval handler can reach the runner.
     app._session_runner = runner  # type: ignore[attr-defined]
 
     @app.event("app_mention")
