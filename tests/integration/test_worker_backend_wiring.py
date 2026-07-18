@@ -274,6 +274,29 @@ def test_openhands_probe_failure_fails_closed(monkeypatch, caplog):
     assert "CODING WORKER DISABLED" in caplog.text
 
 
+def test_openhands_relay_probe_failure_disables_only_coding_worker(
+    monkeypatch, caplog
+):
+    def boom(self):
+        raise OpenHandsUnavailable(
+            "native OpenHands relay compatibility check failed: SDK seam changed"
+        )
+
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", boom)
+    with caplog.at_level("ERROR"):
+        gateway = _gateway(
+            _settings(
+                coding_worker_backend="openhands",
+                coding_worker_openhands_cold_resume_enabled=False,
+            )
+        )
+
+    assert "coding_worker" not in gateway._tools
+    assert "github" in gateway._tools
+    assert "openhands backend probe failed" in caplog.text
+    assert "native OpenHands relay compatibility check failed" in caplog.text
+
+
 def test_openhands_with_sandbox_typo_fails_closed(monkeypatch, caplog):
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
     with caplog.at_level("ERROR"):

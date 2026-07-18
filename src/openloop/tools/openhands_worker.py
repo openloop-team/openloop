@@ -67,6 +67,10 @@ from openloop.tools.openhands_resume import (
     WorkerPaused,
     WorkspaceArtifactRef,
 )
+from openloop.tools.openhands_relay import (
+    OpenHandsRelayError,
+    probe_relay_compatibility,
+)
 
 if TYPE_CHECKING:
     from openloop.tools.coding_worker import WorkerState
@@ -201,6 +205,12 @@ class OpenHandsCodingWorker:
                 self._docker_adapter.probe()
             except HardenedDockerWorkspaceError as exc:
                 raise OpenHandsUnavailable(str(exc)) from exc
+            try:
+                probe_relay_compatibility()
+            except OpenHandsRelayError as exc:
+                raise OpenHandsUnavailable(
+                    f"native OpenHands relay compatibility check failed: {exc}"
+                ) from exc
             import subprocess
 
             try:

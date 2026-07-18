@@ -320,6 +320,54 @@ def test_probe_fails_closed_without_the_sdk():
         OpenHandsCodingWorker("m").probe()
 
 
+def test_docker_probe_qualifies_native_relay_after_workspace(monkeypatch):
+    calls = []
+
+    class Adapter:
+        def probe(self):
+            calls.append("workspace")
+
+    monkeypatch.setattr(
+        ohmod, "probe_relay_compatibility", lambda: calls.append("relay")
+    )
+    monkeypatch.setattr(ohmod.subprocess, "run", lambda *args, **kwargs: None)
+
+    OpenHandsCodingWorker("m", docker=True, docker_adapter=Adapter()).probe()
+
+    assert calls == ["workspace", "relay"]
+
+
+def test_host_probe_does_not_require_native_relay(monkeypatch):
+    monkeypatch.setattr(
+        ohmod,
+        "probe_relay_compatibility",
+        lambda: pytest.fail("host mode must not qualify the Docker relay"),
+    )
+
+    OpenHandsCodingWorker("m").probe()
+
+
+def test_docker_probe_translates_native_relay_failure(monkeypatch):
+    class Adapter:
+        def probe(self):
+            return None
+
+    failure = ohmod.OpenHandsRelayError("RemoteWorkspace seam changed")
+    monkeypatch.setattr(
+        ohmod,
+        "probe_relay_compatibility",
+        lambda: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(
+        OpenHandsUnavailable,
+        match="native OpenHands relay compatibility check failed.*RemoteWorkspace",
+    ) as captured:
+        OpenHandsCodingWorker("m", docker=True, docker_adapter=Adapter()).probe()
+
+    assert captured.value.__cause__ is failure
+
+
 def test_defaults_are_the_safe_ones():
     worker = OpenHandsCodingWorker("m")
     assert worker.docker is False
