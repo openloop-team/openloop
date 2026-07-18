@@ -29,6 +29,7 @@ from openloop.broker_runtime.docker_policy import (
     LABEL_ROLE,
     derive_generation_names,
 )
+from openloop.tools.openhands_relay import RelayMode
 
 
 NOW = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
@@ -400,6 +401,35 @@ async def test_ensure_replays_without_duplicate_resources(short_root):
 
     assert sum(command.argv[1] == "create" for command in docker.calls) == first_creates
     assert len(health.calls) == 2
+
+
+async def test_quiesce_replaces_only_relay_and_replays_checkpoint_mode(short_root):
+    driver, docker, health = _driver(short_root)
+    await driver.ensure(_spec())
+    names = derive_generation_names(_spec().identity)
+    agent_before = docker.containers[names.agent]
+
+    first = await driver.quiesce(_spec())
+    relay_creates = sum(
+        command.argv[1] == "create"
+        and _labels(command.argv)[LABEL_ROLE] == "relay"
+        for command in docker.calls
+    )
+    second = await driver.quiesce(_spec())
+
+    assert first.endpoint.mode is RelayMode.CHECKPOINT
+    assert second.endpoint == first.endpoint
+    assert first.observation.complete
+    assert docker.containers[names.agent] is agent_before
+    assert docker.containers[names.agent]["State"]["Status"] == "running"
+    assert docker.containers[names.relay]["State"]["Status"] == "running"
+    assert relay_creates == 2
+    assert sum(
+        command.argv[1] == "create"
+        and _labels(command.argv)[LABEL_ROLE] == "relay"
+        for command in docker.calls
+    ) == relay_creates
+    assert health.calls[-1].compiled_relay.endpoint.mode is RelayMode.CHECKPOINT
 
 
 async def test_concurrent_ensure_serializes_one_generation_and_reclaims_lock(

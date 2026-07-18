@@ -16,6 +16,7 @@ from .contract import (
     GenerationObservation,
     GenerationRuntimeIdentity,
     OpenHandsGenerationSpec,
+    QuiescedGeneration,
     ReleaseObservation,
     RuntimeDriver,
     RuntimeExpired,
@@ -41,13 +42,15 @@ class InMemoryRuntimeDriver(RuntimeDriver):
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._maximum_lifetime_seconds = maximum_lifetime_seconds
         self._specs: dict[GenerationRuntimeIdentity, OpenHandsGenerationSpec] = {}
+        self._modes: dict[GenerationRuntimeIdentity, RelayMode] = {}
 
     @property
     def maximum_lifetime_seconds(self) -> int:
         return self._maximum_lifetime_seconds
 
-    def describe_endpoint(
-        self, spec: OpenHandsGenerationSpec
+    @staticmethod
+    def _endpoint(
+        spec: OpenHandsGenerationSpec, mode: RelayMode
     ) -> RelayClientEndpoint:
         if not isinstance(spec, OpenHandsGenerationSpec):
             raise TypeError("spec must be an OpenHandsGenerationSpec")
@@ -57,8 +60,13 @@ class InMemoryRuntimeDriver(RuntimeDriver):
             conversation_id=spec.conversation_id,
             relay_capability=spec.relay_capability,
             session_api_key=spec.session_api_key,
-            mode=RelayMode.RUNNING,
+            mode=mode,
         ).endpoint
+
+    def describe_endpoint(
+        self, spec: OpenHandsGenerationSpec
+    ) -> RelayClientEndpoint:
+        return self._endpoint(spec, RelayMode.RUNNING)
 
     def _expired(self, identity: GenerationRuntimeIdentity) -> bool:
         return self._clock() >= identity.deadline
@@ -78,11 +86,39 @@ class InMemoryRuntimeDriver(RuntimeDriver):
             raise RuntimeIdentityConflict(
                 "generation identity was reused with different runtime inputs"
             )
+        if self._modes.get(identity) is RelayMode.CHECKPOINT:
+            raise RuntimeIdentityConflict(
+                "quiesced generation cannot return to running mode"
+            )
         self._specs[identity] = spec
+        self._modes[identity] = RelayMode.RUNNING
         observation = await self.inspect(identity)
         return EnsuredGeneration(
             handle=identity.opaque_handle,
             endpoint=self.describe_endpoint(spec),
+            observation=observation,
+        )
+
+    async def quiesce(
+        self, spec: OpenHandsGenerationSpec
+    ) -> QuiescedGeneration:
+        if not isinstance(spec, OpenHandsGenerationSpec):
+            raise TypeError("spec must be an OpenHandsGenerationSpec")
+        identity = spec.identity
+        if self._expired(identity):
+            raise RuntimeExpired("generation execution deadline has elapsed")
+        existing = self._specs.get(identity)
+        if existing is None:
+            raise RuntimeUnavailable("generation is not present")
+        if existing != spec:
+            raise RuntimeIdentityConflict(
+                "generation identity was reused with different runtime inputs"
+            )
+        self._modes[identity] = RelayMode.CHECKPOINT
+        observation = await self.inspect(identity)
+        return QuiescedGeneration(
+            handle=identity.opaque_handle,
+            endpoint=self._endpoint(spec, RelayMode.CHECKPOINT),
             observation=observation,
         )
 
@@ -118,6 +154,7 @@ class InMemoryRuntimeDriver(RuntimeDriver):
         if not isinstance(identity, GenerationRuntimeIdentity):
             raise TypeError("identity must be a GenerationRuntimeIdentity")
         self._specs.pop(identity, None)
+        self._modes.pop(identity, None)
         return ReleaseObservation(identity=identity, released=True)
 
 

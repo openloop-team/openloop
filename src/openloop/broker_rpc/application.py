@@ -16,7 +16,7 @@ from .audit import (
     RpcAuditRecord,
     RpcAuditSink,
 )
-from .capability import CapabilityProblem, JobCapabilityAuthority
+from .capability import CapabilityProblem, JobCapability, JobCapabilityAuthority
 from .coordinator import (
     BrokerRpcPolicy,
     SegmentCoordinator,
@@ -35,8 +35,14 @@ from .models import (
     RPC_VERSION,
     CreateJobPayload,
     CreateJobResult,
+    FinalizeJobPayload,
+    FinalizeJobResult,
     InspectJobPayload,
     InspectJobResult,
+    QuiesceSegmentPayload,
+    QuiesceSegmentResult,
+    ReleaseSegmentPayload,
+    ReleaseSegmentResult,
     RpcRequest,
     RpcResponse,
     RpcResult,
@@ -56,6 +62,11 @@ _COORDINATOR_FAILURES = {
         RpcErrorCode.STATE_CONFLICT,
         AuditDecision.DENIED,
         AuditReason.STATE_CONFLICT,
+    ),
+    SegmentCoordinatorCode.INVALID_RECEIPT: (
+        RpcErrorCode.INVALID_RECEIPT,
+        AuditDecision.DENIED,
+        AuditReason.INVALID_RECEIPT,
     ),
     SegmentCoordinatorCode.RUNTIME_UNAVAILABLE: (
         RpcErrorCode.RUNTIME_UNAVAILABLE,
@@ -247,6 +258,12 @@ class BrokerRpcApplication:
             return await self._create_job(request, peer, principal)
         if request.method is WorkloadIntent.START_SEGMENT:
             return await self._start_segment(request, peer, principal)
+        if request.method is WorkloadIntent.QUIESCE_SEGMENT:
+            return await self._quiesce_segment(request, peer, principal)
+        if request.method is WorkloadIntent.RELEASE_SEGMENT:
+            return await self._release_segment(request, peer, principal)
+        if request.method is WorkloadIntent.FINALIZE_JOB:
+            return await self._finalize_job(request, peer, principal)
         if request.method is WorkloadIntent.INSPECT_JOB:
             return await self._inspect_job(request, peer, principal)
         return await self._failure(
@@ -425,6 +442,243 @@ class BrokerRpcApplication:
                 job_id=payload.job_id,
             )
 
+        if not await self._audit(
+            request,
+            peer,
+            principal,
+            AuditDecision.ALLOWED,
+            AuditReason.ALLOWED,
+            job_id=payload.job_id,
+            operation_id=result.operation_id,
+        ):
+            return self._response(request, failure=RpcErrorCode.INTERNAL)
+        return self._response(request, result=result)
+
+    async def _authorize_job(
+        self,
+        request: RpcRequest,
+        peer: PeerCredentials,
+        principal: WorkloadPrincipal,
+        job_id: UUID,
+        capability: JobCapability,
+    ) -> RpcResponse | None:
+        try:
+            authorization = await self._ledger.inspect_job_authorization(
+                principal.owner, job_id
+            )
+            if not principal.isolation_mode.allows(
+                authorization.minimum_isolation
+            ):
+                raise PermissionError
+            if not self._capability_authority.verify(
+                principal.owner,
+                job_id,
+                authorization.authorization,
+                capability,
+            ):
+                raise PermissionError
+        except (JobNotFound, OwnerMismatch, PermissionError):
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                RpcErrorCode.NOT_FOUND_OR_UNAUTHORIZED,
+                AuditDecision.DENIED,
+                AuditReason.NOT_FOUND_OR_UNAUTHORIZED,
+                job_id=job_id,
+            )
+        except Exception:
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                RpcErrorCode.INTERNAL,
+                AuditDecision.ERROR,
+                AuditReason.INTERNAL,
+                job_id=job_id,
+            )
+        return None
+
+    async def _quiesce_segment(
+        self,
+        request: RpcRequest,
+        peer: PeerCredentials,
+        principal: WorkloadPrincipal,
+    ) -> RpcResponse:
+        payload = request.payload
+        capability = request.job_capability
+        if not isinstance(payload, QuiesceSegmentPayload) or not isinstance(
+            capability, JobCapability
+        ):
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                RpcErrorCode.INTERNAL,
+                AuditDecision.ERROR,
+                AuditReason.INTERNAL,
+            )
+        denied = await self._authorize_job(
+            request, peer, principal, payload.job_id, capability
+        )
+        if denied is not None:
+            return denied
+        try:
+            result = await self._segment_coordinator.quiesce_segment(
+                principal.owner, payload
+            )
+            if not isinstance(result, QuiesceSegmentResult):
+                raise TypeError("coordinator returned an invalid quiesce result")
+        except SegmentCoordinatorProblem as error:
+            code, decision, reason = _COORDINATOR_FAILURES[error.code]
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                code,
+                decision,
+                reason,
+                job_id=payload.job_id,
+                operation_id=error.operation_id,
+            )
+        except Exception:
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                RpcErrorCode.INTERNAL,
+                AuditDecision.ERROR,
+                AuditReason.INTERNAL,
+                job_id=payload.job_id,
+            )
+        if not await self._audit(
+            request,
+            peer,
+            principal,
+            AuditDecision.ALLOWED,
+            AuditReason.ALLOWED,
+            job_id=payload.job_id,
+            operation_id=result.operation_id,
+        ):
+            return self._response(request, failure=RpcErrorCode.INTERNAL)
+        return self._response(request, result=result)
+
+    async def _release_segment(
+        self,
+        request: RpcRequest,
+        peer: PeerCredentials,
+        principal: WorkloadPrincipal,
+    ) -> RpcResponse:
+        payload = request.payload
+        capability = request.job_capability
+        if not isinstance(payload, ReleaseSegmentPayload) or not isinstance(
+            capability, JobCapability
+        ):
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                RpcErrorCode.INTERNAL,
+                AuditDecision.ERROR,
+                AuditReason.INTERNAL,
+            )
+        denied = await self._authorize_job(
+            request, peer, principal, payload.job_id, capability
+        )
+        if denied is not None:
+            return denied
+        try:
+            result = await self._segment_coordinator.release_segment(
+                principal.owner, payload
+            )
+            if not isinstance(result, ReleaseSegmentResult):
+                raise TypeError("coordinator returned an invalid release result")
+        except SegmentCoordinatorProblem as error:
+            code, decision, reason = _COORDINATOR_FAILURES[error.code]
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                code,
+                decision,
+                reason,
+                job_id=payload.job_id,
+                operation_id=error.operation_id,
+            )
+        except Exception:
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                RpcErrorCode.INTERNAL,
+                AuditDecision.ERROR,
+                AuditReason.INTERNAL,
+                job_id=payload.job_id,
+            )
+        if not await self._audit(
+            request,
+            peer,
+            principal,
+            AuditDecision.ALLOWED,
+            AuditReason.ALLOWED,
+            job_id=payload.job_id,
+            operation_id=result.operation_id,
+        ):
+            return self._response(request, failure=RpcErrorCode.INTERNAL)
+        return self._response(request, result=result)
+
+    async def _finalize_job(
+        self,
+        request: RpcRequest,
+        peer: PeerCredentials,
+        principal: WorkloadPrincipal,
+    ) -> RpcResponse:
+        payload = request.payload
+        capability = request.job_capability
+        if not isinstance(payload, FinalizeJobPayload) or not isinstance(
+            capability, JobCapability
+        ):
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                RpcErrorCode.INTERNAL,
+                AuditDecision.ERROR,
+                AuditReason.INTERNAL,
+            )
+        denied = await self._authorize_job(
+            request, peer, principal, payload.job_id, capability
+        )
+        if denied is not None:
+            return denied
+        try:
+            result = await self._segment_coordinator.finalize_job(
+                principal.owner, payload
+            )
+            if not isinstance(result, FinalizeJobResult):
+                raise TypeError("coordinator returned an invalid finalize result")
+        except SegmentCoordinatorProblem as error:
+            code, decision, reason = _COORDINATOR_FAILURES[error.code]
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                code,
+                decision,
+                reason,
+                job_id=payload.job_id,
+                operation_id=error.operation_id,
+            )
+        except Exception:
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                RpcErrorCode.INTERNAL,
+                AuditDecision.ERROR,
+                AuditReason.INTERNAL,
+                job_id=payload.job_id,
+            )
         if not await self._audit(
             request,
             peer,

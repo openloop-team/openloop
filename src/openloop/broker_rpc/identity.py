@@ -33,6 +33,9 @@ class WorkloadIntent(str, Enum):
     CREATE_JOB = "CREATE_JOB"
     INSPECT_JOB = "INSPECT_JOB"
     START_SEGMENT = "START_SEGMENT"
+    QUIESCE_SEGMENT = "QUIESCE_SEGMENT"
+    RELEASE_SEGMENT = "RELEASE_SEGMENT"
+    FINALIZE_JOB = "FINALIZE_JOB"
 
 
 class IdentityProblem(Exception):

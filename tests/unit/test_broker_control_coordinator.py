@@ -3,13 +3,25 @@ import os
 from pathlib import Path
 from uuid import UUID
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
 from openloop.broker.ledger import BrokerLedger
 from openloop.broker.memory import InMemoryBrokerRepository
-from openloop.broker.models import BrokerOwner, GenerationState, JobState
+from openloop.broker.models import (
+    BrokerOwner,
+    GenerationState,
+    JobState,
+    ReleaseTarget,
+    TerminalOutcome,
+    VerifiedCheckpointReceipt,
+)
 from openloop.broker_control.coordinator import BrokerSegmentCoordinator
 from openloop.broker_control.durable import LocalDurableStateAdapter
+from openloop.broker_control.receipts import (
+    CheckpointReceiptIssuer,
+    CheckpointReceiptVerifier,
+)
 from openloop.broker_control.secrets import (
     RuntimeSecretAuthority,
     RuntimeSecretRootRing,
@@ -19,7 +31,13 @@ from openloop.broker_rpc.coordinator import (
     SegmentCoordinatorCode,
     SegmentCoordinatorProblem,
 )
-from openloop.broker_rpc.models import StartSegmentPayload
+from openloop.broker_rpc.keys import VerificationKeySet
+from openloop.broker_rpc.models import (
+    FinalizeJobPayload,
+    QuiesceSegmentPayload,
+    ReleaseSegmentPayload,
+    StartSegmentPayload,
+)
 from openloop.broker_runtime.contract import (
     GenerationRuntimeIdentity,
     RuntimeHealthFailure,
@@ -30,6 +48,52 @@ from tests.support.broker_repository_contract import MutableClock, SequenceIds
 
 NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
 OWNER = BrokerOwner("tenant-control", "workload-control")
+_RECEIPT_PRIVATE_KEY = Ed25519PrivateKey.generate()
+RECEIPT_ISSUER = CheckpointReceiptIssuer(
+    private_key=_RECEIPT_PRIVATE_KEY,
+    key_id="receipt-v1",
+    issuer="checkpoint-store",
+)
+
+
+def _receipt_verifier() -> CheckpointReceiptVerifier:
+    return CheckpointReceiptVerifier(
+        public_keys=VerificationKeySet(
+            {"receipt-v1": _RECEIPT_PRIVATE_KEY.public_key()}
+        ),
+        issuer="checkpoint-store",
+    )
+
+
+def _signed_receipt(
+    *,
+    job_id,
+    conversation_id,
+    generation: int,
+    barrier_id: str,
+    suffix: str,
+    issuer: CheckpointReceiptIssuer = RECEIPT_ISSUER,
+):
+    return issuer.issue(
+        VerifiedCheckpointReceipt(
+            issuer="checkpoint-store",
+            receipt_id=f"receipt-{suffix}",
+            tenant_id=OWNER.tenant_id,
+            job_id=job_id,
+            conversation_id=conversation_id,
+            generation=generation,
+            barrier_id=barrier_id,
+            artifact_id=f"artifact-{suffix}",
+            base_commit="c" * 40,
+            ciphertext_sha256="d" * 64,
+            plaintext_sha256="e" * 64,
+            byte_count=1024,
+            store_version="store-v1",
+            envelope_version="envelope-v1",
+            key_version="key-v1",
+            durable_write_sequence=generation,
+        )
+    )
 
 
 class CountingRuntime(InMemoryRuntimeDriver):
@@ -37,6 +101,7 @@ class CountingRuntime(InMemoryRuntimeDriver):
         super().__init__(clock=clock, maximum_lifetime_seconds=600)
         self.ensure_calls = 0
         self.inspect_calls = 0
+        self.quiesce_calls = 0
         self.release_calls = 0
         self.fail_ensure = False
 
@@ -49,6 +114,10 @@ class CountingRuntime(InMemoryRuntimeDriver):
     async def inspect(self, identity):
         self.inspect_calls += 1
         return await super().inspect(identity)
+
+    async def quiesce(self, spec):
+        self.quiesce_calls += 1
+        return await super().quiesce(spec)
 
     async def release(self, identity):
         self.release_calls += 1
@@ -123,6 +192,7 @@ async def _fixture(
         runtime_driver=runtime,
         secret_authority=secrets,
         durable_state_adapter=durable,
+        receipt_verifier=_receipt_verifier(),
         clock=clock,
     )
     created = await ledger.create_job(
@@ -168,6 +238,174 @@ async def test_start_replay_and_inspection_reconstruct_identical_access(tmp_path
     assert (durable.binding.state_root / str(job_id) / "agent-server").is_dir()
 
 
+async def test_checkpoint_release_and_finalize_lifecycle_is_replay_safe(tmp_path):
+    coordinator, ledger, _, runtime, _, _, _, job_id = await _fixture(tmp_path)
+    first_start = await coordinator.start_segment(
+        OWNER, StartSegmentPayload(job_id, 0, "start-lifecycle-first")
+    )
+    first_quiesce_payload = QuiesceSegmentPayload(
+        job_id, 1, "quiesce-lifecycle-first", "barrier-first"
+    )
+
+    first_quiesce = await coordinator.quiesce_segment(
+        OWNER, first_quiesce_payload
+    )
+    first_quiesce_replay = await coordinator.quiesce_segment(
+        OWNER, first_quiesce_payload
+    )
+
+    assert first_quiesce.replayed is False
+    assert first_quiesce_replay.replayed is True
+    assert first_quiesce_replay.access == first_quiesce.access
+    assert first_quiesce.access.job_id == first_start.access.job_id
+    assert runtime.quiesce_calls == 2
+    assert await coordinator.inspect_running_access(OWNER, job_id) is None
+
+    first_receipt = _signed_receipt(
+        job_id=job_id,
+        conversation_id=first_start.access.conversation_id,
+        generation=1,
+        barrier_id="barrier-first",
+        suffix="first",
+    )
+    first_release_payload = ReleaseSegmentPayload(
+        job_id,
+        1,
+        "release-lifecycle-first",
+        first_receipt,
+        ReleaseTarget.PARKED,
+    )
+    first_release = await coordinator.release_segment(
+        OWNER, first_release_payload
+    )
+    first_release_replay = await coordinator.release_segment(
+        OWNER, first_release_payload
+    )
+
+    assert first_release.job_state is JobState.PARKED
+    assert first_release_replay.replayed is True
+    assert runtime.release_calls == 2
+
+    second_start = await coordinator.start_segment(
+        OWNER, StartSegmentPayload(job_id, 1, "start-lifecycle-second")
+    )
+    await coordinator.quiesce_segment(
+        OWNER,
+        QuiesceSegmentPayload(
+            job_id, 2, "quiesce-lifecycle-second", "barrier-second"
+        ),
+    )
+    second_receipt = _signed_receipt(
+        job_id=job_id,
+        conversation_id=second_start.access.conversation_id,
+        generation=2,
+        barrier_id="barrier-second",
+        suffix="second",
+    )
+    finalizing = await coordinator.release_segment(
+        OWNER,
+        ReleaseSegmentPayload(
+            job_id,
+            2,
+            "release-lifecycle-second",
+            second_receipt,
+            ReleaseTarget.FINALIZING,
+            TerminalOutcome.SUCCESS,
+        ),
+    )
+    finalize_payload = FinalizeJobPayload(
+        job_id, 2, "finalize-lifecycle", TerminalOutcome.SUCCESS
+    )
+    terminal = await coordinator.finalize_job(OWNER, finalize_payload)
+    terminal_replay = await coordinator.finalize_job(OWNER, finalize_payload)
+
+    assert finalizing.job_state is JobState.FINALIZING
+    assert terminal.job_state is JobState.TERMINAL
+    assert terminal_replay.replayed is True
+    snapshot = await ledger.inspect_job_for_recovery(OWNER, job_id)
+    assert snapshot.state is JobState.TERMINAL
+    assert snapshot.terminal_outcome is TerminalOutcome.SUCCESS
+
+
+async def test_release_rejects_invalid_signature_before_ledger_transition(tmp_path):
+    coordinator, ledger, _, _, _, _, _, job_id = await _fixture(tmp_path)
+    started = await coordinator.start_segment(
+        OWNER, StartSegmentPayload(job_id, 0, "start-invalid-receipt")
+    )
+    await coordinator.quiesce_segment(
+        OWNER,
+        QuiesceSegmentPayload(
+            job_id, 1, "quiesce-invalid-receipt", "barrier-invalid"
+        ),
+    )
+    attacker = CheckpointReceiptIssuer(
+        private_key=Ed25519PrivateKey.generate(),
+        key_id="receipt-v1",
+        issuer="checkpoint-store",
+    )
+    receipt = _signed_receipt(
+        job_id=job_id,
+        conversation_id=started.access.conversation_id,
+        generation=1,
+        barrier_id="barrier-invalid",
+        suffix="invalid",
+        issuer=attacker,
+    )
+
+    with pytest.raises(SegmentCoordinatorProblem) as problem:
+        await coordinator.release_segment(
+            OWNER,
+            ReleaseSegmentPayload(
+                job_id,
+                1,
+                "release-invalid-receipt",
+                receipt,
+                ReleaseTarget.PARKED,
+            ),
+        )
+
+    assert problem.value.code is SegmentCoordinatorCode.INVALID_RECEIPT
+    snapshot = await ledger.inspect_job_for_recovery(OWNER, job_id)
+    assert snapshot.state is JobState.ACTIVE
+    assert snapshot.generation_record.state is GenerationState.QUIESCED
+
+
+async def test_release_rejects_signed_receipt_with_wrong_barrier_binding(tmp_path):
+    coordinator, ledger, _, _, _, _, _, job_id = await _fixture(tmp_path)
+    started = await coordinator.start_segment(
+        OWNER, StartSegmentPayload(job_id, 0, "start-wrong-barrier")
+    )
+    await coordinator.quiesce_segment(
+        OWNER,
+        QuiesceSegmentPayload(
+            job_id, 1, "quiesce-wrong-barrier", "barrier-authoritative"
+        ),
+    )
+    receipt = _signed_receipt(
+        job_id=job_id,
+        conversation_id=started.access.conversation_id,
+        generation=1,
+        barrier_id="barrier-wrong",
+        suffix="wrong-barrier",
+    )
+
+    with pytest.raises(SegmentCoordinatorProblem) as problem:
+        await coordinator.release_segment(
+            OWNER,
+            ReleaseSegmentPayload(
+                job_id,
+                1,
+                "release-wrong-barrier",
+                receipt,
+                ReleaseTarget.PARKED,
+            ),
+        )
+
+    assert problem.value.code is SegmentCoordinatorCode.STATE_CONFLICT
+    snapshot = await ledger.inspect_job_for_recovery(OWNER, job_id)
+    assert snapshot.generation_record.state is GenerationState.QUIESCED
+
+
 async def test_same_key_replay_uses_persisted_version_after_root_rotation(
     tmp_path,
 ):
@@ -197,6 +435,7 @@ async def test_same_key_replay_uses_persisted_version_after_root_rotation(
             )
         ),
         durable_state_adapter=durable,
+        receipt_verifier=_receipt_verifier(),
         clock=lambda: NOW,
     )
 
@@ -287,6 +526,7 @@ async def test_exception_after_mark_running_never_cleans_up(tmp_path):
         runtime_driver=runtime,
         secret_authority=secrets,
         durable_state_adapter=durable,
+        receipt_verifier=_receipt_verifier(),
         clock=lambda: NOW,
     )
     replay = await recovered.start_segment(OWNER, payload)
@@ -344,5 +584,6 @@ async def test_constructor_rejects_lease_above_runtime_maximum(tmp_path):
             runtime_driver=runtime,
             secret_authority=authority,
             durable_state_adapter=durable,
+            receipt_verifier=_receipt_verifier(),
             clock=clock,
         )

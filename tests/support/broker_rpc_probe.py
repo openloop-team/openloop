@@ -60,6 +60,15 @@ class DisabledSegmentCoordinator:
     async def inspect_running_access(self, owner, job_id):
         return None
 
+    async def quiesce_segment(self, owner, payload):
+        raise SegmentCoordinatorProblem(SegmentCoordinatorCode.INTERNAL)
+
+    async def release_segment(self, owner, payload):
+        raise SegmentCoordinatorProblem(SegmentCoordinatorCode.INTERNAL)
+
+    async def finalize_job(self, owner, payload):
+        raise SegmentCoordinatorProblem(SegmentCoordinatorCode.INTERNAL)
+
 
 def _read_config() -> dict[str, object]:
     with _CONFIG_PATH.open("r", encoding="utf-8") as stream:

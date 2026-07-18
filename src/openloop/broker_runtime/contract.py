@@ -10,7 +10,7 @@ from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from openloop.broker.models import POSTGRES_BIGINT_MAX
-from openloop.tools.openhands_relay import RelayClientEndpoint
+from openloop.tools.openhands_relay import RelayClientEndpoint, RelayMode
 
 
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
@@ -198,6 +198,29 @@ class EnsuredGeneration:
         )
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class QuiescedGeneration:
+    handle: str
+    endpoint: RelayClientEndpoint = field(repr=False)
+    observation: GenerationObservation
+
+    def __post_init__(self) -> None:
+        if self.handle != self.observation.identity.opaque_handle:
+            raise ValueError("runtime handle does not match generation identity")
+        if not isinstance(self.endpoint, RelayClientEndpoint):
+            raise TypeError("endpoint must be RelayClientEndpoint")
+        if self.endpoint.mode is not RelayMode.CHECKPOINT:
+            raise ValueError("quiesced endpoint must use checkpoint mode")
+        if not self.observation.complete:
+            raise ValueError("quiesced generation must remain complete and healthy")
+
+    def __repr__(self) -> str:
+        return (
+            f"QuiescedGeneration(handle={self.handle!r}, endpoint=<redacted>, "
+            f"observation={self.observation!r})"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ReleaseObservation:
     identity: GenerationRuntimeIdentity
@@ -228,6 +251,10 @@ class RuntimeDriver(Protocol):
         self, identity: GenerationRuntimeIdentity
     ) -> GenerationObservation: ...
 
+    async def quiesce(
+        self, spec: OpenHandsGenerationSpec
+    ) -> QuiescedGeneration: ...
+
     async def release(
         self, identity: GenerationRuntimeIdentity
     ) -> ReleaseObservation: ...
@@ -238,6 +265,7 @@ __all__ = [
     "GenerationObservation",
     "GenerationRuntimeIdentity",
     "OpenHandsGenerationSpec",
+    "QuiescedGeneration",
     "ReleaseObservation",
     "RuntimeDriver",
     "RuntimeDriverError",

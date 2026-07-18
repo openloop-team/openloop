@@ -11,6 +11,10 @@ from openloop.broker.memory import InMemoryBrokerRepository
 from openloop.broker.models import BrokerOwner, IsolationMode
 from openloop.broker_control.coordinator import BrokerSegmentCoordinator
 from openloop.broker_control.durable import LocalDurableStateAdapter
+from openloop.broker_control.receipts import (
+    CheckpointReceiptIssuer,
+    CheckpointReceiptVerifier,
+)
 from openloop.broker_control.secrets import (
     RuntimeSecretAuthority,
     RuntimeSecretRootRing,
@@ -30,6 +34,7 @@ from openloop.broker_rpc.identity import (
     WorkloadIdentityVerifier,
     WorkloadIntent,
 )
+from openloop.broker_rpc.keys import VerificationKeySet
 from openloop.broker_runtime.contract import RuntimeDriver
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 
@@ -46,6 +51,15 @@ class DisabledSegmentCoordinator:
     async def inspect_running_access(self, owner, job_id):
         return None
 
+    async def quiesce_segment(self, owner, payload):
+        raise SegmentCoordinatorProblem(SegmentCoordinatorCode.INTERNAL)
+
+    async def release_segment(self, owner, payload):
+        raise SegmentCoordinatorProblem(SegmentCoordinatorCode.INTERNAL)
+
+    async def finalize_job(self, owner, payload):
+        raise SegmentCoordinatorProblem(SegmentCoordinatorCode.INTERNAL)
+
 
 @dataclass(frozen=True, slots=True)
 class BrokerRpcTestFixture:
@@ -55,6 +69,7 @@ class BrokerRpcTestFixture:
     audit: InMemoryRpcAuditSink
     ledger: BrokerLedger
     coordinator: object
+    receipt_issuer: CheckpointReceiptIssuer
     runtime: RuntimeDriver | None = None
     durable: LocalDurableStateAdapter | None = None
 
@@ -111,6 +126,18 @@ def broker_rpc_test_fixture(
         )
     )
     audit = InMemoryRpcAuditSink(clock=lambda: NOW)
+    receipt_private_key = Ed25519PrivateKey.generate()
+    receipt_issuer = CheckpointReceiptIssuer(
+        private_key=receipt_private_key,
+        key_id="receipt-v1",
+        issuer="checkpoint-store",
+    )
+    receipt_verifier = CheckpointReceiptVerifier(
+        public_keys=VerificationKeySet(
+            {"receipt-v1": receipt_private_key.public_key()}
+        ),
+        issuer="checkpoint-store",
+    )
     runtime = None
     durable = None
     coordinator: object = DisabledSegmentCoordinator()
@@ -132,6 +159,7 @@ def broker_rpc_test_fixture(
                 )
             ),
             durable_state_adapter=durable,
+            receipt_verifier=receipt_verifier,
             clock=clock,
         )
     application = BrokerRpcApplication(
@@ -143,12 +171,13 @@ def broker_rpc_test_fixture(
         segment_coordinator=coordinator,
     )
     return BrokerRpcTestFixture(
-        application,
-        issuer,
-        repository,
-        audit,
-        ledger,
-        coordinator,
-        runtime,
-        durable,
+        application=application,
+        issuer=issuer,
+        repository=repository,
+        audit=audit,
+        ledger=ledger,
+        coordinator=coordinator,
+        receipt_issuer=receipt_issuer,
+        runtime=runtime,
+        durable=durable,
     )

@@ -26,6 +26,7 @@ from openloop.tools.openhands_docker import runtime_server_image
 from openloop.tools.openhands_relay import (
     CONTAINER_RELAY_CAPABILITY_FILE,
     CONTAINER_RELAY_CONFIG_FILE,
+    RelayMode,
 )
 
 
@@ -104,6 +105,16 @@ def test_policy_derives_names_paths_and_fixed_running_relay(tmp_path):
     rendered = repr(policy)
     for secret in (RELAY_CAPABILITY, SESSION_KEY, CONVERSATION_SECRET):
         assert secret not in rendered
+
+
+def test_policy_can_compile_only_the_fixed_checkpoint_relay_variant(tmp_path):
+    policy = DockerGenerationPolicy.build(
+        _config(tmp_path), _spec(), mode=RelayMode.CHECKPOINT
+    )
+
+    assert policy.compiled_relay.endpoint.mode is RelayMode.CHECKPOINT
+    assert b"path_archive" in policy.compiled_relay.haproxy_config
+    assert b"path_websocket" in policy.compiled_relay.haproxy_config
 
 
 def test_policy_refuses_host_socket_over_uds_budget(tmp_path):

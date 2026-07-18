@@ -16,6 +16,7 @@ MAX_BROKER_JSON_BYTES = 16 * 1024
 _TOKEN = re.compile(r"[a-z0-9_-]+\Z")
 _LOWER_HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
 _BASE_COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+_SIGNED_RECEIPT = re.compile(r"[A-Za-z0-9_.-]+\Z")
 
 
 class _StringEnum(str, Enum):
@@ -249,6 +250,22 @@ class JobAuthorizationRecord:
             raise TypeError("minimum_isolation must be an IsolationMode")
         if not isinstance(self.authorization, JobAuthorizationMetadata):
             raise TypeError("authorization must be JobAuthorizationMetadata")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class SignedCheckpointReceipt:
+    """Opaque checkpoint-store assertion; trusted only after signature verification."""
+
+    value: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.value, str)
+            or not self.value.isascii()
+            or not 1 <= len(self.value) <= 16 * 1024
+            or _SIGNED_RECEIPT.fullmatch(self.value) is None
+        ):
+            raise ValueError("signed checkpoint receipt encoding is invalid")
 
 
 @dataclass(frozen=True, slots=True)

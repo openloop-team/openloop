@@ -292,11 +292,15 @@ class DockerGenerationPolicy:
         cls,
         config: DockerRuntimeConfig,
         spec: OpenHandsGenerationSpec,
+        *,
+        mode: RelayMode = RelayMode.RUNNING,
     ) -> "DockerGenerationPolicy":
         if not isinstance(config, DockerRuntimeConfig):
             raise TypeError("config must be a DockerRuntimeConfig")
         if not isinstance(spec, OpenHandsGenerationSpec):
             raise TypeError("spec must be an OpenHandsGenerationSpec")
+        if not isinstance(mode, RelayMode):
+            raise TypeError("mode must be RelayMode")
         names = derive_generation_names(spec.identity)
         paths = derive_generation_paths(config, spec.identity)
         compiled = compile_openhands_relay(
@@ -305,7 +309,7 @@ class DockerGenerationPolicy:
             conversation_id=spec.conversation_id,
             relay_capability=spec.relay_capability,
             session_api_key=spec.session_api_key,
-            mode=RelayMode.RUNNING,
+            mode=mode,
         )
         return cls(config, spec, names, paths, compiled)
 

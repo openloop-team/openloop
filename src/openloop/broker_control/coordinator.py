@@ -30,6 +30,13 @@ from openloop.broker_rpc.coordinator import (
     SegmentCoordinatorProblem,
 )
 from openloop.broker_rpc.models import (
+    CheckpointGenerationAccess,
+    FinalizeJobPayload,
+    FinalizeJobResult,
+    QuiesceSegmentPayload,
+    QuiesceSegmentResult,
+    ReleaseSegmentPayload,
+    ReleaseSegmentResult,
     RunningGenerationAccess,
     StartSegmentPayload,
     StartSegmentResult,
@@ -38,13 +45,19 @@ from openloop.broker_runtime.contract import (
     EnsuredGeneration,
     GenerationRuntimeIdentity,
     OpenHandsGenerationSpec,
+    QuiescedGeneration,
+    ReleaseObservation,
     RuntimeDriver,
     RuntimeDriverError,
     RuntimeExpired,
 )
-from openloop.tools.openhands_relay import RelayClientEndpoint
+from openloop.tools.openhands_relay import RelayClientEndpoint, RelayMode
 
 from .durable import LocalDurableStateAdapter
+from .receipts import (
+    CheckpointReceiptProblem,
+    CheckpointReceiptVerifier,
+)
 from .secrets import (
     DerivedRuntimeSecrets,
     RuntimeSecretAuthority,
@@ -63,6 +76,7 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
         runtime_driver: RuntimeDriver,
         secret_authority: RuntimeSecretAuthority,
         durable_state_adapter: LocalDurableStateAdapter,
+        receipt_verifier: CheckpointReceiptVerifier,
         clock: Callable[[], datetime],
     ) -> None:
         if not isinstance(ledger, BrokerLedger):
@@ -77,6 +91,8 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
             raise TypeError(
                 "durable_state_adapter must be LocalDurableStateAdapter"
             )
+        if not isinstance(receipt_verifier, CheckpointReceiptVerifier):
+            raise TypeError("receipt_verifier must be CheckpointReceiptVerifier")
         if not callable(clock):
             raise TypeError("clock must be callable")
         maximum = runtime_driver.maximum_lifetime_seconds
@@ -93,6 +109,7 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
         self._runtime = runtime_driver
         self._secrets = secret_authority
         self._durable = durable_state_adapter
+        self._receipts = receipt_verifier
         self._clock = clock
 
     def _now(self) -> datetime:
@@ -129,6 +146,8 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
             code = SegmentCoordinatorCode.DEADLINE_EXCEEDED
         elif isinstance(error, RuntimeDriverError):
             code = SegmentCoordinatorCode.RUNTIME_UNAVAILABLE
+        elif isinstance(error, CheckpointReceiptProblem):
+            code = SegmentCoordinatorCode.INVALID_RECEIPT
         elif isinstance(error, BrokerError):
             code = SegmentCoordinatorCode.STATE_CONFLICT
         else:
@@ -303,6 +322,74 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
             session_api_key=endpoint.session_api_key,
         )
 
+    @staticmethod
+    def _checkpoint_access(
+        spec: OpenHandsGenerationSpec,
+        endpoint: RelayClientEndpoint,
+    ) -> CheckpointGenerationAccess:
+        if endpoint.mode is not RelayMode.CHECKPOINT:
+            raise RuntimeError("quiesced runtime endpoint is not checkpoint-only")
+        if endpoint.conversation_id != spec.conversation_id:
+            raise RuntimeError("runtime endpoint identity mismatch")
+        if (
+            endpoint.relay_capability != spec.relay_capability
+            or endpoint.session_api_key != spec.session_api_key
+        ):
+            raise RuntimeError("runtime endpoint credential mismatch")
+        return CheckpointGenerationAccess(
+            job_id=spec.job_id,
+            conversation_id=spec.conversation_id,
+            generation=spec.generation,
+            deadline=spec.deadline,
+            socket_path=endpoint.socket_path,
+            relay_capability=endpoint.relay_capability,
+            session_api_key=endpoint.session_api_key,
+        )
+
+    @staticmethod
+    def _lifecycle_generation(
+        owner: BrokerOwner,
+        ticket: OperationTicket,
+        snapshot: RecoverySnapshot,
+        command: CommandKind,
+    ) -> RecoveryGenerationSnapshot:
+        generation = snapshot.generation_record
+        if (
+            ticket.command is not command
+            or ticket.job_id != snapshot.job_id
+            or ticket.conversation_id != snapshot.conversation_id
+            or ticket.generation is None
+            or snapshot.owner != owner
+            or snapshot.generation != ticket.generation
+            or generation is None
+            or generation.generation != ticket.generation
+        ):
+            raise SegmentCoordinatorProblem(SegmentCoordinatorCode.INTERNAL)
+        return generation
+
+    def _validate_runtime_generation(
+        self,
+        snapshot: RecoverySnapshot,
+        generation: RecoveryGenerationSnapshot,
+    ) -> OpenHandsGenerationSpec:
+        self._fixed_policy(snapshot)
+        if (
+            snapshot.durable_state_ref is None
+            or snapshot.durable_key_version is None
+            or snapshot.durable_digest is None
+            or generation.runtime_ref is None
+            or generation.capability_digest is None
+            or generation.runtime_key_version is None
+            or generation.durable_state_ref != snapshot.durable_state_ref
+            or generation.durable_key_version != snapshot.durable_key_version
+            or generation.durable_digest != snapshot.durable_digest
+        ):
+            raise RuntimeSecretProblem()
+        spec, _ = self._derive_spec(snapshot.owner, snapshot, generation)
+        if generation.runtime_ref != spec.identity.opaque_handle:
+            raise RuntimeSecretProblem()
+        return spec
+
     async def _cleanup_starting(
         self,
         owner: BrokerOwner,
@@ -462,6 +549,250 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
             or completion.command is not CommandKind.MARK_RUNNING
         ):
             raise RuntimeError("mark-running completion mismatch")
+
+    async def quiesce_segment(
+        self,
+        owner: BrokerOwner,
+        payload: QuiesceSegmentPayload,
+    ) -> QuiesceSegmentResult:
+        if not isinstance(owner, BrokerOwner):
+            raise TypeError("owner must be BrokerOwner")
+        if not isinstance(payload, QuiesceSegmentPayload):
+            raise TypeError("payload must be QuiesceSegmentPayload")
+        ticket: OperationTicket | None = None
+        try:
+            ticket = await self._ledger.begin_quiesce(
+                owner,
+                payload.idempotency_key,
+                payload.job_id,
+                payload.expected_generation,
+                payload.barrier_id,
+            )
+            snapshot = await self._ledger.inspect_job_for_recovery(
+                owner, payload.job_id
+            )
+            generation = self._lifecycle_generation(
+                owner, ticket, snapshot, CommandKind.BEGIN_QUIESCE
+            )
+            if (
+                snapshot.state is not JobState.ACTIVE
+                or snapshot.current_generation != generation.generation
+                or generation.barrier_id != payload.barrier_id
+                or generation.state
+                not in {GenerationState.QUIESCING, GenerationState.QUIESCED}
+            ):
+                raise SegmentCoordinatorProblem(
+                    SegmentCoordinatorCode.STATE_CONFLICT,
+                    operation_id=ticket.operation_id,
+                )
+            if generation.state is GenerationState.QUIESCING:
+                if (
+                    snapshot.pending_operation_id != ticket.operation_id
+                    or generation.pending_operation_id != ticket.operation_id
+                ):
+                    raise SegmentCoordinatorProblem(
+                        SegmentCoordinatorCode.STATE_CONFLICT,
+                        operation_id=ticket.operation_id,
+                    )
+            elif (
+                snapshot.pending_operation_id is not None
+                or generation.pending_operation_id is not None
+            ):
+                raise SegmentCoordinatorProblem(
+                    SegmentCoordinatorCode.STATE_CONFLICT,
+                    operation_id=ticket.operation_id,
+                )
+            spec = self._validate_runtime_generation(snapshot, generation)
+            quiesced = await self._runtime.quiesce(spec)
+            if (
+                not isinstance(quiesced, QuiescedGeneration)
+                or quiesced.handle != generation.runtime_ref
+                or quiesced.observation.identity != spec.identity
+            ):
+                raise RuntimeError("runtime quiesce identity mismatch")
+            completion = await self._ledger.mark_quiesced(
+                owner,
+                ticket.operation_id,
+                snapshot.job_id,
+                generation.generation,
+            )
+            if (
+                completion.operation_id != ticket.operation_id
+                or completion.command is not CommandKind.MARK_QUIESCED
+                or completion.job_id != snapshot.job_id
+                or completion.generation != generation.generation
+                or completion.job_state is not JobState.ACTIVE
+                or completion.generation_state is not GenerationState.QUIESCED
+            ):
+                raise RuntimeError("mark-quiesced completion mismatch")
+            return QuiesceSegmentResult(
+                ticket.operation_id,
+                ticket.replayed or completion.replayed,
+                self._checkpoint_access(spec, quiesced.endpoint),
+            )
+        except Exception as error:
+            operation_id = ticket.operation_id if ticket is not None else None
+            raise self._problem(error, operation_id=operation_id) from error
+
+    async def release_segment(
+        self,
+        owner: BrokerOwner,
+        payload: ReleaseSegmentPayload,
+    ) -> ReleaseSegmentResult:
+        if not isinstance(owner, BrokerOwner):
+            raise TypeError("owner must be BrokerOwner")
+        if not isinstance(payload, ReleaseSegmentPayload):
+            raise TypeError("payload must be ReleaseSegmentPayload")
+        ticket: OperationTicket | None = None
+        try:
+            verified = self._receipts.verify(payload.receipt)
+            ticket = await self._ledger.begin_release(
+                owner,
+                payload.idempotency_key,
+                payload.job_id,
+                payload.expected_generation,
+                verified,
+                payload.target,
+                payload.terminal_outcome,
+            )
+            snapshot = await self._ledger.inspect_job_for_recovery(
+                owner, payload.job_id
+            )
+            generation = self._lifecycle_generation(
+                owner, ticket, snapshot, CommandKind.BEGIN_RELEASE
+            )
+            target_state = JobState(payload.target.value)
+            if (
+                generation.state
+                not in {GenerationState.RELEASING, GenerationState.RELEASED}
+                or generation.receipt != verified
+                or generation.release_target is not payload.target
+                or generation.release_terminal_outcome
+                is not payload.terminal_outcome
+            ):
+                raise SegmentCoordinatorProblem(
+                    SegmentCoordinatorCode.STATE_CONFLICT,
+                    operation_id=ticket.operation_id,
+                )
+            if generation.state is GenerationState.RELEASING:
+                if (
+                    snapshot.state is not JobState.ACTIVE
+                    or snapshot.current_generation != generation.generation
+                    or snapshot.pending_operation_id != ticket.operation_id
+                    or generation.pending_operation_id != ticket.operation_id
+                ):
+                    raise SegmentCoordinatorProblem(
+                        SegmentCoordinatorCode.STATE_CONFLICT,
+                        operation_id=ticket.operation_id,
+                    )
+            elif (
+                snapshot.state is not target_state
+                or snapshot.current_generation is not None
+                or snapshot.pending_operation_id is not None
+                or generation.pending_operation_id is not None
+            ):
+                raise SegmentCoordinatorProblem(
+                    SegmentCoordinatorCode.STATE_CONFLICT,
+                    operation_id=ticket.operation_id,
+                )
+            spec = self._validate_runtime_generation(snapshot, generation)
+            released = await self._runtime.release(spec.identity)
+            if (
+                not isinstance(released, ReleaseObservation)
+                or released.identity != spec.identity
+                or not released.released
+                or not released.durable_state_preserved
+            ):
+                raise RuntimeError("runtime release result mismatch")
+            completion = await self._ledger.mark_released(
+                owner,
+                ticket.operation_id,
+                snapshot.job_id,
+                generation.generation,
+            )
+            if (
+                completion.operation_id != ticket.operation_id
+                or completion.command is not CommandKind.MARK_RELEASED
+                or completion.job_id != snapshot.job_id
+                or completion.generation != generation.generation
+                or completion.job_state is not target_state
+                or completion.generation_state is not GenerationState.RELEASED
+            ):
+                raise RuntimeError("mark-released completion mismatch")
+            return ReleaseSegmentResult(
+                ticket.operation_id,
+                ticket.replayed or completion.replayed,
+                completion.job_state,
+                completion.generation_state,
+            )
+        except Exception as error:
+            operation_id = ticket.operation_id if ticket is not None else None
+            raise self._problem(error, operation_id=operation_id) from error
+
+    async def finalize_job(
+        self,
+        owner: BrokerOwner,
+        payload: FinalizeJobPayload,
+    ) -> FinalizeJobResult:
+        if not isinstance(owner, BrokerOwner):
+            raise TypeError("owner must be BrokerOwner")
+        if not isinstance(payload, FinalizeJobPayload):
+            raise TypeError("payload must be FinalizeJobPayload")
+        ticket: OperationTicket | None = None
+        try:
+            ticket = await self._ledger.begin_finalize(
+                owner,
+                payload.idempotency_key,
+                payload.job_id,
+                payload.expected_generation,
+                payload.terminal_outcome,
+            )
+            snapshot = await self._ledger.inspect_job_for_recovery(
+                owner, payload.job_id
+            )
+            if (
+                ticket.command is not CommandKind.BEGIN_FINALIZE
+                or ticket.job_id != snapshot.job_id
+                or ticket.conversation_id != snapshot.conversation_id
+                or ticket.generation != snapshot.generation
+                or snapshot.owner != owner
+                or snapshot.current_generation is not None
+                or snapshot.state not in {JobState.FINALIZING, JobState.TERMINAL}
+                or snapshot.terminal_outcome is not payload.terminal_outcome
+            ):
+                raise SegmentCoordinatorProblem(
+                    SegmentCoordinatorCode.STATE_CONFLICT,
+                    operation_id=ticket.operation_id,
+                )
+            if snapshot.state is JobState.FINALIZING:
+                if snapshot.pending_operation_id != ticket.operation_id:
+                    raise SegmentCoordinatorProblem(
+                        SegmentCoordinatorCode.STATE_CONFLICT,
+                        operation_id=ticket.operation_id,
+                    )
+            elif snapshot.pending_operation_id is not None:
+                raise SegmentCoordinatorProblem(
+                    SegmentCoordinatorCode.STATE_CONFLICT,
+                    operation_id=ticket.operation_id,
+                )
+            completion = await self._ledger.mark_terminal(
+                owner, ticket.operation_id, snapshot.job_id
+            )
+            if (
+                completion.operation_id != ticket.operation_id
+                or completion.command is not CommandKind.MARK_TERMINAL
+                or completion.job_id != snapshot.job_id
+                or completion.job_state is not JobState.TERMINAL
+            ):
+                raise RuntimeError("mark-terminal completion mismatch")
+            return FinalizeJobResult(
+                ticket.operation_id,
+                ticket.replayed or completion.replayed,
+                completion.job_state,
+            )
+        except Exception as error:
+            operation_id = ticket.operation_id if ticket is not None else None
+            raise self._problem(error, operation_id=operation_id) from error
 
     async def inspect_running_access(
         self,

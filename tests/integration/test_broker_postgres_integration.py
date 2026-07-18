@@ -477,7 +477,7 @@ async def test_postgres_concurrent_repeated_setup_is_idempotent(
         async with pool.acquire() as connection:
             assert await connection.fetchval(
                 "SELECT count(*) FROM broker_schema_migrations"
-            ) == 2
+            ) == 3
     finally:
         await second.close()
         await third.close()
@@ -505,7 +505,7 @@ async def test_postgres_concurrent_fresh_setup_serializes_bootstrap():
         async with pool.acquire() as connection:
             assert await connection.fetchval(
                 "SELECT count(*) FROM broker_schema_migrations"
-            ) == 2
+            ) == 3
             assert await connection.fetchval(
                 """
                 SELECT count(*) FROM information_schema.tables
@@ -530,7 +530,7 @@ async def test_postgres_append_only_upgrade_records_checksum(
     await repository.close()
     packaged = _load_packaged_migrations()
     upgrade = Migration.from_bytes(
-        3,
+        4,
         "contract_probe",
         b"CREATE TABLE broker_upgrade_probe (value INTEGER PRIMARY KEY);\n",
     )
@@ -543,7 +543,7 @@ async def test_postgres_append_only_upgrade_records_checksum(
     try:
         async with pool.acquire() as connection:
             row = await connection.fetchrow(
-                "SELECT name, checksum FROM broker_schema_migrations WHERE version = 3"
+                "SELECT name, checksum FROM broker_schema_migrations WHERE version = 4"
             )
             assert dict(row) == {
                 "name": "contract_probe",
@@ -563,7 +563,7 @@ async def test_postgres_append_only_upgrade_records_checksum(
         ),
         (
             "INSERT INTO broker_schema_migrations (version, name, checksum) "
-            "VALUES (3, 'future', repeat('a', 64))",
+            "VALUES (4, 'future', repeat('a', 64))",
             MigrationProblem.FUTURE_VERSION,
         ),
     ],
@@ -591,7 +591,7 @@ async def test_postgres_failed_pending_migration_rolls_back_and_detaches(
     await repository.close()
     packaged = _load_packaged_migrations()
     broken = Migration.from_bytes(
-        3,
+        4,
         "broken",
         (
             b"CREATE TABLE broker_should_rollback (value INTEGER);\n"
@@ -612,4 +612,4 @@ async def test_postgres_failed_pending_migration_rolls_back_and_detaches(
         ) is None
         assert await connection.fetchval(
             "SELECT max(version) FROM broker_schema_migrations"
-        ) == 2
+        ) == 3

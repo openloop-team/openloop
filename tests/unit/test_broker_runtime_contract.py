@@ -13,6 +13,7 @@ from openloop.broker_runtime import (
     RuntimeIdentityConflict,
     RuntimeResourceState,
 )
+from openloop.tools.openhands_relay import RelayMode
 
 
 NOW = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
@@ -130,3 +131,20 @@ async def test_memory_driver_refuses_expired_generation_and_release_is_idempoten
     observation = await driver.inspect(spec.identity)
     assert observation.agent is RuntimeResourceState.ABSENT
     assert observation.expired is True
+
+
+async def test_memory_driver_quiesce_is_idempotent_and_irreversible():
+    driver = InMemoryRuntimeDriver(clock=lambda: NOW)
+    spec = _spec()
+    await driver.ensure(spec)
+
+    first = await driver.quiesce(spec)
+    second = await driver.quiesce(spec)
+
+    assert first == second
+    assert first.endpoint.mode is RelayMode.CHECKPOINT
+    assert first.observation.complete
+    for secret in (RELAY_CAPABILITY, SESSION_KEY, CONVERSATION_SECRET):
+        assert secret not in repr(first)
+    with pytest.raises(RuntimeIdentityConflict, match="quiesced"):
+        await driver.ensure(spec)

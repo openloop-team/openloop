@@ -254,7 +254,13 @@ def test_broker_rpc_dispatch_uses_only_the_narrow_coordinator_port():
             and target.attr == "_segment_coordinator"
         ):
             coordinator_calls.add(node.func.attr)
-    assert coordinator_calls == {"start_segment", "inspect_running_access"}
+    assert coordinator_calls == {
+        "start_segment",
+        "inspect_running_access",
+        "quiesce_segment",
+        "release_segment",
+        "finalize_job",
+    }
 
 
 def test_broker_rpc_client_has_no_generic_public_call_escape_hatch():
@@ -273,6 +279,9 @@ def test_broker_rpc_client_has_no_generic_public_call_escape_hatch():
     }
     assert public_async_methods == {
         "create_job",
+        "finalize_job",
         "inspect_job",
+        "quiesce_segment",
+        "release_segment",
         "start_segment",
     }

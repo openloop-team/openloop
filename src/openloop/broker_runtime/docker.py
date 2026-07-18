@@ -20,6 +20,7 @@ from openloop.tools.openhands_relay import (
     AGENT_SESSION_HEADER,
     RELAY_CAPABILITY_HEADER,
     RelayClientEndpoint,
+    RelayMode,
     RelayRuntimePolicy,
 )
 
@@ -28,6 +29,7 @@ from .contract import (
     GenerationObservation,
     GenerationRuntimeIdentity,
     OpenHandsGenerationSpec,
+    QuiescedGeneration,
     ReleaseObservation,
     RuntimeDriver,
     RuntimeDriverError,
@@ -57,8 +59,11 @@ from .docker_policy import (
     runtime_labels,
 )
 from .filesystem import (
+    cleanup_checkpoint_transition_artifact,
     generation_filesystem_observation,
+    install_checkpoint_relay_config,
     prepare_generation_filesystem,
+    relay_artifact_mode,
     release_generation_filesystem,
 )
 
@@ -949,6 +954,66 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
                                 f"{cleanup_error.__class__.__name__}"
                             )
                 raise
+
+    async def quiesce(
+        self, spec: OpenHandsGenerationSpec
+    ) -> QuiescedGeneration:
+        if not isinstance(spec, OpenHandsGenerationSpec):
+            raise TypeError("spec must be an OpenHandsGenerationSpec")
+        identity = spec.identity
+        self._validate_deadline(identity)
+        async with self._locked(identity):
+            self._validate_deadline(identity)
+            running = DockerGenerationPolicy.build(
+                self.config, spec, mode=RelayMode.RUNNING
+            )
+            checkpoint = DockerGenerationPolicy.build(
+                self.config, spec, mode=RelayMode.CHECKPOINT
+            )
+            await asyncio.to_thread(
+                cleanup_checkpoint_transition_artifact,
+                running.paths,
+                uid=self.config.uid,
+            )
+            mode = await asyncio.to_thread(
+                relay_artifact_mode,
+                running.paths,
+                running.compiled_relay,
+                checkpoint.compiled_relay,
+                uid=self.config.uid,
+            )
+            if mode is RelayMode.RUNNING:
+                await self._stop_remove_container(
+                    identity, running.names, running.paths, "relay"
+                )
+                await asyncio.to_thread(
+                    install_checkpoint_relay_config,
+                    running.paths,
+                    running.compiled_relay,
+                    checkpoint.compiled_relay,
+                    uid=self.config.uid,
+                )
+            await self._ensure_container(checkpoint, "relay")
+            try:
+                await self._health_checker(checkpoint)
+            except RuntimeDriverError:
+                raise
+            except Exception as exc:
+                raise RuntimeHealthFailure(
+                    "checkpoint relay health checker failed"
+                ) from exc
+            observation = await self._observation(
+                identity, spec=spec, healthy=True
+            )
+            if not observation.complete:
+                raise RuntimeHealthFailure(
+                    "generation was incomplete after checkpoint transition"
+                )
+            return QuiescedGeneration(
+                handle=identity.opaque_handle,
+                endpoint=self._endpoint(checkpoint),
+                observation=observation,
+            )
 
     async def _stop_remove_container(
         self,

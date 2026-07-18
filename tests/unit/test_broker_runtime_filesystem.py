@@ -19,9 +19,12 @@ from openloop.broker_runtime.docker_policy import (
 )
 from openloop.broker_runtime.filesystem import (
     generation_filesystem_observation,
+    install_checkpoint_relay_config,
     prepare_generation_filesystem,
+    relay_artifact_mode,
     release_generation_filesystem,
 )
+from openloop.tools.openhands_relay import RelayMode
 
 
 NOW = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
@@ -92,6 +95,96 @@ def test_prepare_installs_exact_artifacts_and_replays(short_root):
     assert generation_filesystem_observation(
         policy.paths, uid=os.getuid()
     ) == (True, True)
+
+
+def test_checkpoint_transition_replaces_only_config_and_replays(short_root):
+    running = _policy(short_root)
+    checkpoint = DockerGenerationPolicy.build(
+        running.config, _spec(), mode=RelayMode.CHECKPOINT
+    )
+    prepare_generation_filesystem(
+        running.paths, running.compiled_relay, uid=os.getuid()
+    )
+    capability_before = (
+        running.paths.artifacts / "relay-capability"
+    ).read_bytes()
+
+    install_checkpoint_relay_config(
+        running.paths,
+        running.compiled_relay,
+        checkpoint.compiled_relay,
+        uid=os.getuid(),
+    )
+    install_checkpoint_relay_config(
+        running.paths,
+        running.compiled_relay,
+        checkpoint.compiled_relay,
+        uid=os.getuid(),
+    )
+
+    assert relay_artifact_mode(
+        running.paths,
+        running.compiled_relay,
+        checkpoint.compiled_relay,
+        uid=os.getuid(),
+    ) is RelayMode.CHECKPOINT
+    assert (running.paths.artifacts / "haproxy.cfg").read_bytes() == (
+        checkpoint.compiled_relay.haproxy_config
+    )
+    assert (
+        running.paths.artifacts / "relay-capability"
+    ).read_bytes() == capability_before
+    assert stat.S_IMODE(
+        (running.paths.artifacts / "haproxy.cfg").stat().st_mode
+    ) == 0o400
+
+
+def test_checkpoint_transition_recovers_owned_partial_temp_file(short_root):
+    running = _policy(short_root)
+    checkpoint = DockerGenerationPolicy.build(
+        running.config, _spec(), mode=RelayMode.CHECKPOINT
+    )
+    prepare_generation_filesystem(
+        running.paths, running.compiled_relay, uid=os.getuid()
+    )
+    temporary = running.paths.artifacts / ".haproxy.cfg.checkpoint"
+    temporary.write_bytes(b"interrupted")
+    temporary.chmod(0o600)
+
+    install_checkpoint_relay_config(
+        running.paths,
+        running.compiled_relay,
+        checkpoint.compiled_relay,
+        uid=os.getuid(),
+    )
+
+    assert not temporary.exists()
+    assert relay_artifact_mode(
+        running.paths,
+        running.compiled_relay,
+        checkpoint.compiled_relay,
+        uid=os.getuid(),
+    ) is RelayMode.CHECKPOINT
+
+
+def test_checkpoint_transition_rejects_unsafe_temp_artifact(short_root):
+    running = _policy(short_root)
+    checkpoint = DockerGenerationPolicy.build(
+        running.config, _spec(), mode=RelayMode.CHECKPOINT
+    )
+    prepare_generation_filesystem(
+        running.paths, running.compiled_relay, uid=os.getuid()
+    )
+    temporary = running.paths.artifacts / ".haproxy.cfg.checkpoint"
+    temporary.symlink_to(running.paths.artifacts / "haproxy.cfg")
+
+    with pytest.raises(RuntimeIdentityConflict):
+        install_checkpoint_relay_config(
+            running.paths,
+            running.compiled_relay,
+            checkpoint.compiled_relay,
+            uid=os.getuid(),
+        )
 
 
 def test_prepare_rejects_missing_or_unsafe_configured_root(short_root):

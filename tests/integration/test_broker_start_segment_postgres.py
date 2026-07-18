@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
 from openloop.broker.ledger import BrokerLedger
@@ -15,6 +16,7 @@ from openloop.broker.models import BrokerOwner, GenerationState
 from openloop.broker.postgres import PostgresBrokerRepository
 from openloop.broker_control.coordinator import BrokerSegmentCoordinator
 from openloop.broker_control.durable import LocalDurableStateAdapter
+from openloop.broker_control.receipts import CheckpointReceiptVerifier
 from openloop.broker_control.secrets import (
     RuntimeSecretAuthority,
     RuntimeSecretRootRing,
@@ -25,6 +27,7 @@ from openloop.broker_rpc.coordinator import (
     SegmentCoordinatorProblem,
 )
 from openloop.broker_rpc.models import StartSegmentPayload
+from openloop.broker_rpc.keys import VerificationKeySet
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 from tests.support.broker_repository_contract import SequenceIds
 
@@ -35,6 +38,7 @@ DSN = os.environ.get(
 )
 OWNER = BrokerOwner("tenant-start-postgres", "workload-start-postgres")
 POLICY = BrokerRpcPolicy("default", "docker", "local", 300)
+_RECEIPT_PRIVATE_KEY = Ed25519PrivateKey.generate()
 
 pytestmark = [pytest.mark.integration, pytest.mark.postgres]
 
@@ -111,6 +115,12 @@ def _coordinator(
             state_root=state_root,
             uid=os.getuid(),
             gid=os.getgid(),
+        ),
+        receipt_verifier=CheckpointReceiptVerifier(
+            public_keys=VerificationKeySet(
+                {"receipt-v1": _RECEIPT_PRIVATE_KEY.public_key()}
+            ),
+            issuer="checkpoint-store",
         ),
         clock=lambda: datetime.now(UTC),
     )

@@ -18,6 +18,7 @@ from openloop.broker.models import (
     JobState,
     OperationTicket,
     ReleaseTarget,
+    SignedCheckpointReceipt,
     TerminalOutcome,
     validate_timestamp,
 )
@@ -28,9 +29,16 @@ from .identity import WorkloadIdentityToken, WorkloadIntent
 from .models import (
     CreateJobPayload,
     CreateJobResult,
+    CheckpointGenerationAccess,
+    FinalizeJobPayload,
+    FinalizeJobResult,
     InspectJobPayload,
     InspectJobResult,
     RPC_VERSION,
+    QuiesceSegmentPayload,
+    QuiesceSegmentResult,
+    ReleaseSegmentPayload,
+    ReleaseSegmentResult,
     RunningGenerationAccess,
     RpcRequest,
     RpcResponse,
@@ -170,13 +178,43 @@ def _request_dict(request: RpcRequest) -> dict[str, object]:
     elif request.method is WorkloadIntent.INSPECT_JOB:
         assert isinstance(request.payload, InspectJobPayload)
         payload = {"job_id": str(request.payload.job_id)}
-    else:
-        assert request.method is WorkloadIntent.START_SEGMENT
+    elif request.method is WorkloadIntent.START_SEGMENT:
         assert isinstance(request.payload, StartSegmentPayload)
         payload = {
             "job_id": str(request.payload.job_id),
             "expected_generation": request.payload.expected_generation,
             "idempotency_key": request.payload.idempotency_key,
+        }
+    elif request.method is WorkloadIntent.QUIESCE_SEGMENT:
+        assert isinstance(request.payload, QuiesceSegmentPayload)
+        payload = {
+            "job_id": str(request.payload.job_id),
+            "expected_generation": request.payload.expected_generation,
+            "idempotency_key": request.payload.idempotency_key,
+            "barrier_id": request.payload.barrier_id,
+        }
+    elif request.method is WorkloadIntent.RELEASE_SEGMENT:
+        assert isinstance(request.payload, ReleaseSegmentPayload)
+        payload = {
+            "job_id": str(request.payload.job_id),
+            "expected_generation": request.payload.expected_generation,
+            "idempotency_key": request.payload.idempotency_key,
+            "receipt": request.payload.receipt.value,
+            "target": request.payload.target.value,
+            "terminal_outcome": (
+                request.payload.terminal_outcome.value
+                if request.payload.terminal_outcome is not None
+                else None
+            ),
+        }
+    else:
+        assert request.method is WorkloadIntent.FINALIZE_JOB
+        assert isinstance(request.payload, FinalizeJobPayload)
+        payload = {
+            "job_id": str(request.payload.job_id),
+            "expected_generation": request.payload.expected_generation,
+            "idempotency_key": request.payload.idempotency_key,
+            "terminal_outcome": request.payload.terminal_outcome.value,
         }
     return {
         "version": request.version,
@@ -225,7 +263,7 @@ def decode_request(frame: bytes) -> RpcRequest:
         elif method is WorkloadIntent.INSPECT_JOB:
             payload_value = _exact(value["payload"], {"job_id"})
             payload = InspectJobPayload(_uuid(payload_value["job_id"]))
-        else:
+        elif method is WorkloadIntent.START_SEGMENT:
             payload_value = _exact(
                 value["payload"],
                 {"job_id", "expected_generation", "idempotency_key"},
@@ -234,6 +272,63 @@ def decode_request(frame: bytes) -> RpcRequest:
                 _uuid(payload_value["job_id"]),
                 _integer(payload_value["expected_generation"]),
                 _text(payload_value["idempotency_key"]),
+            )
+        elif method is WorkloadIntent.QUIESCE_SEGMENT:
+            payload_value = _exact(
+                value["payload"],
+                {
+                    "job_id",
+                    "expected_generation",
+                    "idempotency_key",
+                    "barrier_id",
+                },
+            )
+            payload = QuiesceSegmentPayload(
+                _uuid(payload_value["job_id"]),
+                _integer(payload_value["expected_generation"]),
+                _text(payload_value["idempotency_key"]),
+                _text(payload_value["barrier_id"]),
+            )
+        elif method is WorkloadIntent.RELEASE_SEGMENT:
+            payload_value = _exact(
+                value["payload"],
+                {
+                    "job_id",
+                    "expected_generation",
+                    "idempotency_key",
+                    "receipt",
+                    "target",
+                    "terminal_outcome",
+                },
+            )
+            payload = ReleaseSegmentPayload(
+                _uuid(payload_value["job_id"]),
+                _integer(payload_value["expected_generation"]),
+                _text(payload_value["idempotency_key"]),
+                SignedCheckpointReceipt(_text(payload_value["receipt"])),
+                ReleaseTarget(_text(payload_value["target"])),
+                (
+                    TerminalOutcome(_text(payload_value["terminal_outcome"]))
+                    if payload_value["terminal_outcome"] is not None
+                    else None
+                ),
+            )
+        else:
+            assert method is WorkloadIntent.FINALIZE_JOB
+            payload_value = _exact(
+                value["payload"],
+                {
+                    "job_id",
+                    "expected_generation",
+                    "idempotency_key",
+                    "terminal_outcome",
+                },
+            )
+            payload = FinalizeJobPayload(
+                _uuid(payload_value["job_id"]),
+                _integer(payload_value["expected_generation"]),
+                _text(payload_value["idempotency_key"]),
+                TerminalOutcome(_text(payload_value["terminal_outcome"])),
             )
         return RpcRequest(
             version=version,
@@ -520,6 +615,33 @@ def _decode_access(value: object) -> RunningGenerationAccess:
         raise RpcProtocolProblem() from error
 
 
+def _decode_checkpoint_access(value: object) -> CheckpointGenerationAccess:
+    item = _exact(
+        value,
+        {
+            "job_id",
+            "conversation_id",
+            "generation",
+            "deadline",
+            "socket_path",
+            "relay_capability",
+            "session_api_key",
+        },
+    )
+    try:
+        return CheckpointGenerationAccess(
+            job_id=_uuid(item["job_id"]),
+            conversation_id=_uuid(item["conversation_id"]),
+            generation=_integer(item["generation"]),
+            deadline=_timestamp(item["deadline"]),
+            socket_path=Path(_text(item["socket_path"])),
+            relay_capability=_text(item["relay_capability"]),
+            session_api_key=_text(item["session_api_key"]),
+        )
+    except (TypeError, ValueError) as error:
+        raise RpcProtocolProblem() from error
+
+
 def _response_dict(response: RpcResponse) -> dict[str, object]:
     result = None
     error = None
@@ -545,6 +667,28 @@ def _response_dict(response: RpcResponse) -> dict[str, object]:
             "operation_id": str(response.result.operation_id),
             "replayed": response.result.replayed,
             "access": _access_dict(response.result.access),
+        }
+    elif isinstance(response.result, QuiesceSegmentResult):
+        result = {
+            "type": WorkloadIntent.QUIESCE_SEGMENT.value,
+            "operation_id": str(response.result.operation_id),
+            "replayed": response.result.replayed,
+            "access": _access_dict(response.result.access),
+        }
+    elif isinstance(response.result, ReleaseSegmentResult):
+        result = {
+            "type": WorkloadIntent.RELEASE_SEGMENT.value,
+            "operation_id": str(response.result.operation_id),
+            "replayed": response.result.replayed,
+            "job_state": response.result.job_state.value,
+            "generation_state": response.result.generation_state.value,
+        }
+    elif isinstance(response.result, FinalizeJobResult):
+        result = {
+            "type": WorkloadIntent.FINALIZE_JOB.value,
+            "operation_id": str(response.result.operation_id),
+            "replayed": response.result.replayed,
+            "job_state": response.result.job_state.value,
         }
     else:
         assert response.failure is not None
@@ -612,6 +756,52 @@ def decode_response(frame: bytes) -> RpcResponse:
                     _uuid(item["operation_id"]),
                     replayed,
                     _decode_access(item["access"]),
+                )
+            elif result_type == WorkloadIntent.QUIESCE_SEGMENT.value:
+                item = _exact(
+                    result,
+                    {"type", "operation_id", "replayed", "access"},
+                )
+                replayed = item["replayed"]
+                if type(replayed) is not bool:
+                    raise RpcProtocolProblem()
+                decoded = QuiesceSegmentResult(
+                    _uuid(item["operation_id"]),
+                    replayed,
+                    _decode_checkpoint_access(item["access"]),
+                )
+            elif result_type == WorkloadIntent.RELEASE_SEGMENT.value:
+                item = _exact(
+                    result,
+                    {
+                        "type",
+                        "operation_id",
+                        "replayed",
+                        "job_state",
+                        "generation_state",
+                    },
+                )
+                replayed = item["replayed"]
+                if type(replayed) is not bool:
+                    raise RpcProtocolProblem()
+                decoded = ReleaseSegmentResult(
+                    _uuid(item["operation_id"]),
+                    replayed,
+                    JobState(_text(item["job_state"])),
+                    GenerationState(_text(item["generation_state"])),
+                )
+            elif result_type == WorkloadIntent.FINALIZE_JOB.value:
+                item = _exact(
+                    result,
+                    {"type", "operation_id", "replayed", "job_state"},
+                )
+                replayed = item["replayed"]
+                if type(replayed) is not bool:
+                    raise RpcProtocolProblem()
+                decoded = FinalizeJobResult(
+                    _uuid(item["operation_id"]),
+                    replayed,
+                    JobState(_text(item["job_state"])),
                 )
             else:
                 raise RpcProtocolProblem()

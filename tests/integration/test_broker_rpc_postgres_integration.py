@@ -12,7 +12,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
 from openloop.broker.ledger import BrokerLedger
-from openloop.broker.models import BrokerOwner, IsolationMode
+from openloop.broker.models import (
+    BrokerOwner,
+    IsolationMode,
+    ReleaseTarget,
+    SignedCheckpointReceipt,
+    TerminalOutcome,
+)
 from openloop.broker.postgres import PostgresBrokerRepository
 from openloop.broker_rpc.application import BrokerRpcApplication, BrokerRpcPolicy
 from openloop.broker_rpc.audit import PeerCredentials, PostgresRpcAuditSink
@@ -34,9 +40,13 @@ from openloop.broker_rpc.identity import (
 from openloop.broker_rpc.models import (
     CreateJobPayload,
     CreateJobResult,
+    FinalizeJobPayload,
     InspectJobPayload,
+    QuiesceSegmentPayload,
     RPC_VERSION,
+    ReleaseSegmentPayload,
     RpcRequest,
+    StartSegmentPayload,
 )
 from tests.support.broker_repository_contract import SequenceIds
 
@@ -54,6 +64,15 @@ class DisabledSegmentCoordinator:
 
     async def inspect_running_access(self, owner, job_id):
         return None
+
+    async def quiesce_segment(self, owner, payload):
+        raise SegmentCoordinatorProblem(SegmentCoordinatorCode.INTERNAL)
+
+    async def release_segment(self, owner, payload):
+        raise SegmentCoordinatorProblem(SegmentCoordinatorCode.INTERNAL)
+
+    async def finalize_job(self, owner, payload):
+        raise SegmentCoordinatorProblem(SegmentCoordinatorCode.INTERNAL)
 
 
 OWNER = BrokerOwner("tenant-a", "workload-a")
@@ -223,6 +242,76 @@ async def test_concurrent_exact_create_persists_one_capability_digest_and_two_au
         ),
     }
     assert first.result.capability.value not in encoded_job
+
+
+async def test_postgres_audit_accepts_every_reviewed_lifecycle_method(
+    rpc_postgres,
+):
+    fixture = rpc_postgres
+    created_response = await fixture.app.handle(
+        fixture.create_request("rpc-postgres-lifecycle-create"), PEER
+    )
+    created = created_response.result
+    assert isinstance(created, CreateJobResult)
+    job_id = created.ticket.job_id
+    receipt = SignedCheckpointReceipt("header.payload.signature")
+    requests = (
+        (
+            WorkloadIntent.START_SEGMENT,
+            StartSegmentPayload(job_id, 0, "rpc-postgres-start"),
+        ),
+        (
+            WorkloadIntent.QUIESCE_SEGMENT,
+            QuiesceSegmentPayload(
+                job_id, 0, "rpc-postgres-quiesce", "barrier-postgres"
+            ),
+        ),
+        (
+            WorkloadIntent.RELEASE_SEGMENT,
+            ReleaseSegmentPayload(
+                job_id,
+                0,
+                "rpc-postgres-release",
+                receipt,
+                ReleaseTarget.PARKED,
+            ),
+        ),
+        (
+            WorkloadIntent.FINALIZE_JOB,
+            FinalizeJobPayload(
+                job_id,
+                0,
+                "rpc-postgres-finalize",
+                TerminalOutcome.SUCCESS,
+            ),
+        ),
+    )
+
+    for method, payload in requests:
+        response = await fixture.app.handle(
+            RpcRequest(
+                RPC_VERSION,
+                uuid4(),
+                method,
+                fixture.token(intent=method),
+                created.capability,
+                payload,
+            ),
+            PEER,
+        )
+        assert response.failure.code is RpcErrorCode.INTERNAL
+
+    async with fixture.pool.acquire() as connection:
+        methods = await connection.fetch(
+            "SELECT method FROM broker_rpc_audit ORDER BY sequence"
+        )
+    assert [row["method"] for row in methods] == [
+        "CREATE_JOB",
+        "START_SEGMENT",
+        "QUIESCE_SEGMENT",
+        "RELEASE_SEGMENT",
+        "FINALIZE_JOB",
+    ]
 
 
 async def test_persisted_authorization_survives_restart_and_denials_are_generic(

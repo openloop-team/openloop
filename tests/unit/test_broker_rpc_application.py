@@ -7,7 +7,15 @@ import pytest
 
 from openloop.broker.ledger import BrokerLedger
 from openloop.broker.memory import InMemoryBrokerRepository
-from openloop.broker.models import BrokerOwner, IsolationMode
+from openloop.broker.models import (
+    BrokerOwner,
+    GenerationState,
+    IsolationMode,
+    JobState,
+    ReleaseTarget,
+    SignedCheckpointReceipt,
+    TerminalOutcome,
+)
 from openloop.broker_rpc.application import BrokerRpcApplication, BrokerRpcPolicy
 from openloop.broker_rpc.audit import (
     InMemoryRpcAuditSink,
@@ -31,10 +39,17 @@ from openloop.broker_rpc.identity import (
 )
 from openloop.broker_rpc.models import (
     RPC_VERSION,
+    CheckpointGenerationAccess,
     CreateJobPayload,
     CreateJobResult,
+    FinalizeJobPayload,
+    FinalizeJobResult,
     InspectJobPayload,
     InspectJobResult,
+    QuiesceSegmentPayload,
+    QuiesceSegmentResult,
+    ReleaseSegmentPayload,
+    ReleaseSegmentResult,
     RunningGenerationAccess,
     RpcRequest,
     StartSegmentPayload,
@@ -66,9 +81,18 @@ class FailOnceAuditSink(InMemoryRpcAuditSink):
 class FakeSegmentCoordinator:
     def __init__(self):
         self.start_calls = []
+        self.quiesce_calls = []
+        self.release_calls = []
+        self.finalize_calls = []
         self.inspect_calls = []
         self.start_result = None
+        self.quiesce_result = None
+        self.release_result = None
+        self.finalize_result = None
         self.start_problem = None
+        self.quiesce_problem = None
+        self.release_problem = None
+        self.finalize_problem = None
         self.inspect_access = None
 
     async def start_segment(self, owner, payload):
@@ -82,6 +106,30 @@ class FakeSegmentCoordinator:
     async def inspect_running_access(self, owner, job_id):
         self.inspect_calls.append((owner, job_id))
         return self.inspect_access
+
+    async def quiesce_segment(self, owner, payload):
+        self.quiesce_calls.append((owner, payload))
+        if self.quiesce_problem is not None:
+            raise self.quiesce_problem
+        if self.quiesce_result is None:
+            raise RuntimeError("fake quiesce result was not configured")
+        return self.quiesce_result
+
+    async def release_segment(self, owner, payload):
+        self.release_calls.append((owner, payload))
+        if self.release_problem is not None:
+            raise self.release_problem
+        if self.release_result is None:
+            raise RuntimeError("fake release result was not configured")
+        return self.release_result
+
+    async def finalize_job(self, owner, payload):
+        self.finalize_calls.append((owner, payload))
+        if self.finalize_problem is not None:
+            raise self.finalize_problem
+        if self.finalize_result is None:
+            raise RuntimeError("fake finalize result was not configured")
+        return self.finalize_result
 
 
 def _fixture(*, audit=None, coordinator=None):
@@ -352,6 +400,11 @@ async def test_start_rejects_bad_capability_before_coordinator():
             "state_conflict",
         ),
         (
+            SegmentCoordinatorCode.INVALID_RECEIPT,
+            RpcErrorCode.INVALID_RECEIPT,
+            "invalid_receipt",
+        ),
+        (
             SegmentCoordinatorCode.RUNTIME_UNAVAILABLE,
             RpcErrorCode.RUNTIME_UNAVAILABLE,
             "runtime_unavailable",
@@ -459,3 +512,137 @@ async def test_start_audit_failure_returns_no_access_and_retry_can_replay():
     )
     assert isinstance(replay.result, StartSegmentResult)
     assert replay.result.replayed is True
+
+
+async def test_lifecycle_methods_authorize_dispatch_and_audit_operations():
+    coordinator = FakeSegmentCoordinator()
+    app, issuer, _, audit = _fixture(coordinator=coordinator)
+    created_response = await app.handle(
+        _create_request(issuer, request_number=101), PEER
+    )
+    created = created_response.result
+    assert isinstance(created, CreateJobResult)
+    running = _access(created)
+    checkpoint = CheckpointGenerationAccess(
+        job_id=running.job_id,
+        conversation_id=running.conversation_id,
+        generation=running.generation,
+        deadline=running.deadline,
+        socket_path=running.socket_path,
+        relay_capability=running.relay_capability,
+        session_api_key=running.session_api_key,
+    )
+    coordinator.quiesce_result = QuiesceSegmentResult(
+        UUID("00000000-0000-4000-8000-000000000501"), False, checkpoint
+    )
+    coordinator.release_result = ReleaseSegmentResult(
+        UUID("00000000-0000-4000-8000-000000000502"),
+        False,
+        JobState.PARKED,
+        GenerationState.RELEASED,
+    )
+    coordinator.finalize_result = FinalizeJobResult(
+        UUID("00000000-0000-4000-8000-000000000503"),
+        False,
+        JobState.TERMINAL,
+    )
+    receipt = SignedCheckpointReceipt("header.payload.signature")
+    requests = (
+        RpcRequest(
+            RPC_VERSION,
+            UUID("00000000-0000-4000-8000-000000000102"),
+            WorkloadIntent.QUIESCE_SEGMENT,
+            _token(
+                issuer, intents=frozenset({WorkloadIntent.QUIESCE_SEGMENT})
+            ),
+            created.capability,
+            QuiesceSegmentPayload(
+                created.ticket.job_id,
+                1,
+                "rpc-quiesce-lifecycle",
+                "barrier-lifecycle",
+            ),
+        ),
+        RpcRequest(
+            RPC_VERSION,
+            UUID("00000000-0000-4000-8000-000000000103"),
+            WorkloadIntent.RELEASE_SEGMENT,
+            _token(
+                issuer, intents=frozenset({WorkloadIntent.RELEASE_SEGMENT})
+            ),
+            created.capability,
+            ReleaseSegmentPayload(
+                created.ticket.job_id,
+                1,
+                "rpc-release-lifecycle",
+                receipt,
+                ReleaseTarget.PARKED,
+            ),
+        ),
+        RpcRequest(
+            RPC_VERSION,
+            UUID("00000000-0000-4000-8000-000000000104"),
+            WorkloadIntent.FINALIZE_JOB,
+            _token(issuer, intents=frozenset({WorkloadIntent.FINALIZE_JOB})),
+            created.capability,
+            FinalizeJobPayload(
+                created.ticket.job_id,
+                1,
+                "rpc-finalize-lifecycle",
+                TerminalOutcome.SUCCESS,
+            ),
+        ),
+    )
+
+    responses = [await app.handle(request, PEER) for request in requests]
+
+    assert isinstance(responses[0].result, QuiesceSegmentResult)
+    assert isinstance(responses[1].result, ReleaseSegmentResult)
+    assert isinstance(responses[2].result, FinalizeJobResult)
+    assert coordinator.quiesce_calls == [(OWNER, requests[0].payload)]
+    assert coordinator.release_calls == [(OWNER, requests[1].payload)]
+    assert coordinator.finalize_calls == [(OWNER, requests[2].payload)]
+    records = await audit.records_for_test()
+    assert [record.operation_id for record in records[-3:]] == [
+        coordinator.quiesce_result.operation_id,
+        coordinator.release_result.operation_id,
+        coordinator.finalize_result.operation_id,
+    ]
+
+
+async def test_release_invalid_receipt_is_bounded_and_secret_free():
+    coordinator = FakeSegmentCoordinator()
+    app, issuer, _, audit = _fixture(coordinator=coordinator)
+    created_response = await app.handle(
+        _create_request(issuer, request_number=111), PEER
+    )
+    created = created_response.result
+    assert isinstance(created, CreateJobResult)
+    operation_id = UUID("00000000-0000-4000-8000-000000000511")
+    coordinator.release_problem = SegmentCoordinatorProblem(
+        SegmentCoordinatorCode.INVALID_RECEIPT,
+        operation_id=operation_id,
+    )
+    receipt = SignedCheckpointReceipt("header.payload.signature")
+    request = RpcRequest(
+        RPC_VERSION,
+        UUID("00000000-0000-4000-8000-000000000112"),
+        WorkloadIntent.RELEASE_SEGMENT,
+        _token(issuer, intents=frozenset({WorkloadIntent.RELEASE_SEGMENT})),
+        created.capability,
+        ReleaseSegmentPayload(
+            created.ticket.job_id,
+            1,
+            "rpc-release-invalid",
+            receipt,
+            ReleaseTarget.PARKED,
+        ),
+    )
+
+    response = await app.handle(request, PEER)
+
+    assert response.failure.code is RpcErrorCode.INVALID_RECEIPT
+    record = (await audit.records_for_test())[-1]
+    assert record.reason.value == "invalid_receipt"
+    assert record.operation_id == operation_id
+    assert receipt.value not in repr(record)

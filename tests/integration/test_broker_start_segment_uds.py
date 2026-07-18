@@ -14,6 +14,9 @@ from openloop.broker.models import (
     GenerationState,
     IsolationMode,
     JobState,
+    ReleaseTarget,
+    TerminalOutcome,
+    VerifiedCheckpointReceipt,
 )
 from openloop.broker_rpc.audit import PeerCredentials
 from openloop.broker_rpc.capability import JobCapability
@@ -172,6 +175,133 @@ async def test_real_uds_start_replay_and_inspect(private_paths):
         assert unavailable.snapshot.state is JobState.ACTIVE
         assert unavailable.access is None
         assert runtime.ensure_calls == 2
+    finally:
+        await server.stop()
+
+
+async def test_real_uds_checkpoint_release_and_finalize_lifecycle(private_paths):
+    socket_path, state_root = private_paths
+    runtime = ControlledRuntime()
+    fixture = broker_rpc_test_fixture(
+        state_root=state_root,
+        runtime_driver=runtime,
+    )
+    server = _server(socket_path, fixture)
+    await server.start()
+    try:
+        client = _client(socket_path, fixture, start=20_500)
+        created = await client.create_job("uds-lifecycle-create-01")
+        first_start = await client.start_segment(
+            created.ticket.job_id,
+            0,
+            "uds-lifecycle-start-01",
+            created.capability,
+        )
+        first_quiesce = await client.quiesce_segment(
+            created.ticket.job_id,
+            1,
+            "uds-lifecycle-quiesce-01",
+            "barrier-uds-01",
+            created.capability,
+        )
+        first_receipt = fixture.receipt_issuer.issue(
+            VerifiedCheckpointReceipt(
+                issuer="checkpoint-store",
+                receipt_id="receipt-uds-01",
+                tenant_id=OWNER.tenant_id,
+                job_id=created.ticket.job_id,
+                conversation_id=created.ticket.conversation_id,
+                generation=1,
+                barrier_id="barrier-uds-01",
+                artifact_id="artifact-uds-01",
+                base_commit="c" * 40,
+                ciphertext_sha256="d" * 64,
+                plaintext_sha256="e" * 64,
+                byte_count=2048,
+                store_version="store-v1",
+                envelope_version="envelope-v1",
+                key_version="key-v1",
+                durable_write_sequence=1,
+            )
+        )
+        parked = await client.release_segment(
+            created.ticket.job_id,
+            1,
+            "uds-lifecycle-release-01",
+            first_receipt,
+            ReleaseTarget.PARKED,
+            created.capability,
+        )
+
+        assert first_quiesce.access.generation == first_start.access.generation
+        assert parked.job_state is JobState.PARKED
+        assert parked.generation_state is GenerationState.RELEASED
+        parked_inspection = await client.inspect_job(
+            created.ticket.job_id, created.capability
+        )
+        assert parked_inspection.snapshot.state is JobState.PARKED
+        assert parked_inspection.access is None
+        assert runtime.identity_count == 0
+
+        second_start = await client.start_segment(
+            created.ticket.job_id,
+            1,
+            "uds-lifecycle-start-02",
+            created.capability,
+        )
+        await client.quiesce_segment(
+            created.ticket.job_id,
+            2,
+            "uds-lifecycle-quiesce-02",
+            "barrier-uds-02",
+            created.capability,
+        )
+        second_receipt = fixture.receipt_issuer.issue(
+            VerifiedCheckpointReceipt(
+                issuer="checkpoint-store",
+                receipt_id="receipt-uds-02",
+                tenant_id=OWNER.tenant_id,
+                job_id=created.ticket.job_id,
+                conversation_id=second_start.access.conversation_id,
+                generation=2,
+                barrier_id="barrier-uds-02",
+                artifact_id="artifact-uds-02",
+                base_commit="f" * 40,
+                ciphertext_sha256="1" * 64,
+                plaintext_sha256="2" * 64,
+                byte_count=4096,
+                store_version="store-v1",
+                envelope_version="envelope-v1",
+                key_version="key-v1",
+                durable_write_sequence=2,
+            )
+        )
+        finalizing = await client.release_segment(
+            created.ticket.job_id,
+            2,
+            "uds-lifecycle-release-02",
+            second_receipt,
+            ReleaseTarget.FINALIZING,
+            created.capability,
+            terminal_outcome=TerminalOutcome.SUCCESS,
+        )
+        terminal = await client.finalize_job(
+            created.ticket.job_id,
+            2,
+            "uds-lifecycle-finalize-01",
+            TerminalOutcome.SUCCESS,
+            created.capability,
+        )
+
+        assert finalizing.job_state is JobState.FINALIZING
+        assert terminal.job_state is JobState.TERMINAL
+        terminal_inspection = await client.inspect_job(
+            created.ticket.job_id, created.capability
+        )
+        assert terminal_inspection.snapshot.state is JobState.TERMINAL
+        assert terminal_inspection.snapshot.terminal_outcome is TerminalOutcome.SUCCESS
+        assert terminal_inspection.access is None
+        assert runtime.identity_count == 0
     finally:
         await server.stop()
 

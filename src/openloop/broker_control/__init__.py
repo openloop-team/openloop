@@ -1,6 +1,14 @@
 """Privileged composition adapters for broker-owned workload generations."""
 
 from .coordinator import BrokerSegmentCoordinator
+from .receipts import (
+    CheckpointReceiptIssuer,
+    CheckpointReceiptKey,
+    CheckpointReceiptLocator,
+    CheckpointReceiptProblem,
+    CheckpointReceiptVerifier,
+    receipt_key,
+)
 from .durable import (
     DurableStateDescriptor,
     LocalDurableBinding,
@@ -16,6 +24,12 @@ from .secrets import (
 
 __all__ = [
     "BrokerSegmentCoordinator",
+    "CheckpointReceiptIssuer",
+    "CheckpointReceiptKey",
+    "CheckpointReceiptLocator",
+    "CheckpointReceiptProblem",
+    "CheckpointReceiptVerifier",
+    "receipt_key",
     "DerivedRuntimeSecrets",
     "DurableStateDescriptor",
     "LocalDurableBinding",

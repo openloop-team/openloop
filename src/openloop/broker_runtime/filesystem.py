@@ -10,6 +10,7 @@ from pathlib import Path
 from openloop.tools.openhands_relay import (
     CompiledOpenHandsRelay,
     OpenHandsRelayProfileError,
+    RelayMode,
     install_relay_artifacts,
 )
 
@@ -19,6 +20,16 @@ from .docker_policy import GenerationPaths
 
 _EXPECTED_ROOT_ENTRIES = frozenset({"relay", "socket", "workspace"})
 _EXPECTED_ARTIFACT_ENTRIES = frozenset({"haproxy.cfg", "relay-capability"})
+_CHECKPOINT_TRANSITION_ARTIFACT = ".haproxy.cfg.checkpoint"
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    remaining = memoryview(payload)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise OSError("relay artifact write made no progress")
+        remaining = remaining[written:]
 
 
 def _directory_flags() -> int:
@@ -239,6 +250,178 @@ def generation_filesystem_observation(
     return artifacts_ready, workspace_ready
 
 
+def relay_artifact_mode(
+    paths: GenerationPaths,
+    running: CompiledOpenHandsRelay,
+    checkpoint: CompiledOpenHandsRelay,
+    *,
+    uid: int,
+) -> RelayMode:
+    """Identify an exact installed relay profile without trusting path contents."""
+    if (
+        running.endpoint.mode is not RelayMode.RUNNING
+        or checkpoint.endpoint.mode is not RelayMode.CHECKPOINT
+        or running.job_id != checkpoint.job_id
+        or running.generation != checkpoint.generation
+        or running.capability_file != checkpoint.capability_file
+    ):
+        raise ValueError("relay mode candidates do not describe one generation")
+    try:
+        descriptor = os.open(paths.artifacts, _directory_flags())
+    except OSError as exc:
+        raise RuntimeIdentityConflict(
+            "relay artifact path is not a safe directory"
+        ) from exc
+    try:
+        _check_directory_descriptor(
+            descriptor, name="relay artifacts", uid=uid
+        )
+        if _entries(descriptor, label="relay artifacts") != _EXPECTED_ARTIFACT_ENTRIES:
+            raise RuntimeIdentityConflict(
+                "relay artifact directory entries do not match"
+            )
+        _validate_artifact(
+            descriptor,
+            "relay-capability",
+            running.capability_file.payload,
+            uid=uid,
+        )
+        try:
+            _validate_artifact(
+                descriptor,
+                "haproxy.cfg",
+                running.haproxy_config,
+                uid=uid,
+            )
+            return RelayMode.RUNNING
+        except RuntimeIdentityConflict:
+            _validate_artifact(
+                descriptor,
+                "haproxy.cfg",
+                checkpoint.haproxy_config,
+                uid=uid,
+            )
+            return RelayMode.CHECKPOINT
+    finally:
+        os.close(descriptor)
+
+
+def cleanup_checkpoint_transition_artifact(
+    paths: GenerationPaths, *, uid: int
+) -> None:
+    """Recover a broker-owned interrupted config write without trusting it."""
+    try:
+        descriptor = os.open(paths.artifacts, _directory_flags())
+    except OSError as exc:
+        raise RuntimeIdentityConflict(
+            "relay artifact path is not a safe directory"
+        ) from exc
+    try:
+        _check_directory_descriptor(
+            descriptor, name="relay artifacts", uid=uid
+        )
+        entries = _entries(descriptor, label="relay artifacts")
+        allowed = _EXPECTED_ARTIFACT_ENTRIES | {
+            _CHECKPOINT_TRANSITION_ARTIFACT
+        }
+        if not entries.issubset(allowed):
+            raise RuntimeIdentityConflict(
+                "relay artifact directory entries do not match"
+            )
+        if _CHECKPOINT_TRANSITION_ARTIFACT not in entries:
+            return
+        try:
+            info = os.stat(
+                _CHECKPOINT_TRANSITION_ARTIFACT,
+                dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise RuntimeIdentityConflict(
+                "stale relay transition artifact cannot be inspected"
+            ) from exc
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != uid
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) not in {0o400, 0o600}
+        ):
+            raise RuntimeIdentityConflict(
+                "stale relay transition artifact metadata does not match"
+            )
+        try:
+            os.unlink(_CHECKPOINT_TRANSITION_ARTIFACT, dir_fd=descriptor)
+            os.fsync(descriptor)
+        except OSError as exc:
+            raise RuntimeIdentityConflict(
+                "stale relay transition artifact cannot be removed"
+            ) from exc
+    finally:
+        os.close(descriptor)
+
+
+def install_checkpoint_relay_config(
+    paths: GenerationPaths,
+    running: CompiledOpenHandsRelay,
+    checkpoint: CompiledOpenHandsRelay,
+    *,
+    uid: int,
+) -> None:
+    """Atomically replace only HAProxy policy after the running relay is stopped."""
+    cleanup_checkpoint_transition_artifact(paths, uid=uid)
+    mode = relay_artifact_mode(paths, running, checkpoint, uid=uid)
+    if mode is RelayMode.CHECKPOINT:
+        return
+    try:
+        descriptor = os.open(paths.artifacts, _directory_flags())
+    except OSError as exc:
+        raise RuntimeIdentityConflict(
+            "relay artifact path is not a safe directory"
+        ) from exc
+    temporary = _CHECKPOINT_TRANSITION_ARTIFACT
+    opened: int | None = None
+    try:
+        _check_directory_descriptor(
+            descriptor, name="relay artifacts", uid=uid
+        )
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        try:
+            opened = os.open(temporary, flags, 0o600, dir_fd=descriptor)
+        except FileExistsError:
+            try:
+                os.unlink(temporary, dir_fd=descriptor)
+            except OSError as exc:
+                raise RuntimeIdentityConflict(
+                    "stale relay transition artifact cannot be removed"
+                ) from exc
+            opened = os.open(temporary, flags, 0o600, dir_fd=descriptor)
+        _write_all(opened, checkpoint.haproxy_config)
+        os.fchmod(opened, 0o400)
+        os.fsync(opened)
+        os.close(opened)
+        opened = None
+        os.rename(
+            temporary,
+            "haproxy.cfg",
+            src_dir_fd=descriptor,
+            dst_dir_fd=descriptor,
+        )
+        os.fsync(descriptor)
+    except BaseException:
+        if opened is not None:
+            os.close(opened)
+        try:
+            os.unlink(temporary, dir_fd=descriptor)
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(descriptor)
+    if relay_artifact_mode(paths, running, checkpoint, uid=uid) is not RelayMode.CHECKPOINT:
+        raise RuntimeIdentityConflict("relay checkpoint policy was not installed")
+
+
 def release_generation_filesystem(paths: GenerationPaths, *, uid: int) -> None:
     """Remove only disposable exact-generation paths; preserve durable state."""
     if not paths.root.exists():
@@ -305,7 +488,10 @@ def release_generation_filesystem(paths: GenerationPaths, *, uid: int) -> None:
 
 
 __all__ = [
+    "cleanup_checkpoint_transition_artifact",
     "generation_filesystem_observation",
+    "install_checkpoint_relay_config",
     "prepare_generation_filesystem",
+    "relay_artifact_mode",
     "release_generation_filesystem",
 ]

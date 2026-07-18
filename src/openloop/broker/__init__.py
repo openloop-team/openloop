@@ -32,6 +32,7 @@ from .models import (
     OperationTicket,
     RecoverySnapshot,
     ReleaseTarget,
+    SignedCheckpointReceipt,
     TerminalOutcome,
     VerifiedCheckpointReceipt,
 )
@@ -72,6 +73,7 @@ __all__ = [
     "ReceiptBindingMismatch",
     "RecoverySnapshot",
     "ReleaseTarget",
+    "SignedCheckpointReceipt",
     "StaleGeneration",
     "TerminalOutcome",
     "TransitionEntity",

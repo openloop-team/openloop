@@ -327,6 +327,25 @@ def test_rpc_authorization_migration_is_packaged_and_fail_closed_for_legacy_rows
         assert fragment in sql
 
 
+def test_rpc_lifecycle_migration_allows_only_reviewed_intents():
+    sql = (
+        resources.files("openloop.broker.migrations")
+        .joinpath("0003_rpc_lifecycle.sql")
+        .read_text(encoding="utf-8")
+    )
+    for method in (
+        "CREATE_JOB",
+        "INSPECT_JOB",
+        "START_SEGMENT",
+        "QUIESCE_SEGMENT",
+        "RELEASE_SEGMENT",
+        "FINALIZE_JOB",
+    ):
+        assert f"'{method}'" in sql
+    assert "DROP CONSTRAINT broker_rpc_audit_method_check" in sql
+    assert "ADD CONSTRAINT broker_rpc_audit_method_check" in sql
+
+
 def test_postgres_repository_implements_narrow_protocol():
     assert isinstance(PostgresBrokerRepository(), BrokerRepository)
 

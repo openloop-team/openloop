@@ -6,6 +6,13 @@ from uuid import UUID
 
 import pytest
 
+from openloop.broker.models import (
+    GenerationState,
+    JobState,
+    ReleaseTarget,
+    SignedCheckpointReceipt,
+    TerminalOutcome,
+)
 from openloop.broker_rpc.codec import (
     MAX_RPC_FRAME_BYTES,
     decode_request,
@@ -18,7 +25,14 @@ from openloop.broker_rpc.errors import RpcErrorCode, RpcProtocolProblem
 from openloop.broker_rpc.identity import WorkloadIdentityToken, WorkloadIntent
 from openloop.broker_rpc.models import (
     RPC_VERSION,
+    CheckpointGenerationAccess,
     CreateJobPayload,
+    FinalizeJobPayload,
+    FinalizeJobResult,
+    QuiesceSegmentPayload,
+    QuiesceSegmentResult,
+    ReleaseSegmentPayload,
+    ReleaseSegmentResult,
     RunningGenerationAccess,
     RpcRequest,
     RpcResponse,
@@ -145,3 +159,102 @@ def test_start_request_and_access_response_round_trip_exactly():
     encoded = encode_response(response)
     assert b'"type":"START_SEGMENT"' in encoded
     assert b'"expected_generation":0' in encode_request(request)
+
+
+def test_checkpoint_release_and_finalize_frames_round_trip_exactly():
+    job_id = UUID("00000000-0000-4000-8000-000000000322")
+    conversation_id = UUID("00000000-0000-4000-8000-000000000323")
+    capability = JobCapability("A" * 43)
+    token = WorkloadIdentityToken("header.payload.signature")
+    receipt = SignedCheckpointReceipt("header.payload.signature")
+    checkpoint_access = CheckpointGenerationAccess(
+        job_id=job_id,
+        conversation_id=conversation_id,
+        generation=1,
+        deadline=datetime(2026, 7, 18, 12, 5, tzinfo=UTC),
+        socket_path=Path(f"/run/openloop/jobs/{job_id}/1/agent.sock"),
+        relay_capability="r" * 43,
+        session_api_key="s" * 43,
+    )
+    cases = (
+        (
+            RpcRequest(
+                RPC_VERSION,
+                REQUEST_ID,
+                WorkloadIntent.QUIESCE_SEGMENT,
+                token,
+                capability,
+                QuiesceSegmentPayload(
+                    job_id, 1, "rpc-quiesce-key-01", "barrier-01"
+                ),
+            ),
+            RpcResponse(
+                RPC_VERSION,
+                REQUEST_ID,
+                result=QuiesceSegmentResult(
+                    UUID("00000000-0000-4000-8000-000000000324"),
+                    False,
+                    checkpoint_access,
+                ),
+            ),
+        ),
+        (
+            RpcRequest(
+                RPC_VERSION,
+                REQUEST_ID,
+                WorkloadIntent.RELEASE_SEGMENT,
+                token,
+                capability,
+                ReleaseSegmentPayload(
+                    job_id,
+                    1,
+                    "rpc-release-key-001",
+                    receipt,
+                    ReleaseTarget.FINALIZING,
+                    TerminalOutcome.SUCCESS,
+                ),
+            ),
+            RpcResponse(
+                RPC_VERSION,
+                REQUEST_ID,
+                result=ReleaseSegmentResult(
+                    UUID("00000000-0000-4000-8000-000000000325"),
+                    True,
+                    JobState.FINALIZING,
+                    GenerationState.RELEASED,
+                ),
+            ),
+        ),
+        (
+            RpcRequest(
+                RPC_VERSION,
+                REQUEST_ID,
+                WorkloadIntent.FINALIZE_JOB,
+                token,
+                capability,
+                FinalizeJobPayload(
+                    job_id,
+                    1,
+                    "rpc-finalize-key-01",
+                    TerminalOutcome.SUCCESS,
+                ),
+            ),
+            RpcResponse(
+                RPC_VERSION,
+                REQUEST_ID,
+                result=FinalizeJobResult(
+                    UUID("00000000-0000-4000-8000-000000000326"),
+                    False,
+                    JobState.TERMINAL,
+                ),
+            ),
+        ),
+    )
+
+    for request, response in cases:
+        assert decode_request(encode_request(request)) == request
+        assert decode_response(encode_response(response)) == response
+
+    release_frame = encode_request(cases[1][0])
+    assert receipt.value.encode() in release_frame
+    assert b'"target":"finalizing"' in release_frame

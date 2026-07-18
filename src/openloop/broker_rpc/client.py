@@ -11,6 +11,12 @@ from pathlib import Path
 import struct
 from uuid import UUID, uuid4
 
+from openloop.broker.models import (
+    ReleaseTarget,
+    SignedCheckpointReceipt,
+    TerminalOutcome,
+)
+
 from .capability import JobCapability
 from .codec import (
     MAX_RPC_FRAME_BYTES,
@@ -23,8 +29,14 @@ from .models import (
     RPC_VERSION,
     CreateJobPayload,
     CreateJobResult,
+    FinalizeJobPayload,
+    FinalizeJobResult,
     InspectJobPayload,
     InspectJobResult,
+    QuiesceSegmentPayload,
+    QuiesceSegmentResult,
+    ReleaseSegmentPayload,
+    ReleaseSegmentResult,
     RpcRequest,
     RpcResponse,
     StartSegmentPayload,
@@ -191,5 +203,88 @@ class BrokerRpcClient:
         )
         result = self._result(await self._exchange(request))
         if not isinstance(result, StartSegmentResult):
+            raise BrokerRpcClientProblem()
+        return result
+
+    async def quiesce_segment(
+        self,
+        job_id: UUID,
+        expected_generation: int,
+        idempotency_key: str,
+        barrier_id: str,
+        capability: JobCapability,
+    ) -> QuiesceSegmentResult:
+        request = RpcRequest(
+            RPC_VERSION,
+            self._request_id_factory(),
+            WorkloadIntent.QUIESCE_SEGMENT,
+            await self._identity(WorkloadIntent.QUIESCE_SEGMENT),
+            capability,
+            QuiesceSegmentPayload(
+                job_id,
+                expected_generation,
+                idempotency_key,
+                barrier_id,
+            ),
+        )
+        result = self._result(await self._exchange(request))
+        if not isinstance(result, QuiesceSegmentResult):
+            raise BrokerRpcClientProblem()
+        return result
+
+    async def release_segment(
+        self,
+        job_id: UUID,
+        expected_generation: int,
+        idempotency_key: str,
+        receipt: SignedCheckpointReceipt,
+        target: ReleaseTarget,
+        capability: JobCapability,
+        *,
+        terminal_outcome: TerminalOutcome | None = None,
+    ) -> ReleaseSegmentResult:
+        request = RpcRequest(
+            RPC_VERSION,
+            self._request_id_factory(),
+            WorkloadIntent.RELEASE_SEGMENT,
+            await self._identity(WorkloadIntent.RELEASE_SEGMENT),
+            capability,
+            ReleaseSegmentPayload(
+                job_id,
+                expected_generation,
+                idempotency_key,
+                receipt,
+                target,
+                terminal_outcome,
+            ),
+        )
+        result = self._result(await self._exchange(request))
+        if not isinstance(result, ReleaseSegmentResult):
+            raise BrokerRpcClientProblem()
+        return result
+
+    async def finalize_job(
+        self,
+        job_id: UUID,
+        expected_generation: int,
+        idempotency_key: str,
+        terminal_outcome: TerminalOutcome,
+        capability: JobCapability,
+    ) -> FinalizeJobResult:
+        request = RpcRequest(
+            RPC_VERSION,
+            self._request_id_factory(),
+            WorkloadIntent.FINALIZE_JOB,
+            await self._identity(WorkloadIntent.FINALIZE_JOB),
+            capability,
+            FinalizeJobPayload(
+                job_id,
+                expected_generation,
+                idempotency_key,
+                terminal_outcome,
+            ),
+        )
+        result = self._result(await self._exchange(request))
+        if not isinstance(result, FinalizeJobResult):
             raise BrokerRpcClientProblem()
         return result

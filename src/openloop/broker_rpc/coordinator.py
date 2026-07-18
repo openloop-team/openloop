@@ -15,6 +15,12 @@ from openloop.broker.models import (
 )
 
 from .models import (
+    FinalizeJobPayload,
+    FinalizeJobResult,
+    QuiesceSegmentPayload,
+    QuiesceSegmentResult,
+    ReleaseSegmentPayload,
+    ReleaseSegmentResult,
     RunningGenerationAccess,
     StartSegmentPayload,
     StartSegmentResult,
@@ -40,6 +46,7 @@ class SegmentCoordinatorCode(str, Enum):
     STATE_CONFLICT = "state_conflict"
     RUNTIME_UNAVAILABLE = "runtime_unavailable"
     DEADLINE_EXCEEDED = "deadline_exceeded"
+    INVALID_RECEIPT = "invalid_receipt"
     INTERNAL = "internal"
 
 
@@ -72,6 +79,24 @@ class SegmentCoordinator(Protocol):
         owner: BrokerOwner,
         job_id: UUID,
     ) -> RunningGenerationAccess | None: ...
+
+    async def quiesce_segment(
+        self,
+        owner: BrokerOwner,
+        payload: QuiesceSegmentPayload,
+    ) -> QuiesceSegmentResult: ...
+
+    async def release_segment(
+        self,
+        owner: BrokerOwner,
+        payload: ReleaseSegmentPayload,
+    ) -> ReleaseSegmentResult: ...
+
+    async def finalize_job(
+        self,
+        owner: BrokerOwner,
+        payload: FinalizeJobPayload,
+    ) -> FinalizeJobResult: ...
 
 
 __all__ = [
