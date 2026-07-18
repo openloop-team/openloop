@@ -440,7 +440,7 @@ async def test_postgres_concurrent_repeated_setup_is_idempotent(
         async with pool.acquire() as connection:
             assert await connection.fetchval(
                 "SELECT count(*) FROM broker_schema_migrations"
-            ) == 1
+            ) == 2
     finally:
         await second.close()
         await third.close()
@@ -468,13 +468,13 @@ async def test_postgres_concurrent_fresh_setup_serializes_bootstrap():
         async with pool.acquire() as connection:
             assert await connection.fetchval(
                 "SELECT count(*) FROM broker_schema_migrations"
-            ) == 1
+            ) == 2
             assert await connection.fetchval(
                 """
                 SELECT count(*) FROM information_schema.tables
                 WHERE table_schema = current_schema() AND table_name LIKE 'broker_%'
                 """
-            ) == 5
+            ) == 6
     finally:
         await first.close()
         await second.close()
@@ -491,22 +491,22 @@ async def test_postgres_append_only_upgrade_records_checksum(
 ):
     repository, pool = postgres_repository
     await repository.close()
-    initial = _load_packaged_migrations()[0]
+    packaged = _load_packaged_migrations()
     upgrade = Migration.from_bytes(
-        2,
+        3,
         "contract_probe",
         b"CREATE TABLE broker_upgrade_probe (value INTEGER PRIMARY KEY);\n",
     )
     monkeypatch.setattr(
         "openloop.broker.postgres._load_packaged_migrations",
-        lambda: (initial, upgrade),
+        lambda: (*packaged, upgrade),
     )
     upgraded = PostgresBrokerRepository()
     await upgraded.setup(pool)
     try:
         async with pool.acquire() as connection:
             row = await connection.fetchrow(
-                "SELECT name, checksum FROM broker_schema_migrations WHERE version = 2"
+                "SELECT name, checksum FROM broker_schema_migrations WHERE version = 3"
             )
             assert dict(row) == {
                 "name": "contract_probe",
@@ -526,7 +526,7 @@ async def test_postgres_append_only_upgrade_records_checksum(
         ),
         (
             "INSERT INTO broker_schema_migrations (version, name, checksum) "
-            "VALUES (2, 'future', repeat('a', 64))",
+            "VALUES (3, 'future', repeat('a', 64))",
             MigrationProblem.FUTURE_VERSION,
         ),
     ],
@@ -552,9 +552,9 @@ async def test_postgres_failed_pending_migration_rolls_back_and_detaches(
 ):
     repository, pool = postgres_repository
     await repository.close()
-    initial = _load_packaged_migrations()[0]
+    packaged = _load_packaged_migrations()
     broken = Migration.from_bytes(
-        2,
+        3,
         "broken",
         (
             b"CREATE TABLE broker_should_rollback (value INTEGER);\n"
@@ -563,7 +563,7 @@ async def test_postgres_failed_pending_migration_rolls_back_and_detaches(
     )
     monkeypatch.setattr(
         "openloop.broker.postgres._load_packaged_migrations",
-        lambda: (initial, broken),
+        lambda: (*packaged, broken),
     )
     candidate = PostgresBrokerRepository()
     with pytest.raises(Exception, match="broker_missing_relation"):
@@ -575,4 +575,4 @@ async def test_postgres_failed_pending_migration_rolls_back_and_detaches(
         ) is None
         assert await connection.fetchval(
             "SELECT max(version) FROM broker_schema_migrations"
-        ) == 1
+        ) == 2

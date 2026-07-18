@@ -14,6 +14,9 @@ from .models import (
     BrokerOwner,
     CommandKind,
     GenerationState,
+    IsolationMode,
+    JobAuthorizationMetadata,
+    JobAuthorizationRecord,
     JobSnapshot,
     JobState,
     OperationResult,
@@ -35,6 +38,7 @@ from .models import (
 
 
 _NO_DIGEST = {"digest": False}
+_OMIT_NONE_DIGEST = {"omit_none": True}
 
 
 class _DigestCommand:
@@ -60,7 +64,17 @@ def _require_enum(name: str, value: object, enum_type: type[Any]) -> Any:
 def _canonical_value(value: object) -> object:
     if isinstance(value, UUID):
         return str(value)
-    if isinstance(value, (CommandKind, JobState, GenerationState, ReleaseTarget, TerminalOutcome)):
+    if isinstance(
+        value,
+        (
+            CommandKind,
+            JobState,
+            GenerationState,
+            IsolationMode,
+            ReleaseTarget,
+            TerminalOutcome,
+        ),
+    ):
         return value.value
     if is_dataclass(value) and not isinstance(value, type):
         return {
@@ -79,6 +93,10 @@ def canonical_request_json(command: _DigestCommand) -> str:
         item.name: _canonical_value(getattr(command, item.name))
         for item in fields(command)
         if item.metadata.get("digest", True)
+        and not (
+            item.metadata.get("omit_none", False)
+            and getattr(command, item.name) is None
+        )
     }
     encoded = json.dumps(
         {
@@ -108,6 +126,12 @@ class CreateJobCommand(_DigestCommand):
     profile: str
     runtime_driver: str
     durable_state_driver: str
+    minimum_isolation: IsolationMode | None = field(
+        default=None, metadata=_OMIT_NONE_DIGEST
+    )
+    authorization: JobAuthorizationMetadata | None = field(
+        default=None, repr=False, metadata=_NO_DIGEST
+    )
 
     def __post_init__(self) -> None:
         _require_owner(self.owner)
@@ -118,6 +142,18 @@ class CreateJobCommand(_DigestCommand):
         validate_token("profile", self.profile)
         validate_token("runtime_driver", self.runtime_driver)
         validate_token("durable_state_driver", self.durable_state_driver)
+        if (self.minimum_isolation is None) != (self.authorization is None):
+            raise ValueError(
+                "create authorization fields must be all null or all present"
+            )
+        if self.minimum_isolation is not None and not isinstance(
+            self.minimum_isolation, IsolationMode
+        ):
+            raise TypeError("minimum_isolation must be an IsolationMode")
+        if self.authorization is not None and not isinstance(
+            self.authorization, JobAuthorizationMetadata
+        ):
+            raise TypeError("authorization must be JobAuthorizationMetadata")
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,6 +463,10 @@ class BrokerRepository(Protocol):
     async def mark_terminal(self, command: MarkTerminalCommand) -> OperationResult: ...
 
     async def inspect_job(self, owner: BrokerOwner, job_id: UUID) -> JobSnapshot: ...
+
+    async def inspect_job_authorization(
+        self, owner: BrokerOwner, job_id: UUID
+    ) -> JobAuthorizationRecord: ...
 
     async def inspect_job_for_recovery(
         self, owner: BrokerOwner, job_id: UUID

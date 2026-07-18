@@ -11,6 +11,8 @@ from openloop.broker.models import (
     BrokerOwner,
     CommandKind,
     GenerationState,
+    IsolationMode,
+    JobAuthorizationMetadata,
     JobState,
     ReleaseTarget,
     TerminalOutcome,
@@ -181,6 +183,26 @@ def test_canonical_create_request_has_frozen_json_and_digest_v1():
     )
 
 
+def test_authorized_create_digest_includes_isolation_but_not_derived_metadata():
+    first = _create_command(
+        minimum_isolation=IsolationMode.DEDICATED,
+        authorization=JobAuthorizationMetadata("cap-v1", 1, "a" * 64),
+    )
+    rotated = _create_command(
+        minimum_isolation=IsolationMode.DEDICATED,
+        authorization=JobAuthorizationMetadata("cap-v2", 9, "b" * 64),
+    )
+    shared = _create_command(
+        minimum_isolation=IsolationMode.SHARED,
+        authorization=JobAuthorizationMetadata("cap-v1", 1, "a" * 64),
+    )
+    assert first.request_digest == rotated.request_digest
+    assert first.request_digest != shared.request_digest
+    assert '"minimum_isolation":"dedicated"' in canonical_request_json(first)
+    assert "cap-v1" not in canonical_request_json(first)
+    assert "a" * 64 not in canonical_request_json(first)
+
+
 def test_canonical_request_excludes_idempotency_and_broker_minted_ids():
     original = _create_command()
     changed = _create_command(
@@ -290,6 +312,9 @@ class RecordingRepository:
     async def inspect_job(self, owner, job_id):
         return await self._record("inspect_job", (owner, job_id))
 
+    async def inspect_job_authorization(self, owner, job_id):
+        return await self._record("inspect_job_authorization", (owner, job_id))
+
     async def inspect_job_for_recovery(self, owner, job_id):
         return await self._record("inspect_job_for_recovery", (owner, job_id))
 
@@ -326,6 +351,7 @@ def test_repository_protocol_exposes_only_named_lifecycle_methods():
         "begin_finalize",
         "mark_terminal",
         "inspect_job",
+        "inspect_job_authorization",
         "inspect_job_for_recovery",
     }
     assert isinstance(RecordingRepository(), BrokerRepository)

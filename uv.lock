@@ -6325,6 +6325,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+broker = [
+    { name = "cryptography" },
+    { name = "pyjwt", extra = ["crypto"] },
+]
 dev = [
     { name = "httpx" },
     { name = "pytest" },
@@ -6351,6 +6355,7 @@ redis = [
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.29" },
     { name = "cryptography", marker = "python_full_version >= '3.12' and extra == 'openhands'", specifier = ">=42" },
+    { name = "cryptography", marker = "extra == 'broker'", specifier = ">=42" },
     { name = "fastapi", specifier = ">=0.110" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
@@ -6362,6 +6367,7 @@ requires-dist = [
     { name = "openhands-workspace", marker = "python_full_version >= '3.12' and extra == 'openhands'", specifier = "==1.36.0" },
     { name = "pydantic", specifier = ">=2.6" },
     { name = "pydantic-settings", specifier = ">=2.2" },
+    { name = "pyjwt", extras = ["crypto"], marker = "extra == 'broker'", specifier = ">=2.8" },
     { name = "pyjwt", extras = ["crypto"], marker = "extra == 'githubapp'", specifier = ">=2.8" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
@@ -6371,7 +6377,7 @@ requires-dist = [
     { name = "slack-sdk", specifier = ">=3.33" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29" },
 ]
-provides-extras = ["dev", "mcp", "redis", "githubapp", "openhands"]
+provides-extras = ["dev", "mcp", "redis", "githubapp", "broker", "openhands"]
 
 [[package]]
 name = "pyotp"

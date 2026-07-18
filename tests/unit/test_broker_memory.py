@@ -19,6 +19,8 @@ from openloop.broker.memory import InMemoryBrokerRepository
 from openloop.broker.models import (
     CommandKind,
     GenerationState,
+    IsolationMode,
+    JobAuthorizationMetadata,
     JobState,
     OperationSource,
     OperationStatus,
@@ -102,6 +104,73 @@ async def test_create_exact_replay_returns_original_ids_without_audit(ledger, re
     assert replay.conversation_id == first.conversation_id
     assert len(await repository.audit_records_for_test()) == 1
     assert len(await repository.operations_for_test()) == 1
+
+
+async def test_authorized_create_replay_returns_stored_authorization(ledger, repository):
+    issued = []
+
+    def authorization_factory(owner, job_id, minimum_isolation):
+        metadata = JobAuthorizationMetadata(
+            key_version=f"cap-v{len(issued) + 1}",
+            epoch=len(issued) + 1,
+            capability_digest=f"{len(issued) + 1:064x}",
+        )
+        issued.append((owner, job_id, minimum_isolation, metadata))
+        return metadata
+
+    first = await ledger.create_authorized_job(
+        OWNER,
+        "memory-auth-create1",
+        "default",
+        "docker",
+        "postgres",
+        IsolationMode.DEDICATED,
+        authorization_factory,
+    )
+    replay = await ledger.create_authorized_job(
+        OWNER,
+        "memory-auth-create1",
+        "default",
+        "docker",
+        "postgres",
+        IsolationMode.DEDICATED,
+        authorization_factory,
+    )
+    stored = await ledger.inspect_job_authorization(OWNER, first.job_id)
+    assert replay.replayed is True
+    assert replay.job_id == first.job_id
+    assert len(issued) == 2
+    assert issued[0][1] != issued[1][1]
+    assert stored.job_id == first.job_id
+    assert stored.owner == OWNER
+    assert stored.minimum_isolation is IsolationMode.DEDICATED
+    assert stored.authorization == issued[0][3]
+    assert len(await repository.audit_records_for_test()) == 1
+
+
+async def test_authorized_create_isolation_change_conflicts(ledger):
+    def authorization_factory(owner, job_id, minimum_isolation):
+        return JobAuthorizationMetadata("cap-v1", 1, "a" * 64)
+
+    await ledger.create_authorized_job(
+        OWNER,
+        "memory-auth-create2",
+        "default",
+        "docker",
+        "postgres",
+        IsolationMode.SHARED,
+        authorization_factory,
+    )
+    with pytest.raises(IdempotencyConflict):
+        await ledger.create_authorized_job(
+            OWNER,
+            "memory-auth-create2",
+            "default",
+            "docker",
+            "postgres",
+            IsolationMode.DEDICATED,
+            authorization_factory,
+        )
 
 
 async def test_conflicting_idempotency_reuse_is_rejected(ledger, repository):

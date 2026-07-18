@@ -32,6 +32,9 @@ from .models import (
     CommandKind,
     GenerationRecord,
     GenerationState,
+    IsolationMode,
+    JobAuthorizationMetadata,
+    JobAuthorizationRecord,
     JobRecord,
     JobState,
     OperationRecord,
@@ -174,6 +177,17 @@ def _decode_result(value: str | dict[str, Any]) -> OperationResult:
 
 
 def _job_from_row(row: Any) -> JobRecord:
+    minimum_isolation = row.get("minimum_isolation")
+    control_key_version = row.get("control_key_version")
+    control_epoch = row.get("control_epoch")
+    control_capability_digest = row.get("control_capability_digest")
+    authorization = None
+    if control_key_version is not None:
+        authorization = JobAuthorizationMetadata(
+            key_version=control_key_version,
+            epoch=int(control_epoch),
+            capability_digest=control_capability_digest,
+        )
     return JobRecord(
         job_id=row["job_id"],
         conversation_id=row["conversation_id"],
@@ -200,6 +214,12 @@ def _job_from_row(row: Any) -> JobRecord:
         ),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        minimum_isolation=(
+            IsolationMode(minimum_isolation)
+            if minimum_isolation is not None
+            else None
+        ),
+        authorization=authorization,
     )
 
 
@@ -339,11 +359,14 @@ INSERT INTO broker_jobs (
     job_id, conversation_id, tenant_id, workload_subject, profile,
     runtime_driver, durable_state_driver, state, revision, generation,
     current_generation, pending_operation_id, durable_state_ref,
-    durable_key_version, durable_digest, terminal_outcome, created_at, updated_at
+    durable_key_version, durable_digest, terminal_outcome, created_at, updated_at,
+    minimum_isolation, control_key_version, control_epoch,
+    control_capability_digest
 )
 VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-    $11, $12, $13, $14, $15, $16, $17, $18
+    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+    $21, $22
 )
 ON CONFLICT DO NOTHING
 RETURNING *
@@ -633,6 +656,18 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
             job.terminal_outcome.value if job.terminal_outcome else None,
             job.created_at,
             job.updated_at,
+            (
+                job.minimum_isolation.value
+                if job.minimum_isolation is not None
+                else None
+            ),
+            job.authorization.key_version if job.authorization else None,
+            job.authorization.epoch if job.authorization else None,
+            (
+                job.authorization.capability_digest
+                if job.authorization
+                else None
+            ),
         )
         if row is None:
             raise ConcurrentMutation(job.job_id)
@@ -900,6 +935,8 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
                     terminal_outcome=None,
                     created_at=now,
                     updated_at=now,
+                    minimum_isolation=command.minimum_isolation,
+                    authorization=command.authorization,
                 )
                 await self._insert_job(connection, job)
                 await self._complete_operation_without_result(
@@ -1219,6 +1256,22 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
                     else None
                 )
                 return project_job_snapshot(job, generation)
+
+    async def inspect_job_authorization(
+        self, owner: BrokerOwner, job_id: UUID
+    ) -> JobAuthorizationRecord:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                job = await self._job(connection, owner, job_id, lock=False)
+                if job.minimum_isolation is None or job.authorization is None:
+                    raise JobNotFound(job_id)
+                return JobAuthorizationRecord(
+                    job_id=job.job_id,
+                    owner=job.owner,
+                    minimum_isolation=job.minimum_isolation,
+                    authorization=job.authorization,
+                )
 
     async def inspect_job_for_recovery(self, owner: BrokerOwner, job_id: UUID):
         pool = self._require_pool()

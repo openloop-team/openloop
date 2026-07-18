@@ -1,4 +1,4 @@
-from dataclasses import FrozenInstanceError, asdict
+from dataclasses import FrozenInstanceError, asdict, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from uuid import UUID
@@ -25,6 +25,8 @@ from openloop.broker.models import (
     CommandKind,
     GenerationRecord,
     GenerationState,
+    IsolationMode,
+    JobAuthorizationMetadata,
     JobRecord,
     JobState,
     OperationRecord,
@@ -219,6 +221,45 @@ def test_positive_bigint_accepts_positive_postgres_range(value):
 def test_positive_bigint_rejects_nonpositive_or_non_integer(value):
     with pytest.raises((TypeError, ValueError)):
         validate_positive_bigint("revision", value)
+
+
+def test_isolation_mode_order_is_explicit_and_downgrade_safe():
+    assert IsolationMode.SHARED.allows(IsolationMode.SHARED)
+    assert not IsolationMode.SHARED.allows(IsolationMode.DEDICATED)
+    assert IsolationMode.DEDICATED.allows(IsolationMode.SHARED)
+    assert IsolationMode.DEDICATED.allows(IsolationMode.DEDICATED)
+
+
+def test_job_authorization_metadata_is_bounded_and_redacts_digest():
+    metadata = JobAuthorizationMetadata(
+        key_version="cap-v1",
+        epoch=1,
+        capability_digest="c" * 64,
+    )
+    assert metadata.key_version == "cap-v1"
+    assert metadata.epoch == 1
+    assert "c" * 64 not in repr(metadata)
+    with pytest.raises(ValueError):
+        JobAuthorizationMetadata("cap-v1", 0, "c" * 64)
+    with pytest.raises(ValueError):
+        JobAuthorizationMetadata("cap-v1", 1, "C" * 64)
+
+
+def test_job_authorization_is_all_null_or_all_present():
+    legacy = _job()
+    assert legacy.minimum_isolation is None
+    assert legacy.authorization is None
+    metadata = JobAuthorizationMetadata("cap-v1", 1, "c" * 64)
+    authorized = replace(
+        legacy,
+        minimum_isolation=IsolationMode.DEDICATED,
+        authorization=metadata,
+    )
+    assert authorized.authorization == metadata
+    with pytest.raises(ValueError):
+        replace(legacy, minimum_isolation=IsolationMode.SHARED)
+    with pytest.raises(ValueError):
+        replace(legacy, authorization=metadata)
 
 
 @pytest.mark.parametrize("value", [1, 86_400])

@@ -57,6 +57,17 @@ class ReleaseTarget(_StringEnum):
     FINALIZING = "finalizing"
 
 
+class IsolationMode(_StringEnum):
+    SHARED = "shared"
+    DEDICATED = "dedicated"
+
+    def allows(self, required: "IsolationMode") -> bool:
+        if not isinstance(required, IsolationMode):
+            raise TypeError("required must be an IsolationMode")
+        rank = {IsolationMode.SHARED: 0, IsolationMode.DEDICATED: 1}
+        return rank[self] >= rank[required]
+
+
 class TerminalOutcome(_StringEnum):
     SUCCESS = "success"
     CANCELLED = "cancelled"
@@ -212,6 +223,35 @@ class BrokerOwner:
 
 
 @dataclass(frozen=True, slots=True)
+class JobAuthorizationMetadata:
+    key_version: str
+    epoch: int
+    capability_digest: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        validate_identifier("key_version", self.key_version)
+        validate_positive_bigint("epoch", self.epoch)
+        validate_sha256("capability_digest", self.capability_digest)
+
+
+@dataclass(frozen=True, slots=True)
+class JobAuthorizationRecord:
+    job_id: UUID
+    owner: BrokerOwner
+    minimum_isolation: IsolationMode
+    authorization: JobAuthorizationMetadata
+
+    def __post_init__(self) -> None:
+        validate_uuid("job_id", self.job_id)
+        if not isinstance(self.owner, BrokerOwner):
+            raise TypeError("owner must be a BrokerOwner")
+        if not isinstance(self.minimum_isolation, IsolationMode):
+            raise TypeError("minimum_isolation must be an IsolationMode")
+        if not isinstance(self.authorization, JobAuthorizationMetadata):
+            raise TypeError("authorization must be JobAuthorizationMetadata")
+
+
+@dataclass(frozen=True, slots=True)
 class VerifiedCheckpointReceipt:
     issuer: str
     receipt_id: str
@@ -268,6 +308,10 @@ class JobRecord:
     terminal_outcome: TerminalOutcome | None
     created_at: datetime
     updated_at: datetime
+    minimum_isolation: IsolationMode | None = None
+    authorization: JobAuthorizationMetadata | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         validate_uuid("job_id", self.job_id)
@@ -298,6 +342,16 @@ class JobRecord:
             raise ValueError("terminal_outcome is only valid while finalizing")
         validate_timestamp("created_at", self.created_at)
         validate_timestamp("updated_at", self.updated_at)
+        if (self.minimum_isolation is None) != (self.authorization is None):
+            raise ValueError("job authorization fields must be all null or all present")
+        if self.minimum_isolation is not None and not isinstance(
+            self.minimum_isolation, IsolationMode
+        ):
+            raise TypeError("minimum_isolation must be an IsolationMode")
+        if self.authorization is not None and not isinstance(
+            self.authorization, JobAuthorizationMetadata
+        ):
+            raise TypeError("authorization must be JobAuthorizationMetadata")
 
 
 @dataclass(frozen=True, slots=True)
@@ -570,6 +624,10 @@ class RecoverySnapshot:
     created_at: datetime
     updated_at: datetime
     generation_record: RecoveryGenerationSnapshot | None
+    minimum_isolation: IsolationMode | None = None
+    authorization: JobAuthorizationMetadata | None = field(
+        default=None, repr=False
+    )
 
 
 def _project_generation(record: GenerationRecord) -> GenerationSnapshot:
@@ -662,4 +720,6 @@ def project_recovery_snapshot(
         created_at=job.created_at,
         updated_at=job.updated_at,
         generation_record=recovery_generation,
+        minimum_isolation=job.minimum_isolation,
+        authorization=job.authorization,
     )

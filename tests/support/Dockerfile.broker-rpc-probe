@@ -1,0 +1,27 @@
+FROM python@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf AS builder
+
+WORKDIR /opt/openloop-broker-rpc
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UV_NO_CACHE=1 \
+    UV_PYTHON_DOWNLOADS=never
+
+RUN pip install uv==0.11.14
+
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+COPY tests/support/broker_rpc_probe.py ./broker_rpc_probe.py
+RUN uv sync --frozen --no-dev --extra broker
+
+FROM python@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
+
+WORKDIR /opt/openloop-broker-rpc
+
+COPY --from=builder /opt/openloop-broker-rpc /opt/openloop-broker-rpc
+
+ENV PATH="/opt/openloop-broker-rpc/.venv/bin:${PATH}" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH="/opt/openloop-broker-rpc/src"
+
+ENTRYPOINT ["python", "/opt/openloop-broker-rpc/broker_rpc_probe.py"]

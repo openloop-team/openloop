@@ -8,6 +8,9 @@ from uuid import UUID, uuid4
 from .models import (
     BrokerOwner,
     GenerationState,
+    IsolationMode,
+    JobAuthorizationMetadata,
+    JobAuthorizationRecord,
     JobSnapshot,
     OperationResult,
     OperationTicket,
@@ -79,12 +82,71 @@ class BrokerLedger:
         runtime_driver: str,
         durable_state_driver: str,
     ) -> OperationTicket:
+        return await self._create_job(
+            owner,
+            idempotency_key,
+            profile,
+            runtime_driver,
+            durable_state_driver,
+            minimum_isolation=None,
+            authorization_factory=None,
+        )
+
+    async def create_authorized_job(
+        self,
+        owner: BrokerOwner,
+        idempotency_key: str,
+        profile: str,
+        runtime_driver: str,
+        durable_state_driver: str,
+        minimum_isolation: IsolationMode,
+        authorization_factory: Callable[
+            [BrokerOwner, UUID, IsolationMode], JobAuthorizationMetadata
+        ],
+    ) -> OperationTicket:
+        self._enum("minimum_isolation", minimum_isolation, IsolationMode)
+        if not callable(authorization_factory):
+            raise TypeError("authorization_factory must be callable")
+        return await self._create_job(
+            owner,
+            idempotency_key,
+            profile,
+            runtime_driver,
+            durable_state_driver,
+            minimum_isolation=minimum_isolation,
+            authorization_factory=authorization_factory,
+        )
+
+    async def _create_job(
+        self,
+        owner: BrokerOwner,
+        idempotency_key: str,
+        profile: str,
+        runtime_driver: str,
+        durable_state_driver: str,
+        *,
+        minimum_isolation: IsolationMode | None,
+        authorization_factory: Callable[
+            [BrokerOwner, UUID, IsolationMode], JobAuthorizationMetadata
+        ]
+        | None,
+    ) -> OperationTicket:
         self._owner(owner)
         validate_idempotency_key(idempotency_key)
         validate_token("profile", profile)
         validate_token("runtime_driver", runtime_driver)
         validate_token("durable_state_driver", durable_state_driver)
         job_id = self._mint_id()
+        authorization = None
+        if minimum_isolation is not None:
+            assert authorization_factory is not None
+            authorization = authorization_factory(
+                owner, job_id, minimum_isolation
+            )
+            if not isinstance(authorization, JobAuthorizationMetadata):
+                raise TypeError(
+                    "authorization_factory must return JobAuthorizationMetadata"
+                )
         conversation_id = self._mint_id()
         operation_id = self._mint_id()
         command = CreateJobCommand(
@@ -96,6 +158,8 @@ class BrokerLedger:
             profile=profile,
             runtime_driver=runtime_driver,
             durable_state_driver=durable_state_driver,
+            minimum_isolation=minimum_isolation,
+            authorization=authorization,
         )
         return await self._repository.create_job(self._prepare(command))
 
@@ -329,6 +393,13 @@ class BrokerLedger:
         self._owner(owner)
         validate_uuid("job_id", job_id)
         return await self._repository.inspect_job(owner, job_id)
+
+    async def inspect_job_authorization(
+        self, owner: BrokerOwner, job_id: UUID
+    ) -> JobAuthorizationRecord:
+        self._owner(owner)
+        validate_uuid("job_id", job_id)
+        return await self._repository.inspect_job_authorization(owner, job_id)
 
     async def inspect_job_for_recovery(
         self, owner: BrokerOwner, job_id: UUID

@@ -26,6 +26,7 @@ from .models import (
     CommandKind,
     GenerationRecord,
     GenerationState,
+    JobAuthorizationRecord,
     JobRecord,
     JobState,
     OperationRecord,
@@ -240,6 +241,8 @@ class InMemoryBrokerRepository:
                 terminal_outcome=None,
                 created_at=now,
                 updated_at=now,
+                minimum_isolation=command.minimum_isolation,
+                authorization=command.authorization,
             )
             ticket = OperationTicket(
                 operation_id=command.operation_id,
@@ -1001,6 +1004,20 @@ class InMemoryBrokerRepository:
         async with self._lock:
             job = self._job(owner, job_id)
             return project_job_snapshot(job, self._latest_generation(job))
+
+    async def inspect_job_authorization(
+        self, owner: BrokerOwner, job_id: UUID
+    ) -> JobAuthorizationRecord:
+        async with self._lock:
+            job = self._job(owner, job_id)
+            if job.minimum_isolation is None or job.authorization is None:
+                raise JobNotFound(job_id)
+            return JobAuthorizationRecord(
+                job_id=job.job_id,
+                owner=job.owner,
+                minimum_isolation=job.minimum_isolation,
+                authorization=job.authorization,
+            )
 
     async def inspect_job_for_recovery(self, owner: BrokerOwner, job_id: UUID):
         async with self._lock:

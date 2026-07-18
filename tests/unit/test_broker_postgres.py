@@ -292,6 +292,25 @@ def test_initial_migration_is_packaged_and_contains_required_constraints():
     assert "CREATE FUNCTION" not in sql.upper()
 
 
+def test_rpc_authorization_migration_is_packaged_and_fail_closed_for_legacy_rows():
+    sql = (
+        resources.files("openloop.broker.migrations")
+        .joinpath("0002_rpc_authorization.sql")
+        .read_text(encoding="utf-8")
+    )
+    for fragment in (
+        "minimum_isolation",
+        "control_key_version",
+        "control_epoch",
+        "control_capability_digest",
+        "broker_rpc_audit",
+        "num_nonnulls",
+        "shared",
+        "dedicated",
+    ):
+        assert fragment in sql
+
+
 def test_postgres_repository_implements_narrow_protocol():
     assert isinstance(PostgresBrokerRepository(), BrokerRepository)
 
