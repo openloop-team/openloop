@@ -3,6 +3,8 @@
 import sys
 import types
 
+from pydantic_settings import PydanticBaseSettingsSource
+
 from openloop.agents.schema import Agent
 from openloop.app import build_github_credentials, build_tool_gateway
 from openloop.approvals import InMemoryApprovalStore
@@ -12,8 +14,23 @@ from openloop.credentials import EnvCredentialResolver, GitHubAppResolver
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 
 
+class _IsolatedSettings(Settings):
+    """Settings that only reads from constructor kwargs — no env vars, no .env."""
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[Settings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (init_settings,)
+
+
 def _settings(**kwargs) -> Settings:
-    return Settings(_env_file=None, **kwargs)
+    return _IsolatedSettings(**kwargs)
 
 
 def test_token_only_selects_env_resolver():
