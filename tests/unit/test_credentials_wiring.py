@@ -13,7 +13,17 @@ from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 
 
 def _settings(**kwargs) -> Settings:
-    return Settings(_env_file=None, **kwargs)
+    # Explicitly zero out all GitHub auth fields so that real env vars set in CI
+    # or a developer's environment don't leak into tests that expect no auth.
+    # kwargs take precedence, letting individual tests opt in to specific fields.
+    github_defaults = {
+        "github_token": None,
+        "github_app_id": None,
+        "github_app_private_key_path": None,
+        "github_app_installation_id": None,
+        "github_app_repositories": None,
+    }
+    return Settings(_env_file=None, **{**github_defaults, **kwargs})
 
 
 def test_token_only_selects_env_resolver():
