@@ -32,6 +32,7 @@ IDENTITY_CLOCK_SKEW_SECONDS = 30
 class WorkloadIntent(str, Enum):
     CREATE_JOB = "CREATE_JOB"
     INSPECT_JOB = "INSPECT_JOB"
+    START_SEGMENT = "START_SEGMENT"
 
 
 class IdentityProblem(Exception):
@@ -317,4 +318,3 @@ class WorkloadIdentityVerifier:
             UnicodeError,
         ) as error:
             raise IdentityProblem() from error
-

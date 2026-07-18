@@ -41,7 +41,13 @@ def _issue(private_key, **changes):
         assignment_id=ASSIGNMENT_ID,
         isolation_mode=IsolationMode.DEDICATED,
         required_isolation=IsolationMode.SHARED,
-        intents=frozenset({WorkloadIntent.CREATE_JOB, WorkloadIntent.INSPECT_JOB}),
+        intents=frozenset(
+            {
+                WorkloadIntent.CREATE_JOB,
+                WorkloadIntent.INSPECT_JOB,
+                WorkloadIntent.START_SEGMENT,
+            }
+        ),
     )
     values.update(changes)
     return _issuer(private_key).issue(**values)
@@ -66,7 +72,11 @@ def test_ed25519_identity_round_trip_is_strict_and_redacted():
     assert principal.isolation_mode is IsolationMode.DEDICATED
     assert principal.required_isolation is IsolationMode.SHARED
     assert principal.intents == frozenset(
-        {WorkloadIntent.CREATE_JOB, WorkloadIntent.INSPECT_JOB}
+        {
+            WorkloadIntent.CREATE_JOB,
+            WorkloadIntent.INSPECT_JOB,
+            WorkloadIntent.START_SEGMENT,
+        }
     )
     assert principal.key_id == "issuer-v1"
     assert principal.jwt_id == JTI

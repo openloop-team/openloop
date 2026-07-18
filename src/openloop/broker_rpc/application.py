@@ -1,15 +1,13 @@
-"""Authenticated, capability-scoped application boundary for broker RPC v1."""
+"""Authenticated, capability-scoped application boundary for broker RPC v2."""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import math
 from uuid import UUID
 
 from openloop.broker.errors import IdempotencyConflict, JobNotFound, OwnerMismatch
 from openloop.broker.ledger import BrokerLedger
-from openloop.broker.models import validate_token
 
 from .audit import (
     AuditDecision,
@@ -19,6 +17,12 @@ from .audit import (
     RpcAuditSink,
 )
 from .capability import CapabilityProblem, JobCapabilityAuthority
+from .coordinator import (
+    BrokerRpcPolicy,
+    SegmentCoordinator,
+    SegmentCoordinatorCode,
+    SegmentCoordinatorProblem,
+)
 from .errors import RpcErrorCode, RpcFailure
 from .identity import (
     IdentityProblem,
@@ -36,19 +40,39 @@ from .models import (
     RpcRequest,
     RpcResponse,
     RpcResult,
+    RunningGenerationAccess,
+    StartSegmentPayload,
+    StartSegmentResult,
 )
 
 
-@dataclass(frozen=True, slots=True)
-class BrokerRpcPolicy:
-    profile: str
-    runtime_driver: str
-    durable_state_driver: str
-
-    def __post_init__(self) -> None:
-        validate_token("profile", self.profile)
-        validate_token("runtime_driver", self.runtime_driver)
-        validate_token("durable_state_driver", self.durable_state_driver)
+_COORDINATOR_FAILURES = {
+    SegmentCoordinatorCode.IDEMPOTENCY_CONFLICT: (
+        RpcErrorCode.IDEMPOTENCY_CONFLICT,
+        AuditDecision.DENIED,
+        AuditReason.IDEMPOTENCY_CONFLICT,
+    ),
+    SegmentCoordinatorCode.STATE_CONFLICT: (
+        RpcErrorCode.STATE_CONFLICT,
+        AuditDecision.DENIED,
+        AuditReason.STATE_CONFLICT,
+    ),
+    SegmentCoordinatorCode.RUNTIME_UNAVAILABLE: (
+        RpcErrorCode.RUNTIME_UNAVAILABLE,
+        AuditDecision.ERROR,
+        AuditReason.RUNTIME_UNAVAILABLE,
+    ),
+    SegmentCoordinatorCode.DEADLINE_EXCEEDED: (
+        RpcErrorCode.DEADLINE_EXCEEDED,
+        AuditDecision.DENIED,
+        AuditReason.DEADLINE_EXCEEDED,
+    ),
+    SegmentCoordinatorCode.INTERNAL: (
+        RpcErrorCode.INTERNAL,
+        AuditDecision.ERROR,
+        AuditReason.INTERNAL,
+    ),
+}
 
 
 class BrokerRpcApplication:
@@ -60,6 +84,7 @@ class BrokerRpcApplication:
         capability_authority: JobCapabilityAuthority,
         audit_sink: RpcAuditSink,
         policy: BrokerRpcPolicy,
+        segment_coordinator: SegmentCoordinator,
         principal_limiter: TokenBucketLimiter | None = None,
         audit_timeout_seconds: float = 2.0,
     ) -> None:
@@ -73,6 +98,10 @@ class BrokerRpcApplication:
             raise TypeError("audit_sink must implement RpcAuditSink")
         if not isinstance(policy, BrokerRpcPolicy):
             raise TypeError("policy must be BrokerRpcPolicy")
+        if not isinstance(segment_coordinator, SegmentCoordinator):
+            raise TypeError(
+                "segment_coordinator must implement SegmentCoordinator"
+            )
         if principal_limiter is not None and not isinstance(
             principal_limiter, TokenBucketLimiter
         ):
@@ -89,6 +118,7 @@ class BrokerRpcApplication:
         self._capability_authority = capability_authority
         self._audit_sink = audit_sink
         self._policy = policy
+        self._segment_coordinator = segment_coordinator
         self._principal_limiter = principal_limiter
         self._audit_timeout_seconds = float(audit_timeout_seconds)
 
@@ -215,6 +245,8 @@ class BrokerRpcApplication:
 
         if request.method is WorkloadIntent.CREATE_JOB:
             return await self._create_job(request, peer, principal)
+        if request.method is WorkloadIntent.START_SEGMENT:
+            return await self._start_segment(request, peer, principal)
         if request.method is WorkloadIntent.INSPECT_JOB:
             return await self._inspect_job(request, peer, principal)
         return await self._failure(
@@ -301,6 +333,110 @@ class BrokerRpcApplication:
             result=CreateJobResult(ticket=ticket, capability=capability),
         )
 
+    async def _start_segment(
+        self,
+        request: RpcRequest,
+        peer: PeerCredentials,
+        principal: WorkloadPrincipal,
+    ) -> RpcResponse:
+        payload = request.payload
+        capability = request.job_capability
+        if not isinstance(payload, StartSegmentPayload) or capability is None:
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                RpcErrorCode.INTERNAL,
+                AuditDecision.ERROR,
+                AuditReason.INTERNAL,
+            )
+        try:
+            authorization = await self._ledger.inspect_job_authorization(
+                principal.owner, payload.job_id
+            )
+            if not principal.isolation_mode.allows(
+                authorization.minimum_isolation
+            ):
+                raise PermissionError
+            if not self._capability_authority.verify(
+                principal.owner,
+                payload.job_id,
+                authorization.authorization,
+                capability,
+            ):
+                raise PermissionError
+        except (JobNotFound, OwnerMismatch, PermissionError):
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                RpcErrorCode.NOT_FOUND_OR_UNAUTHORIZED,
+                AuditDecision.DENIED,
+                AuditReason.NOT_FOUND_OR_UNAUTHORIZED,
+                job_id=payload.job_id,
+            )
+        except CapabilityProblem:
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                RpcErrorCode.INTERNAL,
+                AuditDecision.ERROR,
+                AuditReason.INTERNAL,
+                job_id=payload.job_id,
+            )
+        except Exception:
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                RpcErrorCode.INTERNAL,
+                AuditDecision.ERROR,
+                AuditReason.INTERNAL,
+                job_id=payload.job_id,
+            )
+
+        try:
+            result = await self._segment_coordinator.start_segment(
+                principal.owner, payload
+            )
+            if not isinstance(result, StartSegmentResult):
+                raise TypeError("coordinator returned an invalid start result")
+        except SegmentCoordinatorProblem as error:
+            code, decision, reason = _COORDINATOR_FAILURES[error.code]
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                code,
+                decision,
+                reason,
+                job_id=payload.job_id,
+                operation_id=error.operation_id,
+            )
+        except Exception:
+            return await self._failure(
+                request,
+                peer,
+                principal,
+                RpcErrorCode.INTERNAL,
+                AuditDecision.ERROR,
+                AuditReason.INTERNAL,
+                job_id=payload.job_id,
+            )
+
+        if not await self._audit(
+            request,
+            peer,
+            principal,
+            AuditDecision.ALLOWED,
+            AuditReason.ALLOWED,
+            job_id=payload.job_id,
+            operation_id=result.operation_id,
+        ):
+            return self._response(request, failure=RpcErrorCode.INTERNAL)
+        return self._response(request, result=result)
+
     async def _inspect_job(
         self,
         request: RpcRequest,
@@ -336,6 +472,13 @@ class BrokerRpcApplication:
             snapshot = await self._ledger.inspect_job(
                 principal.owner, payload.job_id
             )
+            access = await self._segment_coordinator.inspect_running_access(
+                principal.owner, payload.job_id
+            )
+            if access is not None and not isinstance(
+                access, RunningGenerationAccess
+            ):
+                raise TypeError("coordinator returned invalid running access")
         except (JobNotFound, OwnerMismatch, PermissionError):
             return await self._failure(
                 request,
@@ -377,5 +520,5 @@ class BrokerRpcApplication:
         ):
             return self._response(request, failure=RpcErrorCode.INTERNAL)
         return self._response(
-            request, result=InspectJobResult(snapshot=snapshot)
+            request, result=InspectJobResult(snapshot=snapshot, access=access)
         )

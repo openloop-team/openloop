@@ -94,6 +94,21 @@ async def test_memory_driver_satisfies_contract_and_replays_ensure():
     assert SESSION_KEY not in repr(first)
 
 
+async def test_memory_driver_describes_endpoint_without_mutation():
+    driver = InMemoryRuntimeDriver(
+        clock=lambda: NOW,
+        maximum_lifetime_seconds=600,
+    )
+    spec = _spec()
+
+    endpoint = driver.describe_endpoint(spec)
+
+    assert driver.maximum_lifetime_seconds == 600
+    assert endpoint.conversation_id == CONVERSATION_ID
+    assert (await driver.inspect(spec.identity)).agent is RuntimeResourceState.ABSENT
+    assert (await driver.ensure(spec)).endpoint == endpoint
+
+
 async def test_memory_driver_rejects_same_identity_with_different_secrets():
     driver = InMemoryRuntimeDriver(clock=lambda: NOW)
     original = _spec()

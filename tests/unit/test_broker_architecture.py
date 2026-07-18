@@ -7,6 +7,14 @@ from pathlib import Path
 BROKER_ROOT = Path(__file__).parents[2] / "src" / "openloop" / "broker"
 BROKER_RPC_ROOT = Path(__file__).parents[2] / "src" / "openloop" / "broker_rpc"
 APP_MODULE = Path(__file__).parents[2] / "src" / "openloop" / "app.py"
+CODING_WORKER_MODULES = (
+    Path(__file__).parents[2] / "src" / "openloop" / "tools" / "coding_worker.py",
+    Path(__file__).parents[2]
+    / "src"
+    / "openloop"
+    / "workflows"
+    / "coding_worker.py",
+)
 
 BANNED_IMPORT_PREFIXES = (
     "docker",
@@ -84,7 +92,26 @@ def test_application_does_not_wire_privileged_broker_runtime_yet():
             imports.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imports.append(node.module)
-    assert not any(name.startswith("openloop.broker_runtime") for name in imports)
+    assert not any(
+        name.startswith(
+            ("openloop.broker_control", "openloop.broker_runtime")
+        )
+        for name in imports
+    )
+
+
+def test_coding_workers_have_no_broker_start_or_runtime_wiring():
+    violations = []
+    for path in CODING_WORKER_MODULES:
+        source = path.read_text(encoding="utf-8")
+        for banned in (
+            "broker_control",
+            "broker_runtime",
+            "start_segment",
+        ):
+            if banned in source:
+                violations.append((path.name, banned))
+    assert violations == []
 
 
 def test_broker_rpc_dispatch_can_reach_only_reviewed_ledger_reads_and_create():
@@ -111,6 +138,26 @@ def test_broker_rpc_dispatch_can_reach_only_reviewed_ledger_reads_and_create():
     }
 
 
+def test_broker_rpc_dispatch_uses_only_the_narrow_coordinator_port():
+    application = BROKER_RPC_ROOT / "application.py"
+    tree = ast.parse(
+        application.read_text(encoding="utf-8"), filename=str(application)
+    )
+    coordinator_calls = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        target = node.func.value
+        if (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+            and target.attr == "_segment_coordinator"
+        ):
+            coordinator_calls.add(node.func.attr)
+    assert coordinator_calls == {"start_segment", "inspect_running_access"}
+
+
 def test_broker_rpc_client_has_no_generic_public_call_escape_hatch():
     client = BROKER_RPC_ROOT / "client.py"
     tree = ast.parse(client.read_text(encoding="utf-8"), filename=str(client))
@@ -125,4 +172,8 @@ def test_broker_rpc_client_has_no_generic_public_call_escape_hatch():
         for node in classes[0].body
         if isinstance(node, ast.AsyncFunctionDef) and not node.name.startswith("_")
     }
-    assert public_async_methods == {"create_job", "inspect_job"}
+    assert public_async_methods == {
+        "create_job",
+        "inspect_job",
+        "start_segment",
+    }

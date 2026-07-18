@@ -215,6 +215,13 @@ class ReleaseObservation:
 
 @runtime_checkable
 class RuntimeDriver(Protocol):
+    @property
+    def maximum_lifetime_seconds(self) -> int: ...
+
+    def describe_endpoint(
+        self, spec: OpenHandsGenerationSpec
+    ) -> RelayClientEndpoint: ...
+
     async def ensure(self, spec: OpenHandsGenerationSpec) -> EnsuredGeneration: ...
 
     async def inspect(

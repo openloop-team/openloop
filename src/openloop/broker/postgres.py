@@ -515,7 +515,9 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
 
     @staticmethod
     async def _database_now(connection: Any) -> datetime:
-        return await connection.fetchval("SELECT clock_timestamp()")
+        return await connection.fetchval(
+            "SELECT date_trunc('second', clock_timestamp())"
+        )
 
     @staticmethod
     async def _acquire_caller_operation(
@@ -983,6 +985,20 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
                     or job.current_generation is not None
                 ):
                     raise self._invalid_job(job, command.kind)
+                if job.durable_state_ref is None:
+                    durable_state_ref = command.durable_state_ref
+                    durable_key_version = command.durable_key_version
+                    durable_digest = command.durable_digest
+                else:
+                    if (
+                        job.durable_state_ref != command.durable_state_ref
+                        or job.durable_key_version != command.durable_key_version
+                        or job.durable_digest != command.durable_digest
+                    ):
+                        raise ConcurrentMutation(job.job_id)
+                    durable_state_ref = job.durable_state_ref
+                    durable_key_version = job.durable_key_version
+                    durable_digest = job.durable_digest
                 now = await self._database_now(connection)
                 generation_number = job.generation + 1
                 generation = GenerationRecord(
@@ -994,11 +1010,11 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
                     start_operation_id=command.operation_id,
                     pending_operation_id=command.operation_id,
                     runtime_ref=None,
-                    durable_state_ref=None,
-                    runtime_key_version=None,
-                    durable_key_version=None,
+                    durable_state_ref=durable_state_ref,
+                    runtime_key_version=command.runtime_key_version,
+                    durable_key_version=durable_key_version,
                     capability_digest=None,
-                    durable_digest=None,
+                    durable_digest=durable_digest,
                     execution_lease_deadline=now
                     + timedelta(seconds=command.execution_lease_seconds),
                     barrier_id=None,
@@ -1014,6 +1030,9 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
                     revision=job.revision + 1,
                     generation=generation_number,
                     pending_operation_id=command.operation_id,
+                    durable_state_ref=durable_state_ref,
+                    durable_key_version=durable_key_version,
+                    durable_digest=durable_digest,
                     updated_at=now,
                 )
                 ticket = replace(
@@ -1064,13 +1083,7 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
                     )
                     if (
                         generation.runtime_ref != command.runtime_ref
-                        or generation.durable_state_ref != command.durable_state_ref
-                        or generation.runtime_key_version
-                        != command.runtime_key_version
-                        or generation.durable_key_version
-                        != command.durable_key_version
                         or generation.capability_digest != command.capability_digest
-                        or generation.durable_digest != command.durable_digest
                     ):
                         raise OperationMismatch(command.operation_id)
                     return replay
@@ -1095,11 +1108,7 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
                     revision=generation.revision + 1,
                     pending_operation_id=None,
                     runtime_ref=command.runtime_ref,
-                    durable_state_ref=command.durable_state_ref,
-                    runtime_key_version=command.runtime_key_version,
-                    durable_key_version=command.durable_key_version,
                     capability_digest=command.capability_digest,
-                    durable_digest=command.durable_digest,
                     updated_at=now,
                 )
                 updated_job = replace(
@@ -1108,9 +1117,6 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
                     revision=job.revision + 1,
                     current_generation=command.generation,
                     pending_operation_id=None,
-                    durable_state_ref=command.durable_state_ref,
-                    durable_key_version=command.durable_key_version,
-                    durable_digest=command.durable_digest,
                     updated_at=now,
                 )
                 result = OperationResult(

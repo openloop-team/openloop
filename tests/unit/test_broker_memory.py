@@ -6,6 +6,7 @@ from uuid import UUID
 import pytest
 
 from openloop.broker.errors import (
+    ConcurrentMutation,
     IdempotencyConflict,
     InvalidTransition,
     JobNotFound,
@@ -29,11 +30,13 @@ from openloop.broker.models import (
 )
 from tests.support.broker_repository_contract import (
     CAPABILITY_DIGEST,
+    DURABLE_STATE_REF,
     DURABLE_DIGEST,
     OTHER_OWNER,
     OWNER,
     MutableClock,
     SequenceIds,
+    begin_generation_start,
     exercise_complete_lifecycle,
     mark_generation_running,
     quiesce_generation,
@@ -62,8 +65,12 @@ async def _create(ledger, key="memory-create-0001"):
 
 async def _create_running(ledger, *, create_key="memory-create-0001"):
     created = await _create(ledger, create_key)
-    start = await ledger.begin_start(
-        OWNER, "memory-start-00001", created.job_id, 0, 30
+    start = await begin_generation_start(
+        ledger,
+        idempotency_key="memory-start-00001",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
     )
     await mark_generation_running(
         ledger,
@@ -191,8 +198,12 @@ async def test_owner_and_expected_generation_are_fenced(ledger, repository):
             OWNER, UUID("f0000000-0000-4000-8000-000000000001")
         )
     with pytest.raises(StaleGeneration):
-        await ledger.begin_start(
-            OWNER, "memory-start-stale", created.job_id, 1, 30
+        await begin_generation_start(
+            ledger,
+            idempotency_key="memory-start-stale",
+            job_id=created.job_id,
+            expected_generation=1,
+            execution_lease_seconds=30,
         )
     assert len(await repository.audit_records_for_test()) == 1
 
@@ -200,8 +211,12 @@ async def test_owner_and_expected_generation_are_fenced(ledger, repository):
 async def test_clock_sets_exact_execution_deadline(ledger, repository, clock):
     created = await _create(ledger)
     clock.now = datetime(2026, 7, 17, 13, 0, tzinfo=UTC)
-    await ledger.begin_start(
-        OWNER, "memory-start-clock", created.job_id, 0, 86_400
+    await begin_generation_start(
+        ledger,
+        idempotency_key="memory-start-clock",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=86_400,
     )
     recovery = await ledger.inspect_job_for_recovery(OWNER, created.job_id)
     assert recovery.generation_record.execution_lease_deadline == (
@@ -249,8 +264,12 @@ async def test_receipt_must_bind_owner_job_conversation_generation_and_barrier(
 
 async def test_start_failure_abandons_and_never_reuses_generation(ledger, repository):
     created = await _create(ledger)
-    first = await ledger.begin_start(
-        OWNER, "memory-start-fail1", created.job_id, 0, 30
+    first = await begin_generation_start(
+        ledger,
+        idempotency_key="memory-start-fail1",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
     )
     abandoned = await ledger.abandon_generation(
         OWNER,
@@ -264,12 +283,40 @@ async def test_start_failure_abandons_and_never_reuses_generation(ledger, reposi
     assert snapshot.generation == 1
     assert snapshot.current_generation is None
     assert snapshot.generation_record.state is GenerationState.ABANDONED
+    assert snapshot.durable_key_version == "durable-key-v1"
+    recovery = await ledger.inspect_job_for_recovery(OWNER, created.job_id)
+    assert recovery.durable_state_ref == DURABLE_STATE_REF
+    assert recovery.durable_digest == DURABLE_DIGEST
 
-    second = await ledger.begin_start(
-        OWNER, "memory-start-after", created.job_id, 1, 30
+    original = await begin_generation_start(
+        ledger,
+        idempotency_key="memory-start-fail1",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
+        runtime_key_version="runtime-key-rotated",
+        durable_state_ref="durable://different-proposal",
+        durable_key_version="durable-key-rotated",
+        durable_digest="f" * 64,
+    )
+    assert original.replayed is True
+    assert original.operation_id == first.operation_id
+    assert original.generation == 1
+
+    second = await begin_generation_start(
+        ledger,
+        idempotency_key="memory-start-after",
+        job_id=created.job_id,
+        expected_generation=1,
+        execution_lease_seconds=30,
     )
     assert second.generation == 2
     assert first.operation_id != second.operation_id
+    recovery = await ledger.inspect_job_for_recovery(OWNER, created.job_id)
+    assert recovery.generation_record.runtime_key_version == "runtime-key-v2"
+    assert recovery.generation_record.durable_state_ref == DURABLE_STATE_REF
+    assert recovery.generation_record.durable_key_version == "durable-key-v1"
+    assert recovery.generation_record.durable_digest == DURABLE_DIGEST
 
     replay = await ledger.abandon_generation(
         OWNER,
@@ -283,9 +330,47 @@ async def test_start_failure_abandons_and_never_reuses_generation(ledger, reposi
     assert len(await repository.audit_records_for_test()) == 4
 
 
+async def test_new_start_cannot_replace_pinned_durable_metadata(ledger):
+    created = await _create(ledger)
+    await begin_generation_start(
+        ledger,
+        idempotency_key="memory-pin-start-01",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
+    )
+    await ledger.abandon_generation(
+        OWNER,
+        created.job_id,
+        1,
+        GenerationState.STARTING,
+        "start_failed",
+    )
+
+    with pytest.raises(ConcurrentMutation):
+        await begin_generation_start(
+            ledger,
+            idempotency_key="memory-pin-start-02",
+            job_id=created.job_id,
+            expected_generation=1,
+            execution_lease_seconds=30,
+            durable_state_ref="durable://replacement",
+        )
+
+    recovery = await ledger.inspect_job_for_recovery(OWNER, created.job_id)
+    assert recovery.durable_state_ref == DURABLE_STATE_REF
+    assert recovery.generation == 1
+
+
 async def test_unknown_abandonment_replay_operation_cannot_mutate(ledger, repository):
     created = await _create(ledger)
-    await ledger.begin_start(OWNER, "memory-start-00001", created.job_id, 0, 30)
+    await begin_generation_start(
+        ledger,
+        idempotency_key="memory-start-00001",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
+    )
     with pytest.raises(OperationMismatch):
         await ledger.abandon_generation(
             OWNER,
@@ -373,8 +458,12 @@ async def test_running_completion_replay_uses_original_generation_metadata(
         ReleaseTarget.PARKED,
     )
     await ledger.mark_released(OWNER, release.operation_id, created.job_id, 1)
-    second = await ledger.begin_start(
-        OWNER, "memory-start-new001", created.job_id, 1, 30
+    second = await begin_generation_start(
+        ledger,
+        idempotency_key="memory-start-new001",
+        job_id=created.job_id,
+        expected_generation=1,
+        execution_lease_seconds=30,
     )
     await ledger.mark_running(
         OWNER,
@@ -382,11 +471,7 @@ async def test_running_completion_replay_uses_original_generation_metadata(
         created.job_id,
         2,
         "runtime://generation-2",
-        "durable://generation-2",
-        "runtime-key-v2",
-        "durable-key-v2",
         "f" * 64,
-        "0" * 64,
     )
 
     replay = await mark_generation_running(
@@ -410,11 +495,7 @@ async def test_completion_replay_requires_exact_metadata(ledger, repository):
             created.job_id,
             1,
             "runtime://different",
-            "durable://generation-1",
-            "runtime-key-v1",
-            "durable-key-v1",
             CAPABILITY_DIGEST,
-            DURABLE_DIGEST,
         )
     assert len(await repository.audit_records_for_test()) == 3
 
@@ -462,11 +543,19 @@ async def test_concurrent_same_key_start_is_one_mutation_plus_replay(
 ):
     created = await _create(ledger)
     first, second = await asyncio.gather(
-        ledger.begin_start(
-            OWNER, "memory-concurrent-1", created.job_id, 0, 30
+        begin_generation_start(
+            ledger,
+            idempotency_key="memory-concurrent-1",
+            job_id=created.job_id,
+            expected_generation=0,
+            execution_lease_seconds=30,
         ),
-        ledger.begin_start(
-            OWNER, "memory-concurrent-1", created.job_id, 0, 30
+        begin_generation_start(
+            ledger,
+            idempotency_key="memory-concurrent-1",
+            job_id=created.job_id,
+            expected_generation=0,
+            execution_lease_seconds=30,
         ),
     )
     assert {first.replayed, second.replayed} == {False, True}
@@ -480,11 +569,19 @@ async def test_concurrent_different_start_intents_have_one_winner(
 ):
     created = await _create(ledger)
     results = await asyncio.gather(
-        ledger.begin_start(
-            OWNER, "memory-concurrent-a", created.job_id, 0, 30
+        begin_generation_start(
+            ledger,
+            idempotency_key="memory-concurrent-a",
+            job_id=created.job_id,
+            expected_generation=0,
+            execution_lease_seconds=30,
         ),
-        ledger.begin_start(
-            OWNER, "memory-concurrent-b", created.job_id, 0, 30
+        begin_generation_start(
+            ledger,
+            idempotency_key="memory-concurrent-b",
+            job_id=created.job_id,
+            expected_generation=0,
+            execution_lease_seconds=30,
         ),
         return_exceptions=True,
     )
@@ -507,7 +604,7 @@ async def test_audit_and_public_results_contain_no_protected_values(
     rendered = repr((asdict(public), audit))
     for protected in (
         "runtime://generation-1",
-        "durable://generation-1",
+        DURABLE_STATE_REF,
         CAPABILITY_DIGEST,
         DURABLE_DIGEST,
     ):
@@ -524,8 +621,12 @@ async def test_abandonment_fails_the_superseded_pending_operation(
     ledger, repository
 ):
     created = await _create(ledger)
-    start = await ledger.begin_start(
-        OWNER, "memory-start-00001", created.job_id, 0, 30
+    start = await begin_generation_start(
+        ledger,
+        idempotency_key="memory-start-00001",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
     )
     await ledger.abandon_generation(
         OWNER,

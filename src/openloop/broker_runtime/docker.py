@@ -347,6 +347,34 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
         self._probe_complete = False
         self._resource_locks: dict[str, _LockEntry] = {}
 
+    @property
+    def maximum_lifetime_seconds(self) -> int:
+        return self.config.maximum_lifetime_seconds
+
+    @staticmethod
+    def _endpoint(policy: DockerGenerationPolicy) -> RelayClientEndpoint:
+        return RelayClientEndpoint(
+            socket_path=policy.paths.host_socket,
+            conversation_id=policy.spec.conversation_id,
+            relay_capability=policy.spec.relay_capability,
+            session_api_key=policy.spec.session_api_key,
+            mode=policy.compiled_relay.endpoint.mode,
+        )
+
+    def describe_endpoint(
+        self, spec: OpenHandsGenerationSpec
+    ) -> RelayClientEndpoint:
+        if not isinstance(spec, OpenHandsGenerationSpec):
+            raise TypeError("spec must be an OpenHandsGenerationSpec")
+        try:
+            return self._endpoint(DockerGenerationPolicy.build(self.config, spec))
+        except RuntimeDriverError:
+            raise
+        except Exception as exc:
+            raise RuntimeUnavailable(
+                "fixed generation endpoint compilation failed"
+            ) from exc
+
     def _now(self) -> datetime:
         try:
             value = self._clock()
@@ -832,13 +860,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
             raise RuntimeUnavailable(f"{role} container did not reach running state")
 
     async def _default_health_check(self, policy: DockerGenerationPolicy) -> None:
-        endpoint = RelayClientEndpoint(
-            socket_path=policy.paths.host_socket,
-            conversation_id=policy.spec.conversation_id,
-            relay_capability=policy.spec.relay_capability,
-            session_api_key=policy.spec.session_api_key,
-            mode=policy.compiled_relay.endpoint.mode,
-        )
+        endpoint = self._endpoint(policy)
 
         def request() -> bool:
             transport = httpx.HTTPTransport(uds=str(endpoint.socket_path))
@@ -913,7 +935,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
                     )
                 return EnsuredGeneration(
                     handle=identity.opaque_handle,
-                    endpoint=policy.compiled_relay.endpoint,
+                    endpoint=self._endpoint(policy),
                     observation=observation,
                 )
             except BaseException as exc:

@@ -350,8 +350,27 @@ def test_command_execution_repr_never_renders_retained_output():
     assert "stdout=<bounded text" in rendered
 
 
+def test_describe_endpoint_is_pure_and_uses_host_socket(short_root):
+    driver, docker, health = _driver(short_root)
+
+    endpoint = driver.describe_endpoint(_spec())
+
+    assert driver.maximum_lifetime_seconds == 86_400
+    assert endpoint.socket_path == (
+        driver.config.runtime_root
+        / str(JOB_ID)
+        / "1"
+        / "socket"
+        / "agent.sock"
+    )
+    assert docker.calls == []
+    assert health.calls == []
+    assert not endpoint.socket_path.exists()
+
+
 async def test_ensure_creates_agent_then_relay_and_returns_redacted_result(short_root):
     driver, docker, health = _driver(short_root)
+    endpoint = driver.describe_endpoint(_spec())
     result = await driver.ensure(_spec())
 
     names = derive_generation_names(_spec().identity)
@@ -366,6 +385,7 @@ async def test_ensure_creates_agent_then_relay_and_returns_redacted_result(short
     assert health.calls
     assert result.observation.complete
     assert result.handle == _spec().identity.opaque_handle
+    assert result.endpoint == endpoint
     assert driver._resource_locks == {}
     for secret in ("r" * 43, "s" * 43, "c" * 43):
         assert secret not in repr(result)

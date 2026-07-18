@@ -31,6 +31,9 @@ class AuditReason(str, Enum):
     MISSING_INTENT = "missing_intent"
     NOT_FOUND_OR_UNAUTHORIZED = "not_found_or_unauthorized"
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
+    STATE_CONFLICT = "state_conflict"
+    RUNTIME_UNAVAILABLE = "runtime_unavailable"
+    DEADLINE_EXCEEDED = "deadline_exceeded"
     OVERLOADED = "overloaded"
     INTERNAL = "internal"
 

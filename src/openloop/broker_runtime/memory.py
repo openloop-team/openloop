@@ -5,7 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-from openloop.tools.openhands_relay import RelayMode, compile_openhands_relay
+from openloop.tools.openhands_relay import (
+    RelayClientEndpoint,
+    RelayMode,
+    compile_openhands_relay,
+)
 
 from .contract import (
     EnsuredGeneration,
@@ -17,6 +21,7 @@ from .contract import (
     RuntimeExpired,
     RuntimeIdentityConflict,
     RuntimeResourceState,
+    RuntimeUnavailable,
 )
 
 
@@ -25,9 +30,35 @@ class InMemoryRuntimeDriver(RuntimeDriver):
         self,
         *,
         clock: Callable[[], datetime] | None = None,
+        maximum_lifetime_seconds: int = 86_400,
     ) -> None:
+        if (
+            isinstance(maximum_lifetime_seconds, bool)
+            or not isinstance(maximum_lifetime_seconds, int)
+            or not 1 <= maximum_lifetime_seconds <= 86_400
+        ):
+            raise ValueError("maximum_lifetime_seconds must be in 1-86400")
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._maximum_lifetime_seconds = maximum_lifetime_seconds
         self._specs: dict[GenerationRuntimeIdentity, OpenHandsGenerationSpec] = {}
+
+    @property
+    def maximum_lifetime_seconds(self) -> int:
+        return self._maximum_lifetime_seconds
+
+    def describe_endpoint(
+        self, spec: OpenHandsGenerationSpec
+    ) -> RelayClientEndpoint:
+        if not isinstance(spec, OpenHandsGenerationSpec):
+            raise TypeError("spec must be an OpenHandsGenerationSpec")
+        return compile_openhands_relay(
+            job_id=spec.job_id,
+            generation=spec.generation,
+            conversation_id=spec.conversation_id,
+            relay_capability=spec.relay_capability,
+            session_api_key=spec.session_api_key,
+            mode=RelayMode.RUNNING,
+        ).endpoint
 
     def _expired(self, identity: GenerationRuntimeIdentity) -> bool:
         return self._clock() >= identity.deadline
@@ -38,24 +69,20 @@ class InMemoryRuntimeDriver(RuntimeDriver):
         identity = spec.identity
         if self._expired(identity):
             raise RuntimeExpired("generation execution deadline has elapsed")
+        if (
+            identity.deadline - self._clock()
+        ).total_seconds() > self._maximum_lifetime_seconds:
+            raise RuntimeUnavailable("generation deadline exceeds runtime maximum")
         existing = self._specs.get(identity)
         if existing is not None and existing != spec:
             raise RuntimeIdentityConflict(
                 "generation identity was reused with different runtime inputs"
             )
         self._specs[identity] = spec
-        compiled = compile_openhands_relay(
-            job_id=spec.job_id,
-            generation=spec.generation,
-            conversation_id=spec.conversation_id,
-            relay_capability=spec.relay_capability,
-            session_api_key=spec.session_api_key,
-            mode=RelayMode.RUNNING,
-        )
         observation = await self.inspect(identity)
         return EnsuredGeneration(
             handle=identity.opaque_handle,
-            endpoint=compiled.endpoint,
+            endpoint=self.describe_endpoint(spec),
             observation=observation,
         )
 

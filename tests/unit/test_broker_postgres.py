@@ -143,6 +143,22 @@ class FakePool:
         self.closed = True
 
 
+async def test_database_clock_is_truncated_for_runtime_identity_deadlines():
+    class ClockConnection:
+        def __init__(self):
+            self.query = None
+
+        async def fetchval(self, query):
+            self.query = query
+            return datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+
+    connection = ClockConnection()
+    value = await PostgresBrokerRepository._database_now(connection)
+
+    assert value.microsecond == 0
+    assert connection.query == "SELECT date_trunc('second', clock_timestamp())"
+
+
 async def test_setup_uses_one_transaction_lock_and_applies_in_order(monkeypatch):
     migrations = (
         Migration.from_bytes(1, "initial", b"SELECT 1;\n"),

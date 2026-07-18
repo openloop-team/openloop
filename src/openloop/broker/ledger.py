@@ -170,12 +170,20 @@ class BrokerLedger:
         job_id: UUID,
         expected_generation: int,
         execution_lease_seconds: int,
+        runtime_key_version: str,
+        durable_state_ref: str,
+        durable_key_version: str,
+        durable_digest: str,
     ) -> OperationTicket:
         self._owner(owner)
         validate_idempotency_key(idempotency_key)
         validate_uuid("job_id", job_id)
         validate_bigint("expected_generation", expected_generation)
         validate_lease_seconds(execution_lease_seconds)
+        validate_identifier("runtime_key_version", runtime_key_version)
+        validate_opaque_ref("durable_state_ref", durable_state_ref)
+        validate_identifier("durable_key_version", durable_key_version)
+        validate_sha256("durable_digest", durable_digest)
         command = BeginStartCommand(
             owner=owner,
             idempotency_key=idempotency_key,
@@ -183,6 +191,10 @@ class BrokerLedger:
             job_id=job_id,
             expected_generation=expected_generation,
             execution_lease_seconds=execution_lease_seconds,
+            runtime_key_version=runtime_key_version,
+            durable_state_ref=durable_state_ref,
+            durable_key_version=durable_key_version,
+            durable_digest=durable_digest,
         )
         return await self._repository.begin_start(self._prepare(command))
 
@@ -193,22 +205,14 @@ class BrokerLedger:
         job_id: UUID,
         generation: int,
         runtime_ref: str,
-        durable_state_ref: str,
-        runtime_key_version: str,
-        durable_key_version: str,
         capability_digest: str,
-        durable_digest: str,
     ) -> OperationResult:
         self._owner(owner)
         validate_uuid("operation_id", operation_id)
         validate_uuid("job_id", job_id)
         validate_positive_bigint("generation", generation)
         validate_opaque_ref("runtime_ref", runtime_ref)
-        validate_opaque_ref("durable_state_ref", durable_state_ref)
-        validate_identifier("runtime_key_version", runtime_key_version)
-        validate_identifier("durable_key_version", durable_key_version)
         validate_sha256("capability_digest", capability_digest)
-        validate_sha256("durable_digest", durable_digest)
         return await self._repository.mark_running(
             MarkRunningCommand(
                 owner=owner,
@@ -216,11 +220,7 @@ class BrokerLedger:
                 job_id=job_id,
                 generation=generation,
                 runtime_ref=runtime_ref,
-                durable_state_ref=durable_state_ref,
-                runtime_key_version=runtime_key_version,
-                durable_key_version=durable_key_version,
                 capability_digest=capability_digest,
-                durable_digest=durable_digest,
             )
         )
 

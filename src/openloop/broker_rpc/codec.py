@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+from pathlib import Path
 import struct
 from typing import Any
 from uuid import UUID
@@ -30,8 +31,11 @@ from .models import (
     InspectJobPayload,
     InspectJobResult,
     RPC_VERSION,
+    RunningGenerationAccess,
     RpcRequest,
     RpcResponse,
+    StartSegmentPayload,
+    StartSegmentResult,
 )
 
 
@@ -163,9 +167,17 @@ def _request_dict(request: RpcRequest) -> dict[str, object]:
         payload: dict[str, object] = {
             "idempotency_key": request.payload.idempotency_key
         }
-    else:
+    elif request.method is WorkloadIntent.INSPECT_JOB:
         assert isinstance(request.payload, InspectJobPayload)
         payload = {"job_id": str(request.payload.job_id)}
+    else:
+        assert request.method is WorkloadIntent.START_SEGMENT
+        assert isinstance(request.payload, StartSegmentPayload)
+        payload = {
+            "job_id": str(request.payload.job_id),
+            "expected_generation": request.payload.expected_generation,
+            "idempotency_key": request.payload.idempotency_key,
+        }
     return {
         "version": request.version,
         "request_id": str(request.request_id),
@@ -210,9 +222,19 @@ def decode_request(frame: bytes) -> RpcRequest:
         if method is WorkloadIntent.CREATE_JOB:
             payload_value = _exact(value["payload"], {"idempotency_key"})
             payload = CreateJobPayload(_text(payload_value["idempotency_key"]))
-        else:
+        elif method is WorkloadIntent.INSPECT_JOB:
             payload_value = _exact(value["payload"], {"job_id"})
             payload = InspectJobPayload(_uuid(payload_value["job_id"]))
+        else:
+            payload_value = _exact(
+                value["payload"],
+                {"job_id", "expected_generation", "idempotency_key"},
+            )
+            payload = StartSegmentPayload(
+                _uuid(payload_value["job_id"]),
+                _integer(payload_value["expected_generation"]),
+                _text(payload_value["idempotency_key"]),
+            )
         return RpcRequest(
             version=version,
             request_id=_uuid(value["request_id"]),
@@ -459,6 +481,45 @@ def _decode_snapshot(value: object) -> JobSnapshot:
         raise RpcProtocolProblem() from error
 
 
+def _access_dict(value: RunningGenerationAccess) -> dict[str, object]:
+    return {
+        "job_id": str(value.job_id),
+        "conversation_id": str(value.conversation_id),
+        "generation": value.generation,
+        "deadline": value.deadline.isoformat(),
+        "socket_path": str(value.socket_path),
+        "relay_capability": value.relay_capability,
+        "session_api_key": value.session_api_key,
+    }
+
+
+def _decode_access(value: object) -> RunningGenerationAccess:
+    item = _exact(
+        value,
+        {
+            "job_id",
+            "conversation_id",
+            "generation",
+            "deadline",
+            "socket_path",
+            "relay_capability",
+            "session_api_key",
+        },
+    )
+    try:
+        return RunningGenerationAccess(
+            job_id=_uuid(item["job_id"]),
+            conversation_id=_uuid(item["conversation_id"]),
+            generation=_integer(item["generation"]),
+            deadline=_timestamp(item["deadline"]),
+            socket_path=Path(_text(item["socket_path"])),
+            relay_capability=_text(item["relay_capability"]),
+            session_api_key=_text(item["session_api_key"]),
+        )
+    except (TypeError, ValueError) as error:
+        raise RpcProtocolProblem() from error
+
+
 def _response_dict(response: RpcResponse) -> dict[str, object]:
     result = None
     error = None
@@ -472,6 +533,18 @@ def _response_dict(response: RpcResponse) -> dict[str, object]:
         result = {
             "type": WorkloadIntent.INSPECT_JOB.value,
             "snapshot": _snapshot_dict(response.result.snapshot),
+            "access": (
+                _access_dict(response.result.access)
+                if response.result.access is not None
+                else None
+            ),
+        }
+    elif isinstance(response.result, StartSegmentResult):
+        result = {
+            "type": WorkloadIntent.START_SEGMENT.value,
+            "operation_id": str(response.result.operation_id),
+            "replayed": response.result.replayed,
+            "access": _access_dict(response.result.access),
         }
     else:
         assert response.failure is not None
@@ -518,8 +591,28 @@ def decode_response(frame: bytes) -> RpcResponse:
                     JobCapability(_text(item["capability"])),
                 )
             elif result_type == WorkloadIntent.INSPECT_JOB.value:
-                item = _exact(result, {"type", "snapshot"})
-                decoded = InspectJobResult(_decode_snapshot(item["snapshot"]))
+                item = _exact(result, {"type", "snapshot", "access"})
+                decoded = InspectJobResult(
+                    _decode_snapshot(item["snapshot"]),
+                    (
+                        _decode_access(item["access"])
+                        if item["access"] is not None
+                        else None
+                    ),
+                )
+            elif result_type == WorkloadIntent.START_SEGMENT.value:
+                item = _exact(
+                    result,
+                    {"type", "operation_id", "replayed", "access"},
+                )
+                replayed = item["replayed"]
+                if type(replayed) is not bool:
+                    raise RpcProtocolProblem()
+                decoded = StartSegmentResult(
+                    _uuid(item["operation_id"]),
+                    replayed,
+                    _decode_access(item["access"]),
+                )
             else:
                 raise RpcProtocolProblem()
             return RpcResponse(version, request_id, result=decoded)
@@ -535,4 +628,3 @@ def decode_response(frame: bytes) -> RpcResponse:
         raise
     except (TypeError, ValueError) as error:
         raise RpcProtocolProblem() from error
-

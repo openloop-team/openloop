@@ -31,6 +31,7 @@ from openloop.broker.postgres import (
 from tests.support.broker_repository_contract import (
     OWNER,
     SequenceIds,
+    begin_generation_start,
     exercise_complete_lifecycle,
     mark_generation_running,
     quiesce_generation,
@@ -107,8 +108,12 @@ async def test_postgres_create_start_running_and_abandon_contract(
     assert replay.replayed is True
     assert replay.job_id == created.job_id
 
-    start = await ledger.begin_start(
-        OWNER, "postgres-start-00001", created.job_id, 0, 30
+    start = await begin_generation_start(
+        ledger,
+        idempotency_key="postgres-start-00001",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
     )
     running = await mark_generation_running(
         ledger,
@@ -155,8 +160,12 @@ async def test_postgres_start_failure_allocates_next_generation(
     created = await ledger.create_job(
         OWNER, "postgres-create-0002", "default", "docker", "postgres"
     )
-    await ledger.begin_start(
-        OWNER, "postgres-start-fail1", created.job_id, 0, 30
+    await begin_generation_start(
+        ledger,
+        idempotency_key="postgres-start-fail1",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
     )
     abandoned = await ledger.abandon_generation(
         OWNER,
@@ -174,8 +183,12 @@ async def test_postgres_start_failure_allocates_next_generation(
         replay_operation_id=abandoned.operation_id,
     )
     assert replay.replayed is True
-    second = await ledger.begin_start(
-        OWNER, "postgres-start-next1", created.job_id, 1, 30
+    second = await begin_generation_start(
+        ledger,
+        idempotency_key="postgres-start-next1",
+        job_id=created.job_id,
+        expected_generation=1,
+        execution_lease_seconds=30,
     )
     assert second.generation == 2
     assert await _audit_count(pool) == 4
@@ -198,8 +211,12 @@ async def test_postgres_restart_preserves_inspection_and_exact_replay(
     created = await ledger.create_job(
         OWNER, "postgres-restart-001", "default", "docker", "postgres"
     )
-    start = await ledger.begin_start(
-        OWNER, "postgres-restart-002", created.job_id, 0, 30
+    start = await begin_generation_start(
+        ledger,
+        idempotency_key="postgres-restart-002",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
     )
     await mark_generation_running(
         ledger,
@@ -215,8 +232,12 @@ async def test_postgres_restart_preserves_inspection_and_exact_replay(
         restarted_ledger = BrokerLedger(restarted, id_factory=SequenceIds(start=400))
         snapshot = await restarted_ledger.inspect_job(OWNER, created.job_id)
         assert snapshot.state is JobState.ACTIVE
-        replay = await restarted_ledger.begin_start(
-            OWNER, "postgres-restart-002", created.job_id, 0, 30
+        replay = await begin_generation_start(
+            restarted_ledger,
+            idempotency_key="postgres-restart-002",
+            job_id=created.job_id,
+            expected_generation=0,
+            execution_lease_seconds=30,
         )
         assert replay.replayed is True
         assert replay.operation_id == start.operation_id
@@ -279,11 +300,19 @@ async def test_postgres_concurrent_starts_preserve_one_live_generation(
         OWNER, "postgres-race-job001", "default", "docker", "postgres"
     )
     results = await asyncio.gather(
-        ledger.begin_start(
-            OWNER, "postgres-race-start-a", created.job_id, 0, 30
+        begin_generation_start(
+            ledger,
+            idempotency_key="postgres-race-start-a",
+            job_id=created.job_id,
+            expected_generation=0,
+            execution_lease_seconds=30,
         ),
-        ledger.begin_start(
-            OWNER, "postgres-race-start-b", created.job_id, 0, 30
+        begin_generation_start(
+            ledger,
+            idempotency_key="postgres-race-start-b",
+            job_id=created.job_id,
+            expected_generation=0,
+            execution_lease_seconds=30,
         ),
         return_exceptions=True,
     )
@@ -312,8 +341,12 @@ async def test_postgres_same_key_quiesce_release_and_completion_races_replay(
     created = await ledger.create_job(
         OWNER, "postgres-race-flow01", "default", "docker", "postgres"
     )
-    start = await ledger.begin_start(
-        OWNER, "postgres-race-flow02", created.job_id, 0, 30
+    start = await begin_generation_start(
+        ledger,
+        idempotency_key="postgres-race-flow02",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
     )
     running_results = await asyncio.gather(
         mark_generation_running(
@@ -388,8 +421,12 @@ async def test_postgres_receipt_rejection_rolls_back_operation_and_audit(
     created = await ledger.create_job(
         OWNER, "postgres-receipt-001", "default", "docker", "postgres"
     )
-    start = await ledger.begin_start(
-        OWNER, "postgres-receipt-002", created.job_id, 0, 30
+    start = await begin_generation_start(
+        ledger,
+        idempotency_key="postgres-receipt-002",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
     )
     await mark_generation_running(
         ledger,

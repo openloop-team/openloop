@@ -166,6 +166,10 @@ class BeginStartCommand(_DigestCommand):
     job_id: UUID
     expected_generation: int
     execution_lease_seconds: int
+    runtime_key_version: str = field(metadata=_NO_DIGEST)
+    durable_state_ref: str = field(repr=False, metadata=_NO_DIGEST)
+    durable_key_version: str = field(metadata=_NO_DIGEST)
+    durable_digest: str = field(repr=False, metadata=_NO_DIGEST)
 
     def __post_init__(self) -> None:
         _require_owner(self.owner)
@@ -174,6 +178,10 @@ class BeginStartCommand(_DigestCommand):
         validate_uuid("job_id", self.job_id)
         validate_bigint("expected_generation", self.expected_generation)
         validate_lease_seconds(self.execution_lease_seconds)
+        validate_identifier("runtime_key_version", self.runtime_key_version)
+        validate_opaque_ref("durable_state_ref", self.durable_state_ref)
+        validate_identifier("durable_key_version", self.durable_key_version)
+        validate_sha256("durable_digest", self.durable_digest)
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,11 +193,7 @@ class MarkRunningCommand:
     job_id: UUID
     generation: int
     runtime_ref: str = field(repr=False)
-    durable_state_ref: str = field(repr=False)
-    runtime_key_version: str
-    durable_key_version: str
     capability_digest: str = field(repr=False)
-    durable_digest: str = field(repr=False)
 
     def __post_init__(self) -> None:
         _require_owner(self.owner)
@@ -197,11 +201,7 @@ class MarkRunningCommand:
         validate_uuid("job_id", self.job_id)
         validate_positive_bigint("generation", self.generation)
         validate_opaque_ref("runtime_ref", self.runtime_ref)
-        validate_opaque_ref("durable_state_ref", self.durable_state_ref)
-        validate_identifier("runtime_key_version", self.runtime_key_version)
-        validate_identifier("durable_key_version", self.durable_key_version)
         validate_sha256("capability_digest", self.capability_digest)
-        validate_sha256("durable_digest", self.durable_digest)
 
 
 @dataclass(frozen=True, slots=True)

@@ -14,6 +14,8 @@ class RpcErrorCode(str, Enum):
     METHOD_NOT_ALLOWED = "METHOD_NOT_ALLOWED"
     NOT_FOUND_OR_UNAUTHORIZED = "NOT_FOUND_OR_UNAUTHORIZED"
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
+    STATE_CONFLICT = "STATE_CONFLICT"
+    RUNTIME_UNAVAILABLE = "RUNTIME_UNAVAILABLE"
     OVERLOADED = "OVERLOADED"
     DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
     INTERNAL = "INTERNAL"
@@ -34,4 +36,3 @@ class RpcProtocolProblem(Exception):
             raise TypeError("code must be RpcErrorCode")
         self.code = code
         super().__init__("broker RPC input rejected")
-

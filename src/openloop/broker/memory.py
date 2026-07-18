@@ -290,6 +290,20 @@ class InMemoryBrokerRepository:
             generation_number = job.generation + 1
             if (job.job_id, generation_number) in self._generations:
                 raise ConcurrentMutation(job.job_id)
+            if job.durable_state_ref is None:
+                durable_state_ref = command.durable_state_ref
+                durable_key_version = command.durable_key_version
+                durable_digest = command.durable_digest
+            else:
+                if (
+                    job.durable_state_ref != command.durable_state_ref
+                    or job.durable_key_version != command.durable_key_version
+                    or job.durable_digest != command.durable_digest
+                ):
+                    raise ConcurrentMutation(job.job_id)
+                durable_state_ref = job.durable_state_ref
+                durable_key_version = job.durable_key_version
+                durable_digest = job.durable_digest
             now = self._now()
             generation = GenerationRecord(
                 job_id=job.job_id,
@@ -300,11 +314,11 @@ class InMemoryBrokerRepository:
                 start_operation_id=command.operation_id,
                 pending_operation_id=command.operation_id,
                 runtime_ref=None,
-                durable_state_ref=None,
-                runtime_key_version=None,
-                durable_key_version=None,
+                durable_state_ref=durable_state_ref,
+                runtime_key_version=command.runtime_key_version,
+                durable_key_version=durable_key_version,
                 capability_digest=None,
-                durable_digest=None,
+                durable_digest=durable_digest,
                 execution_lease_deadline=now
                 + timedelta(seconds=command.execution_lease_seconds),
                 barrier_id=None,
@@ -320,6 +334,9 @@ class InMemoryBrokerRepository:
                 revision=job.revision + 1,
                 generation=generation_number,
                 pending_operation_id=command.operation_id,
+                durable_state_ref=durable_state_ref,
+                durable_key_version=durable_key_version,
+                durable_digest=durable_digest,
                 updated_at=now,
             )
             ticket = OperationTicket(
@@ -369,14 +386,8 @@ class InMemoryBrokerRepository:
                 generation = self._generation(command.job_id, command.generation)
                 if (
                     generation.runtime_ref != command.runtime_ref
-                    or generation.durable_state_ref != command.durable_state_ref
-                    or generation.runtime_key_version != command.runtime_key_version
-                    or generation.durable_key_version != command.durable_key_version
                     or generation.capability_digest != command.capability_digest
                 ):
-                    raise OperationMismatch(command.operation_id)
-                job = self._job(command.owner, command.job_id)
-                if generation.durable_digest != command.durable_digest:
                     raise OperationMismatch(command.operation_id)
                 return replay
             job = self._job(command.owner, command.job_id)
@@ -398,11 +409,7 @@ class InMemoryBrokerRepository:
                 revision=generation.revision + 1,
                 pending_operation_id=None,
                 runtime_ref=command.runtime_ref,
-                durable_state_ref=command.durable_state_ref,
-                runtime_key_version=command.runtime_key_version,
-                durable_key_version=command.durable_key_version,
                 capability_digest=command.capability_digest,
-                durable_digest=command.durable_digest,
                 updated_at=now,
             )
             updated_job = replace(
@@ -411,9 +418,6 @@ class InMemoryBrokerRepository:
                 revision=job.revision + 1,
                 current_generation=command.generation,
                 pending_operation_id=None,
-                durable_state_ref=command.durable_state_ref,
-                durable_key_version=command.durable_key_version,
-                durable_digest=command.durable_digest,
                 updated_at=now,
             )
             result = OperationResult(

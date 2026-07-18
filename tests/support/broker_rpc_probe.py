@@ -30,6 +30,10 @@ from openloop.broker_rpc.identity import (
     WorkloadIdentityVerifier,
     WorkloadIntent,
 )
+from openloop.broker_rpc.coordinator import (
+    SegmentCoordinatorCode,
+    SegmentCoordinatorProblem,
+)
 from openloop.broker_rpc.keys import VerificationKeySet
 from openloop.broker_rpc.limits import BrokerRpcLimits
 from openloop.broker_rpc.models import (
@@ -47,6 +51,14 @@ from openloop.postgres import create_pool
 
 
 _CONFIG_PATH = Path("/run/openloop/config/broker.json")
+
+
+class DisabledSegmentCoordinator:
+    async def start_segment(self, owner, payload):
+        raise SegmentCoordinatorProblem(SegmentCoordinatorCode.INTERNAL)
+
+    async def inspect_running_access(self, owner, job_id):
+        return None
 
 
 def _read_config() -> dict[str, object]:
@@ -87,7 +99,8 @@ async def _broker() -> None:
             identity_verifier=verifier,
             capability_authority=JobCapabilityAuthority(capability_roots),
             audit_sink=audit,
-            policy=BrokerRpcPolicy("default", "docker", "postgres"),
+            policy=BrokerRpcPolicy("default", "docker", "postgres", 300),
+            segment_coordinator=DisabledSegmentCoordinator(),
         )
         limits = BrokerRpcLimits(
             max_in_flight=32,

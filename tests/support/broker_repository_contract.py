@@ -19,6 +19,8 @@ OWNER = BrokerOwner("tenant-contract", "workload-contract")
 OTHER_OWNER = BrokerOwner("tenant-other", "workload-other")
 CAPABILITY_DIGEST = "a" * 64
 DURABLE_DIGEST = "b" * 64
+DURABLE_STATE_REF = "durable://job-state"
+DURABLE_KEY_VERSION = "durable-key-v1"
 
 
 class SequenceIds:
@@ -80,11 +82,32 @@ async def mark_generation_running(
         job_id,
         generation,
         f"runtime://generation-{generation}",
-        f"durable://generation-{generation}",
-        f"runtime-key-v{generation}",
-        f"durable-key-v{generation}",
         CAPABILITY_DIGEST,
-        DURABLE_DIGEST,
+    )
+
+
+async def begin_generation_start(
+    ledger: BrokerLedger,
+    *,
+    idempotency_key: str,
+    job_id: UUID,
+    expected_generation: int,
+    execution_lease_seconds: int,
+    runtime_key_version: str | None = None,
+    durable_state_ref: str = DURABLE_STATE_REF,
+    durable_key_version: str = DURABLE_KEY_VERSION,
+    durable_digest: str = DURABLE_DIGEST,
+):
+    return await ledger.begin_start(
+        OWNER,
+        idempotency_key,
+        job_id,
+        expected_generation,
+        execution_lease_seconds,
+        runtime_key_version or f"runtime-key-v{expected_generation + 1}",
+        durable_state_ref,
+        durable_key_version,
+        durable_digest,
     )
 
 
@@ -130,8 +153,12 @@ async def exercise_complete_lifecycle(ledger: BrokerLedger) -> LifecycleTrace:
     )
     snapshots.append(await ledger.inspect_job(OWNER, created.job_id))
 
-    first = await ledger.begin_start(
-        OWNER, "contract-start-00001", created.job_id, 0, 30
+    first = await begin_generation_start(
+        ledger,
+        idempotency_key="contract-start-00001",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
     )
     snapshots.append(await ledger.inspect_job(OWNER, created.job_id))
     await mark_generation_running(
@@ -163,8 +190,12 @@ async def exercise_complete_lifecycle(ledger: BrokerLedger) -> LifecycleTrace:
     await ledger.mark_released(OWNER, release.operation_id, created.job_id, 1)
     snapshots.append(await ledger.inspect_job(OWNER, created.job_id))
 
-    second = await ledger.begin_start(
-        OWNER, "contract-start-00002", created.job_id, 1, 60
+    second = await begin_generation_start(
+        ledger,
+        idempotency_key="contract-start-00002",
+        job_id=created.job_id,
+        expected_generation=1,
+        execution_lease_seconds=60,
     )
     await mark_generation_running(
         ledger,

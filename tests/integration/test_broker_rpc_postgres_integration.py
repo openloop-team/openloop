@@ -21,6 +21,10 @@ from openloop.broker_rpc.capability import (
     JobCapability,
     JobCapabilityAuthority,
 )
+from openloop.broker_rpc.coordinator import (
+    SegmentCoordinatorCode,
+    SegmentCoordinatorProblem,
+)
 from openloop.broker_rpc.errors import RpcErrorCode
 from openloop.broker_rpc.identity import (
     WorkloadIdentityIssuer,
@@ -42,6 +46,16 @@ DSN = os.environ.get(
     "postgresql://openloop:change-me@localhost:5432/openloop",
 )
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+
+
+class DisabledSegmentCoordinator:
+    async def start_segment(self, owner, payload):
+        raise SegmentCoordinatorProblem(SegmentCoordinatorCode.INTERNAL)
+
+    async def inspect_running_access(self, owner, job_id):
+        return None
+
+
 OWNER = BrokerOwner("tenant-a", "workload-a")
 OTHER_OWNER = BrokerOwner("tenant-b", "workload-b")
 PEER = PeerCredentials(4401, 1000, 1000)
@@ -143,7 +157,8 @@ async def rpc_postgres():
             identity_verifier=verifier,
             capability_authority=capability,
             audit_sink=audit,
-            policy=BrokerRpcPolicy("default", "docker", "postgres"),
+            policy=BrokerRpcPolicy("default", "docker", "postgres", 300),
+            segment_coordinator=DisabledSegmentCoordinator(),
         )
         yield RpcPostgresFixture(
             app, issuer, ledger, capability, audit, pool

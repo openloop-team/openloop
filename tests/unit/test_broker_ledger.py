@@ -236,6 +236,10 @@ def test_existing_job_identity_generation_and_lease_are_digest_semantics():
         job_id=JOB_ID,
         expected_generation=0,
         execution_lease_seconds=30,
+        runtime_key_version="runtime-v1",
+        durable_state_ref="local-openhands:v1:job",
+        durable_key_version="durable-v1",
+        durable_digest="d" * 64,
     )
     variants = [
         replace(command, owner=OTHER_OWNER),
@@ -248,6 +252,13 @@ def test_existing_job_identity_generation_and_lease_are_digest_semantics():
         command,
         idempotency_key="caller-start-9999",
         operation_id=OTHER_OPERATION_ID,
+    ).request_digest == command.request_digest
+    assert replace(
+        command,
+        runtime_key_version="runtime-v2",
+        durable_state_ref="local-openhands:v1:rotated",
+        durable_key_version="durable-v2",
+        durable_digest="e" * 64,
     ).request_digest == command.request_digest
 
 
@@ -370,7 +381,15 @@ async def test_ledger_builds_and_delegates_every_named_command():
     assert isinstance(created, CreateJobCommand)
 
     started = await ledger.begin_start(
-        OWNER, "caller-start-0001", job_id, 0, 30
+        OWNER,
+        "caller-start-0001",
+        job_id,
+        0,
+        30,
+        "runtime-key-v1",
+        "durable://job-state",
+        "durable-key-v1",
+        "e" * 64,
     )
     assert isinstance(started, BeginStartCommand)
 
@@ -380,11 +399,7 @@ async def test_ledger_builds_and_delegates_every_named_command():
         job_id,
         1,
         "runtime://handle",
-        "durable://handle",
-        "runtime-key-v1",
-        "durable-key-v1",
         "d" * 64,
-        "e" * 64,
     )
     assert isinstance(running, MarkRunningCommand)
 
@@ -465,10 +480,28 @@ async def test_boundary_validation_fails_before_id_minting_or_repository_access(
             OWNER, "caller-create-0001", "INVALID", "docker", "postgres"
         )
     with pytest.raises(ValueError, match="idempotency"):
-        await ledger.begin_start(OWNER, "short", JOB_ID, 0, 30)
+        await ledger.begin_start(
+            OWNER,
+            "short",
+            JOB_ID,
+            0,
+            30,
+            "runtime-key-v1",
+            "durable://job-state",
+            "durable-key-v1",
+            "d" * 64,
+        )
     with pytest.raises(ValueError, match="execution_lease"):
         await ledger.begin_start(
-            OWNER, "caller-start-0001", JOB_ID, 0, 0
+            OWNER,
+            "caller-start-0001",
+            JOB_ID,
+            0,
+            0,
+            "runtime-key-v1",
+            "durable://job-state",
+            "durable-key-v1",
+            "d" * 64,
         )
 
     assert ids.calls == 0

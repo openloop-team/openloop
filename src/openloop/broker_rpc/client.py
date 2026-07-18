@@ -1,4 +1,4 @@
-"""Typed one-shot client for the two broker RPC v1 operations."""
+"""Typed one-shot client for the reviewed broker RPC operations."""
 
 from __future__ import annotations
 
@@ -27,6 +27,8 @@ from .models import (
     InspectJobResult,
     RpcRequest,
     RpcResponse,
+    StartSegmentPayload,
+    StartSegmentResult,
 )
 
 
@@ -165,5 +167,29 @@ class BrokerRpcClient:
         )
         result = self._result(await self._exchange(request))
         if not isinstance(result, InspectJobResult):
+            raise BrokerRpcClientProblem()
+        return result
+
+    async def start_segment(
+        self,
+        job_id: UUID,
+        expected_generation: int,
+        idempotency_key: str,
+        capability: JobCapability,
+    ) -> StartSegmentResult:
+        request = RpcRequest(
+            RPC_VERSION,
+            self._request_id_factory(),
+            WorkloadIntent.START_SEGMENT,
+            await self._identity(WorkloadIntent.START_SEGMENT),
+            capability,
+            StartSegmentPayload(
+                job_id,
+                expected_generation,
+                idempotency_key,
+            ),
+        )
+        result = self._result(await self._exchange(request))
+        if not isinstance(result, StartSegmentResult):
             raise BrokerRpcClientProblem()
         return result
