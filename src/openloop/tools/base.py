@@ -38,13 +38,22 @@ class ActionSpec:
 class Invocation:
     """Outcome of asking the gateway to run an action."""
 
-    # executed | started | pending_approval | forbidden | denied | invalid
+    # executed | started | approved | pending_approval | forbidden | denied |
+    # invalid
     # ("invalid" = the args failed the action's declared schema; nothing was
     # persisted or executed — the caller/model can correct the args and retry)
+    # ("approved" = the decision is durable but no result exists yet: a losing
+    # concurrent click, or a decided row whose effect can't run on this
+    # gateway. Non-terminal and informational — surfaces render it as a status
+    # line, never as a tool result, and the winner's real outcome follows.)
     status: str
     result: ToolResult | None = None
     approval: ApprovalRequest | None = None
     message: str | None = None
+    # The canonical decider of a resolved approval — the approval row's
+    # ``decided_by``, set on every decided outcome. Surfaces and the session
+    # runner name this identity, never the caller who observed the decision.
+    decided_by: str | None = None
 
 
 @runtime_checkable

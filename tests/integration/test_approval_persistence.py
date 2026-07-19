@@ -1,13 +1,12 @@
-"""Regression: resolving an approval must persist via update(), not identity.
+"""Regression: resolving an approval persists the decision, not by identity.
 
-The in-memory store returns the same object from get(), so in-place mutation
-"works" by accident. A durable store (Postgres) returns a fresh object per
-get(), so the decision is only persisted if the gateway calls update(). This
-double mimics that to lock in the fix.
+The in-memory store is now snapshot-isolated — ``get`` returns a fresh copy per
+call, like a row-backed store — so a decision is only visible later if the
+gateway wrote it through a store op (``claim_decision``), never by mutating a
+shared object. These tests lock that in.
 """
 
 from pathlib import Path
-import copy
 
 from openloop.agents import load_agent
 from openloop.approvals import InMemoryApprovalStore
@@ -18,18 +17,10 @@ from openloop.testing import FakeGitHub
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 
-class CopyingApprovalStore(InMemoryApprovalStore):
-    """Returns detached copies from get(), like a row-backed store would."""
-
-    async def get(self, request_id: str):
-        original = self._by_id.get(request_id)
-        return copy.deepcopy(original) if original is not None else None
-
-
 async def test_resolution_persists_through_get_copies():
     agent = load_agent(AGENT_YAML)
     github = FakeGitHub()
-    store = CopyingApprovalStore()
+    store = InMemoryApprovalStore()
     gw = ToolGateway(tools=[GitHubConnector(github)], approvals=store)
 
     pending = await gw.invoke(
@@ -39,7 +30,7 @@ async def test_resolution_persists_through_get_copies():
 
     assert resolved.status == "executed"
     assert github.created  # executed
-    # The persisted record reflects the decision (only true if update() ran).
+    # The persisted record reflects the decision (only true if claim_decision ran).
     stored = await store.get(pending.approval.id)
     assert stored.status == "approved"
     assert stored.decided_by == "@maciag.artur"
@@ -47,7 +38,7 @@ async def test_resolution_persists_through_get_copies():
 
 async def test_denied_resolution_persists():
     agent = load_agent(AGENT_YAML)
-    store = CopyingApprovalStore()
+    store = InMemoryApprovalStore()
     gw = ToolGateway(tools=[GitHubConnector(FakeGitHub())], approvals=store)
 
     pending = await gw.invoke(

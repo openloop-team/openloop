@@ -92,15 +92,24 @@ def openhands_decision_blocks(
 
 def resolution_message(inv, approver: str) -> str:
     """Status line for a resolved approval — shared by the button reply and the
-    session continuation so they never drift."""
+    session continuation so they never drift.
+
+    Decided outcomes name the canonical decider (``inv.decided_by``), not the
+    caller who clicked — a losing concurrent click still reports the winner's
+    identity. Undecided outcomes (``forbidden``) fall back to the caller.
+    """
+    who = inv.decided_by or approver
     if inv.status == "executed":
         detail = inv.result.summary if inv.result else (inv.message or "done")
-        return f"✅ Approved by {approver} — {detail}"
+        return f"✅ Approved by {who} — {detail}"
     if inv.status == "started":
         detail = inv.result.summary if inv.result else (inv.message or "started")
-        return f"✅ Approved by {approver} — {detail}"
+        return f"✅ Approved by {who} — {detail}"
+    if inv.status == "approved":
+        # Decided but no result yet — informational, never a tool result.
+        return f"✅ Approved by {who} — the action is running; the result will follow."
     if inv.status == "denied":
-        return f"🚫 Denied by {approver}."
+        return f"🚫 Denied by {who}."
     # forbidden (not an approver / unknown / already resolved)
     return f"⛔ {inv.message}"
 

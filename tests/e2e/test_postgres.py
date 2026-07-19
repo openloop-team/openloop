@@ -905,8 +905,15 @@ async def test_workflow_drive_arbitration_sql_semantics(postgres_pool):
         await store.close()
 
 
+@pytest.mark.serial
 async def test_workflow_drive_gen_migration_is_idempotent(postgres_pool):
-    """setup() adds drive_gen to a pre-existing populated table, once."""
+    """setup() adds drive_gen to a pre-existing populated table, once.
+
+    HAZARD: this DROPs a column on the shared `workflow_instances` table and
+    re-adds it via setup(). It is safe only while the e2e suite runs serially —
+    a concurrent test touching this table during the drop window would break.
+    See the @pytest.mark.serial marker.
+    """
     if not await _reachable():
         pytest.skip(f"no Postgres reachable at {DSN}")
 
@@ -1122,3 +1129,158 @@ async def test_workflow_cancel_during_drive_wins_over_writer(postgres_pool):
             pass
         await store2.close()
         await store.close()
+
+
+def _approval(rid: str, *, created_at=None, **overrides):
+    from datetime import datetime, timezone
+
+    from openloop.approvals import ApprovalRequest
+
+    return ApprovalRequest(
+        agent="dev-platform",
+        action="github.issues:write",
+        tool="github",
+        permission="issues:write",
+        args={"repo": "acme/x", "title": "T"},
+        approvers=["@a", "@b"],
+        summary="s",
+        id=rid,
+        created_at=created_at or datetime.now(timezone.utc),
+        **overrides,
+    )
+
+
+async def test_approval_claim_decision_sql_guard_under_concurrency(postgres_pool):
+    """The WHERE status='pending' guard makes claim_decision win once server-side."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    rid = f"appr-{uuid.uuid4().hex[:8]}"
+    store = PostgresApprovalStore()
+    await store.setup(postgres_pool)
+    try:
+        await store.create(_approval(rid))
+        results = await asyncio.gather(
+            store.claim_decision(rid, "@a", approve=True),
+            store.claim_decision(rid, "@b", approve=True),
+            store.claim_decision(rid, "@a", approve=False),
+        )
+        winners = [r for r in results if r is not None]
+        assert len(winners) == 1
+        stored = await store.get(rid)
+        assert stored.decided_by == winners[0].decided_by
+        assert stored.status == winners[0].status
+        # A late claim on the decided row loses.
+        assert await store.claim_decision(rid, "@b", approve=True) is None
+    finally:
+        await _delete_approvals(store, [rid])
+        await store.close()
+
+
+async def test_approval_decided_unreconciled_keyset_and_mark(postgres_pool):
+    """Keyset pagination + (created_at, id) ordering + mark_reconciled idempotency."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    from datetime import datetime, timedelta, timezone
+
+    base = datetime(2026, 7, 19, tzinfo=timezone.utc)
+    prefix = f"appr-{uuid.uuid4().hex[:8]}"
+    ids = [f"{prefix}-{i}" for i in range(5)]
+    store = PostgresApprovalStore()
+    await store.setup(postgres_pool)
+    try:
+        for i, rid in enumerate(ids):
+            await store.create(_approval(rid, created_at=base + timedelta(minutes=i)))
+        # Decide the first four; leave the fifth pending. Mark the 2nd (excluded).
+        for rid in ids[:4]:
+            await store.claim_decision(rid, "@a", approve=True)
+        await store.mark_reconciled(ids[1])
+
+        # Walk the whole decided-unreconciled set with the keyset cursor in
+        # small pages, collecting our rows. The table is shared across e2e
+        # tests, so assert on the RELATIVE order and exclusions of our own ids
+        # rather than exact global page contents.
+        collected: list[str] = []
+        cursor = None
+        while True:
+            page = await store.decided_unreconciled(limit=2, after=cursor)
+            if not page:
+                break
+            cursor = (page[-1].created_at, page[-1].id)
+            collected.extend(r.id for r in page if r.id in set(ids))
+        # ids[0], ids[2], ids[3] in (created_at, id) order; ids[1] marked-out,
+        # ids[4] still pending — and the cursor paginated past every row.
+        assert collected == [ids[0], ids[2], ids[3]]
+
+        # mark_reconciled is idempotent.
+        await store.mark_reconciled(ids[0])
+        marked = await store.get(ids[0])
+        await store.mark_reconciled(ids[0])
+        assert (await store.get(ids[0])).effect_at == marked.effect_at
+    finally:
+        await _delete_approvals(store, ids)
+        await store.close()
+
+
+@pytest.mark.serial
+async def test_approval_decide_once_migration_idempotent_on_populated_table(
+    postgres_pool,
+):
+    """setup() adds the three decide-once columns to a populated pre-migration
+    table, once; the pre-existing row reads back with None sentinels and is
+    swept once as a legacy decided row.
+
+    HAZARD: this DROPs columns on the shared `approvals` table and re-adds them
+    via setup(). It is safe only while the e2e suite runs serially — a
+    concurrent test touching this table during the drop window would break. See
+    the @pytest.mark.serial marker."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    rid = f"appr-{uuid.uuid4().hex[:8]}"
+    store = PostgresApprovalStore()
+    await store.setup(postgres_pool)
+    try:
+        pool = store._require_pool()
+        async with pool.acquire() as conn:
+            # Rewind to the pre-migration schema with a live decided row.
+            await conn.execute(
+                "ALTER TABLE approvals DROP COLUMN IF EXISTS workflow_backed"
+            )
+            await conn.execute(
+                "ALTER TABLE approvals DROP COLUMN IF EXISTS workflow_instance_id"
+            )
+            await conn.execute(
+                "ALTER TABLE approvals DROP COLUMN IF EXISTS effect_at"
+            )
+            await conn.execute(
+                "INSERT INTO approvals "
+                "(id, agent, action, tool, permission, status, decided_by) "
+                "VALUES ($1, 'a', 'github.issues:write', 'github', "
+                "'issues:write', 'approved', '@a')",
+                rid,
+            )
+        await store.setup(postgres_pool)  # migrate
+        await store.setup(postgres_pool)  # and prove it re-runs cleanly
+
+        migrated = await store.get(rid)
+        assert migrated.status == "approved"
+        assert migrated.workflow_backed is None  # legacy sentinel
+        assert migrated.workflow_instance_id is None
+        assert migrated.effect_at is None
+        # It appears once in the unreconciled sweep as a legacy decided row.
+        found = await store.decided_unreconciled(limit=200)
+        assert any(r.id == rid for r in found)
+    finally:
+        await _delete_approvals(store, [rid])
+        await store.close()
+
+
+async def _delete_approvals(store, ids):
+    try:
+        pool = store._require_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM approvals WHERE id = ANY($1)", ids)
+    except Exception:
+        pass

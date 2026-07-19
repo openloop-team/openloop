@@ -80,4 +80,5 @@ markers = [
     "e2e: end-to-end tests spanning runtime boundaries",
     "postgres: tests that require reachable Postgres/pgvector",
     "live: tests that hit external model/provider or GitHub services",
+    "serial: mutates shared schema (DDL) and must not run concurrently with other DB tests — keep the e2e suite serial",
 ]

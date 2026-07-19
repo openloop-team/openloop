@@ -13,6 +13,7 @@ import pytest
 
 from openloop.agents import load_agent
 from openloop.agents.schema import Tool
+from openloop.approvals import ApprovalRequest
 from openloop.analysis import InMemoryArtifactStore
 from openloop.deliverable import Artifact, Prose
 from openloop.memory import InMemoryStore
@@ -30,7 +31,7 @@ from openloop.sessions import (
 import time
 
 from openloop.sessions.runner import PROGRESS_REFRESH_SECONDS, PROGRESS_STATUS_TEXT
-from openloop.tools import ToolGateway
+from openloop.tools import Invocation, ToolGateway, ToolResult
 from openloop.tools.analysis_worker import AnalysisWorkerConnector
 from openloop.tools.coding_worker import CodingWorkerConnector
 from openloop.tools.github import GitHubConnector
@@ -735,9 +736,9 @@ async def test_reconcile_delivers_approved_workflow_waiting_session():
         {"repo": "acme/x", "instruction": "x"},
     )
     request = pending.approval
-    request.status = "approved"
-    request.decided_by = "@maciag.artur"
-    await tools.approvals.update(request)
+    await tools.approvals.claim_decision(
+        request.id, "@maciag.artur", approve=True
+    )
     job_id = request.args["job_id"]
     # Complete the parked workflow the way a real drive would: consume the
     # approval event, claim the drive, and land a fenced terminal write.
@@ -771,6 +772,138 @@ async def test_reconcile_delivers_approved_workflow_waiting_session():
     assert repaired == ["s-approved"]
     assert delivery.finals[-1]["text"] == "opened draft PR #7 in acme/x"
     assert (await sessions.get("s-approved")).status == "completed"
+
+
+async def test_reconcile_delivers_crash_denial_to_waiting_session():
+    # A denial claimed but never delivered (crash after the deny claim): the
+    # reconciler must post the denied final, complete the session, and collapse
+    # the approval card's buttons — not leave it waiting forever.
+    agent = load_agent(AGENT_YAML)
+    engine = WorkflowEngine(InMemoryWorkflowStore())
+    worker = FakeWorkerOrchestrator()
+    github = FakeGitHub()
+    engine.register(build_coding_worker_workflow(worker, github))
+    tools = ToolGateway(
+        tools=[GitHubConnector(github), CodingWorkerConnector(worker, github)],
+        engine=engine,
+    )
+    pending = await tools.invoke(
+        agent, "coding_worker.pr:write", {"repo": "acme/x", "instruction": "x"}
+    )
+    request = pending.approval
+    await tools.approvals.claim_decision(request.id, "@maciag.artur", approve=False)
+
+    sessions = InMemorySurfaceSessionStore()
+    delivery = FakeSurfaceDelivery()
+    runtime = Runtime(
+        agent,
+        gateway=ScriptedGateway([]),
+        tools=tools,
+        usage=InMemoryUsageStore(),
+        memory=InMemoryStore(),
+        engine=engine,
+    )
+    runner = SessionRunner(runtime, sessions, delivery)
+    await sessions.upsert(SurfaceSession(
+        id="s-denied",
+        target=_target("ev-denied"),
+        status="waiting",
+        approval_ids=[request.id],
+        progress_message_id="p0",
+    ))
+
+    repaired = await runner.reconcile()
+
+    assert repaired == ["s-denied"]
+    assert delivery.finals[-1]["text"] == "🚫 Denied by @maciag.artur."
+    assert (await sessions.get("s-denied")).status == "completed"
+    # The recovered approval card has no remaining buttons.
+    assert delivery.approvals[-1]["requests"] == []
+
+
+async def test_losing_deny_click_final_names_winner_not_clicker():
+    # The request was already denied by @winner. A losing click by a different
+    # (but still valid) approver drives delivery; the denied final must name
+    # the winner, not the clicker.
+    agent = load_agent(AGENT_YAML)
+    github = FakeGitHub()
+    tools = ToolGateway(tools=[GitHubConnector(github)])
+    request = ApprovalRequest(
+        agent="dev-platform",
+        action="github.issues:write",
+        tool="github",
+        permission="issues:write",
+        args={"repo": "acme/x", "title": "T"},
+        approvers=["@winner", "@loser"],
+        summary="create issue",
+        workflow_backed=False,
+    )
+    await tools.approvals.create(request)
+    await tools.approvals.claim_decision(request.id, "@winner", approve=False)
+
+    sessions = InMemorySurfaceSessionStore()
+    delivery = FakeSurfaceDelivery()
+    runtime = Runtime(
+        agent,
+        gateway=ScriptedGateway([]),
+        tools=tools,
+        usage=InMemoryUsageStore(),
+        memory=InMemoryStore(),
+        engine=WorkflowEngine(InMemoryWorkflowStore()),
+    )
+    runner = SessionRunner(runtime, sessions, delivery)
+    await sessions.upsert(SurfaceSession(
+        id="s-lose",
+        target=_target("ev-lose"),
+        status="waiting",
+        approval_ids=[request.id],
+        progress_message_id="p0",
+    ))
+
+    # A second approver clicks deny and loses; the reported final names the
+    # canonical decider.
+    message = await runner.resolve_approval(request.id, "@loser", approve=False)
+
+    assert "@winner" in message
+    assert delivery.finals[-1]["text"] == "🚫 Denied by @winner."
+
+
+async def test_approved_nonterminal_keeps_session_then_winner_delivers():
+    # A losing concurrent click on a direct tool returns a non-terminal
+    # "approved" status: it must update the card informationally and keep the
+    # session waiting, never becoming the session's result. The winner's later
+    # executed result is the one that delivers.
+    runner, sessions, delivery = _runner(ScriptedGateway([]))
+    session = SurfaceSession(
+        id="s-appr",
+        target=_target("ev-appr"),
+        status="waiting",
+        approval_ids=["appr-1"],
+        progress_message_id="p0",
+    )
+    await sessions.upsert(session)
+
+    loser = Invocation(status="approved", decided_by="@winner",
+                       message="approval appr-1 already approved by @winner")
+    await runner._continue_session(
+        session, loser, "@loser", "informational", approval_id=None
+    )
+    mid = await sessions.get("s-appr")
+    assert mid.status == "waiting"  # not completed by the loser
+    assert delivery.finals == []
+    assert delivery.approvals[-1]["requests"] == []  # card collapsed informationally
+
+    winner = Invocation(
+        status="executed",
+        result=ToolResult(ok=True, summary="created issue #1", data={}),
+        decided_by="@winner",
+    )
+    await runner._continue_session(
+        session, winner, "@winner", "done", approval_id=None
+    )
+    final = await sessions.get("s-appr")
+    assert final.status == "completed"
+    assert delivery.finals[-1]["text"] == "created issue #1"
 
 
 async def test_reconcile_posts_interrupted_notice_for_abandoned_turn():

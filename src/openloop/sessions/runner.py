@@ -80,7 +80,11 @@ ARTIFACT_SNIPPET_TYPE_DEFAULT = "markdown"
 
 
 def _is_non_terminal_invocation(inv) -> bool:
-    if inv.status == "started":
+    if inv.status in ("started", "approved"):
+        # "approved" = a durable decision with no result yet (a losing
+        # concurrent click on a direct tool, or an effect that can't run
+        # here): update the card informationally, keep the session waiting,
+        # and let the winner's real outcome deliver.
         return True
     data = getattr(getattr(inv, "result", None), "data", {}) or {}
     return data.get("status") in {"running", "waiting"}
@@ -555,7 +559,10 @@ class SessionRunner:
             detail = inv.result.summary if inv.result else (inv.message or "done")
             final_text = detail
         elif inv.status == "denied":
-            final_text = f"🚫 Denied by {approver}."
+            # Name the canonical decider (the approval row's decided_by), not
+            # the clicker — a losing/reconciler-driven denial still attributes
+            # to whoever actually decided.
+            final_text = f"🚫 Denied by {inv.decided_by or approver}."
         else:  # forbidden / not-an-approver / already resolved — leave it parked
             return
         # Persist the outcome (so a failed post is repairable from result_summary),
@@ -857,27 +864,55 @@ class SessionRunner:
         await self._set_progress_status(session, phrase)
 
     async def _deliver_terminal_approval(self, session: SurfaceSession) -> bool:
-        """Deliver a waiting session whose approved workflow has finished."""
+        """Deliver a waiting session whose approval reached a terminal outcome.
+
+        Covers two crash shapes the decision reconciler leaves behind: an
+        approved workflow that finished, and a denied request whose Slack
+        session/card is still parked. The denied case needs no engine — its
+        reconcile-side cancel already ran — so the engine requirement gates
+        only the approved-workflow branch.
+        """
         tools = getattr(self.runtime, "tools", None)
-        engine = getattr(tools, "engine", None) or getattr(self.runtime, "engine", None)
-        if tools is None or engine is None:
+        if tools is None:
             return False
+        engine = getattr(tools, "engine", None) or getattr(self.runtime, "engine", None)
         from openloop.surfaces.approvals import resolution_message
+        from openloop.tools.base import Invocation
         from openloop.tools.gateway import _workflow_invocation
 
         for approval_id in session.approval_ids:
             request = await tools.approvals.get(approval_id)
-            if request is None or request.status != "approved":
+            if request is None:
                 continue
-            tool = getattr(tools, "_tools", {}).get(request.tool)
-            if not getattr(tool, "workflow", None):
+            approver = request.decided_by or "an approver"
+            if request.status == "denied":
+                inv = Invocation(
+                    status="denied",
+                    message="action denied",
+                    decided_by=request.decided_by,
+                )
+                await self._continue_session(
+                    session, inv, approver, resolution_message(inv, approver),
+                    approval_id=approval_id,
+                )
+                return True
+            if request.status != "approved":
                 continue
-            instance_id = request.args.get("job_id") or request.id
+            if engine is None:
+                continue
+            # Route on the durable execution marker, not the live tool shape: a
+            # decided row's mode must never drift. _classify yields the trusted
+            # instance id (the stamped workflow_instance_id, or _instance_id for
+            # a legacy workflow row) — never a model-supplied args['job_id'],
+            # which could name an unrelated live workflow.
+            kind, instance_id = tools._classify(request)
+            if kind != "workflow":
+                continue
             instance = await engine.store.get(instance_id)
             if instance is None or instance.status not in _WORKFLOW_TERMINAL:
                 continue
             inv = _workflow_invocation(instance)
-            approver = request.decided_by or "an approver"
+            inv.decided_by = request.decided_by
             await self._continue_session(
                 session, inv, approver, resolution_message(inv, approver),
                 approval_id=approval_id,

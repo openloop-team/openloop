@@ -198,6 +198,14 @@ class ToolGateway:
             agent.spec.approvals.requires_approval(action)
             or getattr(tool, "requires_approval", False)
         ):
+            # The execution mode this invoke() commits to, recorded durably
+            # with the row so every decided path routes on the marker — never
+            # on the resolver's current engine/tool shape (mode drift there
+            # means a double-run or a phantom instance). Keep the condition
+            # visibly identical to _maybe_start_workflow's.
+            workflow_backed = self.engine is not None and bool(
+                getattr(tool, "workflow", None)
+            )
             request = ApprovalRequest(
                 agent=agent.metadata.name,
                 action=action,
@@ -210,7 +218,10 @@ class ToolGateway:
                 # The args-contract version these args were parsed under, so
                 # consumers can refuse the record after a breaking change.
                 args_schema=spec.version,
+                workflow_backed=workflow_backed,
             )
+            if workflow_backed:
+                request.workflow_instance_id = _instance_id(request)
             await self.approvals.create(request)
             # For a workflow-backed tool, start the workflow now; it parks on its
             # approval wait node. The approval event (from resolve) wakes it.
@@ -231,73 +242,303 @@ class ToolGateway:
     async def resolve(
         self, request_id: str, approver: str, *, approve: bool
     ) -> Invocation:
+        # Decide-first: claim_decision on the approval row is the single
+        # arbiter — one claim wins, and every effect (wake, cancel, direct
+        # execute) follows the durable decision. Crash windows between claim
+        # and effect are healed by the idempotent re-ensure on the next click
+        # and by reconcile_decisions() in the recovery pass.
         request = await self.approvals.get(request_id)
         if request is None:
             return Invocation(status="forbidden", message="no such approval request")
-        if request.status != "pending":
-            if request.status == "approved":
-                tool = self._tools.get(request.tool)
-                if self.engine is not None and getattr(tool, "workflow", None):
-                    instance = await self.engine.store.get(_instance_id(request))
-                    return _workflow_invocation(instance)
-            return Invocation(
-                status="denied" if request.status == "denied" else "executed",
-                message=f"approval {request_id} already {request.status}",
-            )
+        # Membership before any claim OR decided-row handling: the decided
+        # path performs effects (re-ensure start/send_event/cancel), so a
+        # non-approver must get forbidden — never a decision report or an
+        # effect trigger.
         if approver not in request.approvers:
             return Invocation(
                 status="forbidden",
                 message=f"{approver} is not an approver for {request.action}",
             )
+        if request.status != "pending":
+            return await self._decided_outcome(request)
+        # Gate a NEW approve on effect availability before its claim: a claim
+        # cannot be undone, and an approve claimed with no performable effect
+        # here would land irreversibly in recovery. Deny is never gated — the
+        # fail-closed action must always be available.
+        if approve:
+            unavailable = self._approve_effect_unavailable(request)
+            if unavailable is not None:
+                return Invocation(
+                    status="forbidden",
+                    message=(
+                        f"cannot approve {request.id} on this gateway: "
+                        f"{unavailable}; the request stays pending"
+                    ),
+                )
 
-        request.decided_by = approver
-        if not approve:
-            request.status = "denied"
-            await self.approvals.update(request)
-            tool = self._tools[request.tool]
-            # Cancel the parked workflow so a denied request isn't left waiting.
-            if self.engine is not None and getattr(tool, "workflow", None):
-                await self.engine.cancel(_instance_id(request), "approval denied")
-            logger.info("approval %s denied by %s", request_id, approver)
-            return Invocation(status="denied", message="action denied")
-
-        tool = self._tools[request.tool]
-
-        # Thin adapter: for a workflow-backed tool, approval is just an event that
-        # wakes the parked workflow — not a direct execute(). Record that durable
-        # wake *before* flipping the approval to "approved", so a crash before the
-        # state change leaves the request still "pending" and re-resolvable:
-        #   - start() ensures the workflow exists (covers a crash in invoke() after
-        #     the approval was created but before the workflow was started),
-        #   - send_event() records the approval event (a no-op if already past the
-        #     wait node),
-        #   - the rest of the workflow runs in the background after the button
-        #     handler can return "started".
-        if self.engine is not None and getattr(tool, "workflow", None):
-            instance_id = _instance_id(request)
-            await self.engine.start(
-                tool.workflow, instance_id, _workflow_initial_state(request)
-            )
-            instance = await self.engine.send_event(
-                instance_id,
-                "await_approval",
-                {"approver": approver, "approval_id": request.id},
-                drive=False,
-            )
-            request.status = "approved"
-            await self.approvals.update(request)
-            if instance is not None and instance.status not in WORKFLOW_TERMINAL:
-                self.engine.drive_background(instance_id)
-            logger.info("approval %s approved by %s; workflow woken", request_id, approver)
-            return _workflow_invocation(instance)
-
-        request.status = "approved"
-        await self.approvals.update(request)
-        result = await tool.execute(
-            request.permission, _args_for_execute(tool, request)
+        claimed = await self.approvals.claim_decision(
+            request_id, approver, approve=approve
         )
+        if claimed is None:
+            # Lost the race (or decided between get and claim) — the stored
+            # decision is the truth; report it, never this caller's intent.
+            fresh = await self.approvals.get(request_id)
+            if fresh is None:
+                return Invocation(
+                    status="forbidden", message="no such approval request"
+                )
+            return await self._decided_outcome(fresh)
+
+        if not approve:
+            await self._ensure_denied(claimed)
+            logger.info("approval %s denied by %s", request_id, approver)
+            return Invocation(
+                status="denied",
+                message="action denied",
+                decided_by=claimed.decided_by,
+            )
+
+        kind, _ = self._classify(claimed)
+        if kind == "workflow":
+            instance = await self._ensure_approved_workflow(claimed)
+            logger.info(
+                "approval %s approved by %s; workflow woken", request_id, approver
+            )
+            inv = _workflow_invocation(instance)
+            inv.decided_by = claimed.decided_by
+            return inv
+
+        tool = self._tools[claimed.tool]
+        result = await tool.execute(
+            claimed.permission, _args_for_execute(tool, claimed)
+        )
+        # Mark AFTER execute returns; containment in the helper — a marking
+        # failure must never discard the only copy of the ToolResult.
+        await self._mark_reconciled_safe(claimed.id)
         logger.info("approval %s approved by %s; executed", request_id, approver)
-        return Invocation(status="executed", result=result)
+        return Invocation(
+            status="executed", result=result, decided_by=claimed.decided_by
+        )
+
+    async def reconcile_decisions(self) -> int:
+        """Heal decided approvals whose effect never landed; returns the count.
+
+        Called from the recovery pass. Walks the entire unreconciled set in
+        keyset-paginated batches, advancing the cursor unconditionally so a
+        skipped (deferred/poison) row never shadows younger healable ones.
+        Every operation is an idempotent no-op on an already-healed pair, so
+        the sweep is safe to repeat and safe under the recovery lock's
+        coordination-not-correctness contract.
+        """
+        healed = 0
+        cursor: tuple | None = None
+        while True:
+            batch = await self.approvals.decided_unreconciled(
+                limit=200, after=cursor
+            )
+            if not batch:
+                return healed
+            cursor = (batch[-1].created_at, batch[-1].id)
+            for request in batch:
+                try:
+                    healed += 1 if await self._reconcile_decision(request) else 0
+                except Exception:  # noqa: BLE001 — per-row isolation
+                    logger.exception(
+                        "failed to reconcile approval decision %s", request.id
+                    )
+
+    async def _reconcile_decision(self, request: ApprovalRequest) -> bool:
+        """Heal one decided-but-unreconciled row; True when it was retired."""
+        if request.status == "denied":
+            return await self._ensure_denied(request)
+        kind, _ = self._classify(request)
+        if kind == "workflow":
+            unavailable = self._approve_effect_unavailable(request)
+            if unavailable is not None:
+                # A capability-drifted row defers — never raises, never
+                # retires: it heals on the first pass after the capability
+                # (connector/engine/workflow registration) returns.
+                logger.warning(
+                    "approved approval %s cannot be healed here (%s); deferring",
+                    request.id,
+                    unavailable,
+                )
+                return False
+            await self._ensure_approved_workflow(request)
+            return True
+        if kind == "direct":
+            # No automatic effect is possible (direct execution is not
+            # idempotent) — retire the row so it doesn't haunt the sweep;
+            # matches today's semantics for a crash mid-execute.
+            await self._mark_reconciled_safe(request.id)
+            return True
+        logger.warning(
+            "approved approval %s names unregistered tool %r; deferring until "
+            "the connector returns",
+            request.id,
+            request.tool,
+        )
+        return False
+
+    async def _decided_outcome(self, request: ApprovalRequest) -> Invocation:
+        """Report — and idempotently re-ensure — an already-decided request.
+
+        The row is the truth: every identity on the way out is the row's
+        ``decided_by``, never the caller who happened to observe the decision.
+        """
+        if request.status == "denied":
+            # Re-ensure heals the crash-after-deny-claim window on this click.
+            await self._ensure_denied(request)
+            return Invocation(
+                status="denied",
+                message=f"approval {request.id} already denied",
+                decided_by=request.decided_by,
+            )
+        kind, _ = self._classify(request)
+        if kind == "workflow" and self._approve_effect_unavailable(request) is None:
+            instance = await self._ensure_approved_workflow(request)
+            inv = _workflow_invocation(instance)
+            inv.decided_by = request.decided_by
+            return inv
+        # Direct rows (winner's execute may still be in flight — no result
+        # exists to return), unknown-tool rows, and workflow rows whose effect
+        # can't run here all report the durable decision, non-terminal: a
+        # placeholder must never let the session run a continuation off it,
+        # and a duplicate click must never be answered "tool unavailable".
+        return Invocation(
+            status="approved",
+            message=(
+                f"approval {request.id} already approved by "
+                f"{request.decided_by or 'an approver'}"
+            ),
+            decided_by=request.decided_by,
+        )
+
+    def _classify(self, request: ApprovalRequest) -> tuple[str, str | None]:
+        """``("workflow", instance_id)`` / ``("direct", None)`` / ``("unknown", None)``.
+
+        Stamped rows route on the durable marker alone — reclassifying them
+        from the resolver's current engine/tool shape is forbidden (mode
+        drift = double-run or phantom instance). Legacy rows (``None``
+        marker) classify by the registry, the best available truth; an
+        unregistered tool is *unknown* (connector disabled by config or
+        credential drift), never conflated with "direct".
+        """
+        if request.workflow_backed is True:
+            return "workflow", request.workflow_instance_id
+        if request.workflow_backed is False:
+            return "direct", None
+        tool = self._tools.get(request.tool)
+        if tool is None:
+            return "unknown", None
+        if getattr(tool, "workflow", None):
+            # Legacy workflow row: its job_id is gateway-generated for
+            # workflow tools, so _instance_id is trustworthy here.
+            return "workflow", _instance_id(request)
+        return "direct", None
+
+    def _approve_effect_unavailable(self, request: ApprovalRequest) -> str | None:
+        """Operational reason an approve's effect cannot run on this gateway.
+
+        Availability, never reclassification: a stamped workflow row whose
+        capability has drifted away stays workflow-backed and defers.
+        ``None`` means every capability the effect dereferences is present.
+        """
+        if request.workflow_backed is False:
+            if self._tools.get(request.tool) is None:
+                return f"tool {request.tool!r} is not registered"
+            return None
+        if request.workflow_backed is True:
+            return self._workflow_effect_unavailable(request.tool)
+        kind, _ = self._classify(request)
+        if kind == "unknown":
+            return f"tool {request.tool!r} is not registered"
+        if kind == "workflow":
+            return self._workflow_effect_unavailable(request.tool)
+        return None
+
+    def _workflow_effect_unavailable(self, tool_name: str) -> str | None:
+        """Check the exact capabilities ``_ensure_approved_workflow`` dereferences."""
+        tool = self._tools.get(tool_name)
+        if tool is None:
+            return f"tool {tool_name!r} is not registered"
+        workflow = getattr(tool, "workflow", None)
+        if not workflow:
+            return f"tool {tool_name!r} no longer declares a workflow"
+        if self.engine is None:
+            return "this gateway has no workflow engine"
+        if workflow not in self.engine.workflows:
+            return f"workflow {workflow!r} is not registered on this engine"
+        return None
+
+    async def _ensure_approved_workflow(self, request: ApprovalRequest):
+        """Idempotently ensure an approved request's workflow exists and is woken.
+
+        Shared by the resolve winner, the lost-claim re-ensure, and the
+        decision reconciler; every call is a no-op when the work already
+        happened (start recreates a missing instance, send_event's claim is
+        consume-once). Callers gate on ``_approve_effect_unavailable`` first.
+        The event payload's approver is always the row's ``decided_by``.
+        """
+        tool = self._tools[request.tool]
+        instance_id = request.workflow_instance_id or _instance_id(request)
+        await self.engine.start(
+            tool.workflow, instance_id, _workflow_initial_state(request)
+        )
+        instance = await self.engine.send_event(
+            instance_id,
+            "await_approval",
+            {"approver": request.decided_by, "approval_id": request.id},
+            drive=False,
+        )
+        if instance is not None and instance.status not in WORKFLOW_TERMINAL:
+            self.engine.drive_background(instance_id)
+        await self._mark_reconciled_safe(request.id)
+        return instance
+
+    async def _ensure_denied(self, request: ApprovalRequest) -> bool:
+        """Idempotently ensure a denied request's cancel effect; True = marked.
+
+        Cancels only what the row durably names — never a target derived from
+        model-supplied args (a direct request's job_id may collide with an
+        unrelated live workflow). Engine absence defers instead of marking:
+        ``workflow_backed=True`` is fleet-global truth, and marking here would
+        permanently hide the missed cancel from every sweep.
+        """
+        kind, instance_id = self._classify(request)
+        if kind == "workflow":
+            if self.engine is None:
+                logger.warning(
+                    "denied approval %s targets workflow %s but this gateway "
+                    "has no engine; deferring the cancel to a capable "
+                    "resolver or sweep",
+                    request.id,
+                    instance_id,
+                )
+                return False
+            # A None return means already terminal or never created — nothing
+            # can revive a denied row, so the effect is ensured either way.
+            await self.engine.cancel(instance_id, "approval denied")
+            await self._mark_reconciled_safe(request.id)
+            return True
+        if kind == "direct":
+            await self._mark_reconciled_safe(request.id)
+            return True
+        logger.warning(
+            "denied approval %s names unregistered tool %r; leaving its "
+            "cancel classification to a later sweep",
+            request.id,
+            request.tool,
+        )
+        return False
+
+    async def _mark_reconciled_safe(self, request_id: str) -> None:
+        """Contained effect-marking — bookkeeping must never fail a heal or
+        discard a performed effect's result."""
+        try:
+            await self.approvals.mark_reconciled(request_id)
+        except Exception:  # noqa: BLE001 — the sweep retries an unmarked row
+            logger.exception("failed to mark approval %s reconciled", request_id)
 
     async def _maybe_start_workflow(self, tool: Tool, request: ApprovalRequest) -> None:
         workflow = getattr(tool, "workflow", None)
@@ -305,13 +546,16 @@ class ToolGateway:
             return
         await self.engine.start(
             workflow,
-            instance_id=_instance_id(request),
+            instance_id=request.workflow_instance_id or _instance_id(request),
             initial_state=_workflow_initial_state(request),
         )
 
 
 def _instance_id(request: ApprovalRequest) -> str:
-    """Workflow instance id for an approval — the job_id thread, else the req id."""
+    """Legacy-row fallback for a workflow instance id — the job_id thread, else
+    the req id. Stamped rows carry ``workflow_instance_id`` and never call this;
+    it survives only for rows created before that column and for the invoke-time
+    stamp itself."""
     return request.args.get("job_id") or request.id
 
 

@@ -61,13 +61,45 @@ def test_write_requires_approval_then_executes(client):
     )
     assert bad.status_code == 403
 
-    # 4. An approver approves — the issue is created.
+    # 4. An approver approves — the issue is created, and the response carries
+    #    the canonical decider.
     ok = client.post(
         f"/approvals/{approval_id}/resolve",
         json={"approver": "@maciag.artur", "approve": True},
     )
     assert ok.json()["status"] == "executed"
+    assert ok.json()["decided_by"] == "@maciag.artur"
     assert client.fake_github.created[0]["title"] == "Track decision"
+
+
+def test_second_resolution_reports_winner_decided_by(client):
+    # Approve once, then a second HTTP resolution (by a different-cased caller)
+    # must report the ORIGINAL winner's decided_by, not the second caller's.
+    resp = client.post(
+        "/tools/invoke",
+        json={
+            "action": "github.issues:write",
+            "args": {"repo": "acme/x", "title": "T"},
+        },
+    )
+    approval_id = resp.json()["approval_id"]
+    first = client.post(
+        f"/approvals/{approval_id}/resolve",
+        json={"approver": "@maciag.artur", "approve": True},
+    )
+    assert first.json()["status"] == "executed"
+
+    second = client.post(
+        f"/approvals/{approval_id}/resolve",
+        json={"approver": "@maciag.artur", "approve": True},
+    )
+    body = second.json()
+    # The decision is durable and already reconciled — the second caller sees
+    # the winner's identity and a non-terminal informational status, never a
+    # second execute.
+    assert body["decided_by"] == "@maciag.artur"
+    assert body["status"] == "approved"
+    assert len(client.fake_github.created) == 1  # only one execute happened
 
 
 def test_disallowed_action_forbidden(client):

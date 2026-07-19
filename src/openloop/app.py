@@ -38,6 +38,9 @@ def _invocation_json(inv: Invocation) -> dict:
         "message": inv.message,
         "result": dataclasses.asdict(inv.result) if inv.result else None,
         "approval_id": inv.approval.id if inv.approval else None,
+        # The canonical decider of a resolved approval — without it a racing
+        # second HTTP resolution would silently drop the winner's identity.
+        "decided_by": inv.decided_by,
     }
 
 

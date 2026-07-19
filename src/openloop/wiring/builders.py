@@ -1014,6 +1014,19 @@ async def run_recovery_pass(coordinator, tools: ToolGateway, session_runner) -> 
                 log.exception("workflow resume failed")
         await _resume_worker_jobs(tools)
 
+        # Heal approval decisions whose effect never landed (crash between the
+        # claim and the wake/cancel) — surface-independent, since the HTTP
+        # resolve path creates no SurfaceSession. Runs before the session
+        # sweep below so a healed denial's cancel and a healed approval's wake
+        # land before delivery is attempted. Retires direct rows even in an
+        # engine-less process.
+        try:
+            healed = await tools.reconcile_decisions()
+            if healed:
+                log.info("reconciled %d approval decision(s)", healed)
+        except Exception:
+            log.exception("approval decision reconcile failed")
+
         # Phase 0's layer-3 cleanup is relevant only once sealed analysis is
         # actually configured. It is safe under any replica count because the
         # helper reaps only OpenLoop analysis containers past their own stamped
