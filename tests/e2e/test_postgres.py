@@ -90,6 +90,47 @@ async def stores(postgres_pool):
         await approvals.close()
 
 
+async def test_usage_attribution_envelope_round_trip(stores):
+    # Finding-4 envelope must survive a real Postgres INSERT + row mapping, both
+    # non-null (broker-run spend) and null (legacy). The broker_generation value
+    # is past INT32 max on purpose — it round-trips only because the column is
+    # BIGINT (an INTEGER column would reject the insert), pinning that width.
+    _memory, usage, _approvals = stores
+    run_id = uuid.uuid4().hex[:8]
+    scope = f"ws:e2e:agent:{run_id}"
+    big_generation = 9_000_000_000  # > 2**31 - 1
+
+    assert await usage.record(UsageRecord(
+        scope_key=scope, workspace="e2e", agent="dev-platform",
+        model="claude-sonnet-5", cost_usd=0.1,
+        idempotency_key=f"e2e-env-{run_id}",
+        job_id=f"job{run_id}",
+        broker_job_id="11111111-2222-3333-4444-555555555555",
+        broker_generation=big_generation,
+        approval_id=f"apr-{run_id}", approver="alice",
+        session_id=f"sess-{run_id}"))
+    assert await usage.record(UsageRecord(
+        scope_key=scope, workspace="e2e", agent="dev-platform",
+        model="gpt-4o-mini", cost_usd=0.001,
+        idempotency_key=f"e2e-legacy-{run_id}"))
+
+    rows = {r.idempotency_key: r for r in await usage.recent(limit=500)}
+    env = rows[f"e2e-env-{run_id}"]
+    assert env.job_id == f"job{run_id}"
+    assert env.broker_job_id == "11111111-2222-3333-4444-555555555555"
+    assert env.broker_generation == big_generation
+    assert env.approval_id == f"apr-{run_id}"
+    assert env.approver == "alice"
+    assert env.session_id == f"sess-{run_id}"
+
+    legacy = rows[f"e2e-legacy-{run_id}"]
+    for value in (
+        legacy.job_id, legacy.broker_job_id, legacy.broker_generation,
+        legacy.approval_id, legacy.approver, legacy.session_id,
+    ):
+        assert value is None
+
+
 async def test_happy_path_end_to_end(stores):
     memory, usage, approvals = stores
     agent = load_agent(AGENT_YAML)

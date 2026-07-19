@@ -182,9 +182,20 @@ def test_broker_rpc_imports_core_one_way_and_no_runtime_layers():
     assert violations == []
 
 
-def test_application_does_not_wire_privileged_broker_runtime_yet():
+def test_privileged_broker_runtime_is_confined_to_wiring_broker():
+    # Step 4 wires the privileged broker runtime through a single reviewed
+    # composition seam, `wiring/broker.py`. Every other wiring module and the
+    # app shell must reach it only via that seam (`openloop.wiring.broker`),
+    # never by importing `broker_control`/`broker_runtime` directly.
+    seam = WIRING_ROOT / "broker.py"
+    assert seam.exists(), "wiring/broker.py is the required broker composition seam"
+    other_modules = [
+        path
+        for path in sorted(WIRING_ROOT.glob("*.py"))
+        if path != seam
+    ]
     imports = []
-    for path in (APP_MODULE, *sorted(WIRING_ROOT.glob("*.py"))):
+    for path in (APP_MODULE, *other_modules):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

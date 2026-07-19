@@ -168,6 +168,13 @@ def create_app(*, compose_overrides: Mapping[str, Any] | None = None) -> FastAPI
                 "cost_usd": record.cost_usd,
                 "outcome": record.outcome,
                 "created_at": record.created_at.isoformat(),
+                # Attribution envelope (finding 4); null for legacy/non-broker rows.
+                "job_id": record.job_id,
+                "broker_job_id": record.broker_job_id,
+                "broker_generation": record.broker_generation,
+                "approval_id": record.approval_id,
+                "approver": record.approver,
+                "session_id": record.session_id,
             }
             for record in records
         ]

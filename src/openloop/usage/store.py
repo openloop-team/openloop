@@ -29,6 +29,18 @@ class UsageRecord:
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+    # Attribution envelope (review finding 4). Populated for broker-run worker
+    # spend; legacy chat/worker and non-broker records leave every field None
+    # and stay append-only. `job_id` is the app-wide coding-job identity
+    # (gateway-minted, see coding_worker.py); the broker mints its *own* job
+    # UUID and per-job generations, kept in `broker_job_id`/`broker_generation`
+    # so `job_id`/`generation` are never overloaded for broker identifiers.
+    job_id: str | None = None
+    broker_job_id: str | None = None
+    broker_generation: int | None = None
+    approval_id: str | None = None
+    approver: str | None = None
+    session_id: str | None = None
 
 
 def _month_start(now: datetime) -> datetime:

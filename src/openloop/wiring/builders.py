@@ -440,6 +440,19 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
     coding worker loudly rather than degrading to a different worker or a
     weaker isolation boundary.
     """
+    # Broker wiring (architecture step 4, phases 2-3) has not landed yet. The
+    # flag exists so operators can opt in, but honoring it today by building the
+    # direct in-process ``HardenedDockerWorkspace`` would silently hand back the
+    # very launch path the broker replaces — a fail-closed violation. Refuse
+    # loudly until the broker-backed adapter lands (phase 3 replaces this guard
+    # with the real broker branch).
+    if settings.coding_worker_openhands_broker_enabled:
+        log.error(
+            "CODING_WORKER_OPENHANDS_BROKER_ENABLED is set but broker wiring is "
+            "not yet available — refusing to fall back to the direct container "
+            "launch path. Coding worker DISABLED."
+        )
+        return None
     backend = settings.coding_worker_backend
     if backend == "builtin":
         sandbox = build_worker_sandbox(settings)

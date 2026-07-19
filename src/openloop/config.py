@@ -126,6 +126,60 @@ class Settings(BaseSettings):
     # fresh container by default. Set false only as an operational rollback;
     # the authenticated runtime and encrypted state foundation remain active.
     coding_worker_openhands_cold_resume_enabled: bool = True
+    # --- Container broker (architecture step 4, first wiring slice) ----------
+    # Master flag. When true, docker-mode OpenHands routes container lifecycle
+    # through the co-process broker over its UDS RPC boundary instead of the
+    # in-process HardenedDockerWorkspace. FAIL-CLOSED: when true but the broker
+    # cannot be built (missing/invalid setting below), the coding worker is
+    # DISABLED loudly — it never falls back to the direct launch path.
+    coding_worker_openhands_broker_enabled: bool = False
+    # Parent directory for the broker control UDS (<dir>/control.sock). Required
+    # when the broker flag is on; the app must own and be able to bind it.
+    broker_control_socket_dir: str | None = None
+    # Durable-state root the broker's runtime driver owns (per-job isolation).
+    # Required when the broker flag is on; stays outside Git checkouts.
+    broker_state_root: str | None = None
+    # Runtime scratch root for the Docker runtime driver. DockerRuntimeConfig
+    # requires runtime_root and state_root to be DISJOINT (it validates this),
+    # so this is a separate path from broker_state_root. Required when on.
+    broker_runtime_root: str | None = None
+    # Separated key topology — ONE root ring per trust domain (never a shared
+    # master root; production splits client/broker/checkpoint-store into distinct
+    # trust domains). Each domain is a VERSION -> base64-32-byte-secret map plus a
+    # current_version, so keys rotate while old capabilities/durable digests/
+    # receipts still verify (overlapping verification) across a restart — the
+    # single-key form could not represent rotation. SecretStr keeps the values out
+    # of repr/logs. build_broker fail-closed-validates when the flag is on:
+    # non-empty map, current_version present, base64/32-byte, and NO reused root
+    # bytes within or across domains (a reused root is fake rotation / a shared
+    # trust line). Never reuse another app/Slack/GitHub/provider secret here.
+    #
+    # Identity (client-domain, workload-identity tokens): the Ed25519 keypair is
+    # generated EPHEMERALLY per-process this slice (tokens live <=300s and never
+    # outlive the process), so only the issuer/audience identifiers are config.
+    broker_identity_issuer: str = "openloop-app"
+    broker_identity_audience: str = "openloop-broker"
+    # Capability (broker-domain, CapabilityRootRing). Broker-only; the client
+    # receives per-job capabilities over RPC.
+    broker_capability_roots: dict[str, SecretStr] = Field(default_factory=dict)
+    broker_capability_current_version: str = "cap-key-v1"
+    # Runtime/durable (broker-domain, RuntimeSecretRootRing -> the coordinator's
+    # RuntimeSecretAuthority for session/relay/durable digests).
+    broker_runtime_roots: dict[str, SecretStr] = Field(default_factory=dict)
+    broker_runtime_current_version: str = "runtime-key-v1"
+    # Receipt (checkpoint-store-domain): a SEPARATE Ed25519 signing key is derived
+    # per version from these roots via RuntimeSecretRootRing under
+    # broker_receipt_domain — the decision-2 split. current_version's private half
+    # -> checkpoint store (signer); ALL versions' public halves -> broker verifier
+    # (overlapping verification keys). Reuses the rotation plumbing, not key bytes.
+    broker_receipt_roots: dict[str, SecretStr] = Field(default_factory=dict)
+    broker_receipt_current_version: str = "receipt-key-v1"
+    broker_receipt_domain: str = "broker-receipt"
+    # Segment execution lease and absolute in-container generation deadline.
+    # Both are bounded by the runtime driver's maximum lifetime (the coordinator
+    # rejects a lease that exceeds it at construction).
+    broker_execution_lease_seconds: int = 900
+    broker_generation_deadline_seconds: int = 1800
     # Where the worker's model-influenced execution (applying generated edits)
     # runs:
     #   "host"   (default) — a plain subprocess in this process's environment.
