@@ -180,17 +180,24 @@ async def test_settle_without_agent_falls_back_to_the_default():
     assert usage.records[0].agent == "dev-platform"
 
 
-async def test_settle_unknown_agent_falls_back_capped(caplog):
-    # An agent removed from config between approval and run must not dodge
-    # the cap — spend is attributed to the default owner, loudly.
+async def test_settle_unknown_agent_fails_closed_without_record():
+    # An agent removed from config between approval and run asserts an
+    # identity that no longer resolves: the settlement fails closed and is
+    # never attributed to the default owner — there is no valid scope for it.
     usage = InMemoryUsageStore()
     ledger = _ledger(usage, per_task_usd=0.50)
-    with caplog.at_level("WARNING"):
-        with pytest.raises(WorkerBudgetExceeded):
-            await ledger.settle(agent="ghost", job_id="j1", cost_usd=0.75)
-    assert "unknown agent 'ghost'" in caplog.text
-    assert usage.records[0].agent == "dev-platform"
-    assert usage.records[0].outcome == "over_task_budget"
+    with pytest.raises(WorkerBudgetExceeded, match="unknown agent 'ghost'"):
+        await ledger.settle(agent="ghost", job_id="j1", cost_usd=0.75)
+    assert usage.records == []
+
+
+async def test_settle_empty_string_agent_fails_closed():
+    # An empty string is an asserted (broken) identity, not a legacy
+    # identity-less record — it must not reach the default fallback.
+    usage = InMemoryUsageStore()
+    with pytest.raises(WorkerBudgetExceeded, match="unknown agent ''"):
+        await _ledger(usage).settle(agent="", job_id="j1", cost_usd=0.10)
+    assert usage.records == []
 
 
 async def test_settle_over_cap_fails_closed_and_still_records():
@@ -283,6 +290,24 @@ async def test_check_monthly_required_cap_refuses_before_work():
     assert usage.records[0].outcome == "blocked"
 
 
+async def test_check_monthly_unknown_agent_fails_closed_without_record():
+    usage = InMemoryUsageStore()
+    ledger = _ledger(usage, monthly_usd=50.0)
+    with pytest.raises(WorkerBudgetExceeded, match="unknown agent 'ghost'"):
+        await ledger.check_monthly("ghost", job_id="j1")
+    assert usage.records == []
+
+
+async def test_per_task_usd_for_unknown_agent_fails_closed():
+    # The cap lookup feeds the worker's in-run budget: an unknown agent must
+    # not silently inherit the default agent's (possibly larger) cap.
+    ledger = _ledger(per_task_usd=0.50)
+    with pytest.raises(WorkerBudgetExceeded, match="unknown agent 'ghost'"):
+        ledger.per_task_usd_for("ghost")
+    # The identity-less legacy path still resolves to the default.
+    assert ledger.per_task_usd_for(None) == 0.50
+
+
 async def test_check_monthly_gates_on_the_invoking_agents_budget():
     usage = InMemoryUsageStore()
     agents = {
@@ -359,6 +384,19 @@ async def test_orchestrator_required_cap_refuses_before_any_work(monkeypatch):
 
     assert commands == []  # not even a clone
     assert usage.records[-1].outcome == "blocked"
+
+
+async def test_orchestrator_unknown_state_agent_refuses_before_any_work(monkeypatch):
+    """A stale approved job whose agent was removed from config fails closed
+    at the gate — no git command, no worker run, no default-attributed spend."""
+    usage = InMemoryUsageStore()
+    orch, commands = _orchestrator(monkeypatch, _ledger(usage, per_task_usd=0.50))
+
+    with pytest.raises(WorkerBudgetExceeded, match="unknown agent 'ghost'"):
+        await orch.run_attempt(_state(agent="ghost"))
+
+    assert commands == []  # not even a clone
+    assert usage.records == []  # nothing attributed to the default owner
 
 
 async def test_orchestrator_attributes_spend_to_state_agent(monkeypatch):

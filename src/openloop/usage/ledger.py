@@ -57,9 +57,11 @@ class WorkerSpendLedger:
     """Records worker-attempt spend and enforces the invoking agent's budget.
 
     ``agents`` is the live agent-config map; ``default_agent`` is the
-    attribution fallback for attempts that carry no agent identity (approvals
-    or checkpoints created before Phase 5) — the boot-time owner heuristic
-    Phase 4 used for everything.
+    attribution fallback for attempts that carry **no** agent identity
+    (approvals or checkpoints created before Phase 5) — the boot-time owner
+    heuristic Phase 4 used for everything. An *asserted* name missing from
+    the map (agent removed or renamed since approval) fails closed instead:
+    it is never attributed to the default.
 
     ``require_per_task_cap`` is set for agentic worker backends whose boot gate
     requires a cap. It keeps stale approved jobs fail-closed if config drifts
@@ -76,18 +78,20 @@ class WorkerSpendLedger:
     task_kind: str = WORKER_TASK_KIND
 
     def _agent_for(self, agent_name: str | None) -> Agent:
-        agent = self.agents.get(agent_name) if agent_name else None
-        if agent is not None:
-            return agent
-        if agent_name:
-            # An agent removed from config between approval and run: keep the
-            # attempt capped by attributing it to the default owner, loudly.
-            logger.warning(
-                "worker attempt names unknown agent %r — attributing spend "
-                "to %r instead",
-                agent_name, self.default_agent,
+        if agent_name is None:
+            # Only an identity-less record (pre-Phase 5 approval/checkpoint)
+            # may fall back to the boot-time owner.
+            return self.agents[self.default_agent]
+        agent = self.agents.get(agent_name)
+        if agent is None:
+            # An asserted identity that no longer resolves (agent removed or
+            # renamed since approval) must not inherit the default agent's
+            # caps or attribution — no principal, no budget, no attempt.
+            raise WorkerBudgetExceeded(
+                f"worker attempt asserts unknown agent {agent_name!r} — "
+                "failing closed (no attempt, no push, no PR)"
             )
-        return self.agents[self.default_agent]
+        return agent
 
     def per_task_usd_for(self, agent_name: str | None) -> float | None:
         """The per-task cap the ledger would enforce for this agent."""
