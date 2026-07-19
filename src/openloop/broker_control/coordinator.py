@@ -729,6 +729,106 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
             operation_id = ticket.operation_id if ticket is not None else None
             raise self._problem(error, operation_id=operation_id) from error
 
+    async def quiesce_for_recovery(self, snapshot: RecoverySnapshot) -> None:
+        """Idempotently finish a persisted QUIESCING runtime effect only."""
+        if not isinstance(snapshot, RecoverySnapshot):
+            raise TypeError("snapshot must be RecoverySnapshot")
+        generation = snapshot.generation_record
+        if (
+            snapshot.state is not JobState.ACTIVE
+            or snapshot.current_generation is None
+            or generation is None
+            or generation.generation != snapshot.current_generation
+            or generation.state is not GenerationState.QUIESCING
+            or snapshot.pending_operation_id is None
+            or generation.pending_operation_id != snapshot.pending_operation_id
+            or generation.barrier_id is None
+        ):
+            raise SegmentCoordinatorProblem(SegmentCoordinatorCode.STATE_CONFLICT)
+        try:
+            spec = self._validate_runtime_generation(snapshot, generation)
+            quiesced = await self._runtime.quiesce(spec)
+            if (
+                not isinstance(quiesced, QuiescedGeneration)
+                or quiesced.handle != generation.runtime_ref
+                or quiesced.observation.identity != spec.identity
+            ):
+                raise RuntimeError("runtime quiesce identity mismatch")
+            self._checkpoint_access(spec, quiesced.endpoint)
+        except Exception as error:
+            raise self._problem(error) from error
+
+    async def release_for_recovery(self, snapshot: RecoverySnapshot) -> None:
+        """Release one exact persisted runtime identity without deriving secrets."""
+        if not isinstance(snapshot, RecoverySnapshot):
+            raise TypeError("snapshot must be RecoverySnapshot")
+        generation = snapshot.generation_record
+        if (
+            snapshot.state is not JobState.ACTIVE
+            or snapshot.current_generation is None
+            or generation is None
+            or generation.generation != snapshot.current_generation
+            or generation.state
+            not in {
+                GenerationState.RUNNING,
+                GenerationState.QUIESCING,
+                GenerationState.QUIESCED,
+                GenerationState.RELEASING,
+            }
+            or generation.runtime_ref is None
+            or generation.runtime_key_version is None
+            or generation.capability_digest is None
+            or generation.durable_state_ref is None
+            or generation.durable_key_version is None
+            or generation.durable_digest is None
+            or snapshot.durable_state_ref != generation.durable_state_ref
+            or snapshot.durable_key_version != generation.durable_key_version
+            or snapshot.durable_digest != generation.durable_digest
+        ):
+            raise SegmentCoordinatorProblem(SegmentCoordinatorCode.STATE_CONFLICT)
+        if generation.state in {
+            GenerationState.RUNNING,
+            GenerationState.QUIESCED,
+        }:
+            if (
+                snapshot.pending_operation_id is not None
+                or generation.pending_operation_id is not None
+            ):
+                raise SegmentCoordinatorProblem(
+                    SegmentCoordinatorCode.STATE_CONFLICT
+                )
+        elif (
+            snapshot.pending_operation_id is None
+            or generation.pending_operation_id != snapshot.pending_operation_id
+        ):
+            raise SegmentCoordinatorProblem(SegmentCoordinatorCode.STATE_CONFLICT)
+        if generation.state is GenerationState.RELEASING and (
+            generation.receipt is None or generation.release_target is None
+        ):
+            raise SegmentCoordinatorProblem(SegmentCoordinatorCode.STATE_CONFLICT)
+        try:
+            self._fixed_policy(snapshot)
+            identity = GenerationRuntimeIdentity(
+                operation_id=generation.start_operation_id,
+                job_id=snapshot.job_id,
+                generation=generation.generation,
+                deadline=generation.execution_lease_deadline,
+            )
+            if generation.runtime_ref != identity.opaque_handle:
+                raise SegmentCoordinatorProblem(
+                    SegmentCoordinatorCode.STATE_CONFLICT
+                )
+            released = await self._runtime.release(identity)
+            if (
+                not isinstance(released, ReleaseObservation)
+                or released.identity != identity
+                or not released.released
+                or not released.durable_state_preserved
+            ):
+                raise RuntimeError("runtime release result mismatch")
+        except Exception as error:
+            raise self._problem(error) from error
+
     async def finalize_job(
         self,
         owner: BrokerOwner,

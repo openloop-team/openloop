@@ -22,6 +22,7 @@ from .models import (
     OperationResult,
     OperationTicket,
     RecoverySnapshot,
+    RecoveryCandidate,
     ReleaseTarget,
     TerminalOutcome,
     VerifiedCheckpointReceipt,
@@ -272,6 +273,35 @@ class BeginReleaseCommand(_DigestCommand):
 
 
 @dataclass(frozen=True, slots=True)
+class BeginInternalReleaseCommand(_DigestCommand):
+    kind: ClassVar[CommandKind] = CommandKind.BEGIN_RELEASE
+
+    owner: BrokerOwner
+    operation_id: UUID = field(metadata=_NO_DIGEST)
+    job_id: UUID
+    expected_generation: int
+    receipt: VerifiedCheckpointReceipt = field(repr=False)
+    target: ReleaseTarget
+    terminal_outcome: TerminalOutcome | None
+
+    def __post_init__(self) -> None:
+        _require_owner(self.owner)
+        validate_uuid("operation_id", self.operation_id)
+        validate_uuid("job_id", self.job_id)
+        validate_bigint("expected_generation", self.expected_generation)
+        if not isinstance(self.receipt, VerifiedCheckpointReceipt):
+            raise TypeError("receipt must be a VerifiedCheckpointReceipt")
+        _require_enum("target", self.target, ReleaseTarget)
+        if self.target is ReleaseTarget.FINALIZING:
+            if self.terminal_outcome is None:
+                raise ValueError("a finalizing release requires terminal_outcome")
+        elif self.terminal_outcome is not None:
+            raise ValueError("a parked release cannot set terminal_outcome")
+        if self.terminal_outcome is not None:
+            _require_enum("terminal_outcome", self.terminal_outcome, TerminalOutcome)
+
+
+@dataclass(frozen=True, slots=True)
 class MarkReleasedCommand:
     kind: ClassVar[CommandKind] = CommandKind.MARK_RELEASED
 
@@ -335,6 +365,24 @@ class BeginFinalizeCommand(_DigestCommand):
     def __post_init__(self) -> None:
         _require_owner(self.owner)
         validate_idempotency_key(self.idempotency_key)
+        validate_uuid("operation_id", self.operation_id)
+        validate_uuid("job_id", self.job_id)
+        validate_bigint("expected_generation", self.expected_generation)
+        _require_enum("terminal_outcome", self.terminal_outcome, TerminalOutcome)
+
+
+@dataclass(frozen=True, slots=True)
+class BeginInternalFinalizeCommand(_DigestCommand):
+    kind: ClassVar[CommandKind] = CommandKind.BEGIN_FINALIZE
+
+    owner: BrokerOwner
+    operation_id: UUID = field(metadata=_NO_DIGEST)
+    job_id: UUID
+    expected_generation: int
+    terminal_outcome: TerminalOutcome
+
+    def __post_init__(self) -> None:
+        _require_owner(self.owner)
         validate_uuid("operation_id", self.operation_id)
         validate_uuid("job_id", self.job_id)
         validate_bigint("expected_generation", self.expected_generation)
@@ -434,6 +482,10 @@ def require_generation_transition(
 
 @runtime_checkable
 class BrokerRepository(Protocol):
+    async def scan_recovery_candidates(
+        self, after_job_id: UUID | None, limit: int
+    ) -> tuple[RecoveryCandidate, ...]: ...
+
     async def create_job(self, command: CreateJobCommand) -> OperationTicket: ...
 
     async def begin_start(self, command: BeginStartCommand) -> OperationTicket: ...
@@ -454,10 +506,18 @@ class BrokerRepository(Protocol):
         self, command: BeginReleaseCommand
     ) -> OperationTicket: ...
 
+    async def begin_internal_release(
+        self, command: BeginInternalReleaseCommand
+    ) -> OperationTicket: ...
+
     async def mark_released(self, command: MarkReleasedCommand) -> OperationResult: ...
 
     async def begin_finalize(
         self, command: BeginFinalizeCommand
+    ) -> OperationTicket: ...
+
+    async def begin_internal_finalize(
+        self, command: BeginInternalFinalizeCommand
     ) -> OperationTicket: ...
 
     async def mark_terminal(self, command: MarkTerminalCommand) -> OperationResult: ...

@@ -42,6 +42,7 @@ from .models import (
     OperationSource,
     OperationStatus,
     OperationTicket,
+    RecoveryCandidate,
     ReleaseTarget,
     TerminalOutcome,
     VerifiedCheckpointReceipt,
@@ -51,6 +52,8 @@ from .models import (
 from .repository import (
     AbandonGenerationCommand,
     BeginFinalizeCommand,
+    BeginInternalFinalizeCommand,
+    BeginInternalReleaseCommand,
     BeginQuiesceCommand,
     BeginReleaseCommand,
     BeginStartCommand,
@@ -87,6 +90,74 @@ ORDER BY version
 _RECORD_MIGRATION = """
 INSERT INTO broker_schema_migrations (version, name, checksum, applied_at)
 VALUES ($1, $2, $3, clock_timestamp())
+"""
+
+_SCAN_RECOVERY_CANDIDATES = """
+WITH recovery_clock AS MATERIALIZED (
+    SELECT clock_timestamp() AS observed_at
+),
+recovery_candidates AS (
+    SELECT
+        j.tenant_id,
+        j.workload_subject,
+        j.job_id,
+        j.generation,
+        j.state AS job_state,
+        NULL::text AS generation_state,
+        recovery_clock.observed_at
+    FROM broker_jobs AS j
+    CROSS JOIN recovery_clock
+    WHERE ($1::uuid IS NULL OR j.job_id > $1)
+      AND j.state = 'finalizing'
+
+    UNION ALL
+
+    SELECT
+        j.tenant_id,
+        j.workload_subject,
+        j.job_id,
+        j.generation,
+        j.state AS job_state,
+        g.state AS generation_state,
+        recovery_clock.observed_at
+    FROM broker_generations AS g
+    JOIN broker_jobs AS j
+      ON j.job_id = g.job_id AND j.generation = g.generation
+    CROSS JOIN recovery_clock
+    WHERE ($1::uuid IS NULL OR g.job_id > $1)
+      AND j.state = 'active'
+      AND g.state IN ('quiescing', 'quiesced', 'releasing')
+
+    UNION ALL
+
+    SELECT
+        j.tenant_id,
+        j.workload_subject,
+        j.job_id,
+        j.generation,
+        j.state AS job_state,
+        g.state AS generation_state,
+        recovery_clock.observed_at
+    FROM broker_generations AS g
+    JOIN broker_jobs AS j
+      ON j.job_id = g.job_id AND j.generation = g.generation
+    CROSS JOIN recovery_clock
+    WHERE ($1::uuid IS NULL OR g.job_id > $1)
+      AND j.state = 'active'
+      AND g.state = 'running'
+      AND g.execution_lease_deadline <= recovery_clock.observed_at
+)
+SELECT
+    tenant_id,
+    workload_subject,
+    job_id,
+    generation,
+    job_state,
+    generation_state,
+    observed_at
+FROM recovery_candidates
+ORDER BY job_id
+LIMIT $2
 """
 
 
@@ -519,6 +590,30 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
             "SELECT date_trunc('second', clock_timestamp())"
         )
 
+    async def scan_recovery_candidates(
+        self, after_job_id: UUID | None, limit: int
+    ) -> tuple[RecoveryCandidate, ...]:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            rows = await connection.fetch(
+                _SCAN_RECOVERY_CANDIDATES, after_job_id, limit
+            )
+        return tuple(
+            RecoveryCandidate(
+                owner=BrokerOwner(row["tenant_id"], row["workload_subject"]),
+                job_id=row["job_id"],
+                generation=int(row["generation"]),
+                job_state=JobState(row["job_state"]),
+                generation_state=(
+                    GenerationState(row["generation_state"])
+                    if row["generation_state"] is not None
+                    else None
+                ),
+                observed_at=row["observed_at"],
+            )
+            for row in rows
+        )
+
     @staticmethod
     async def _acquire_caller_operation(
         connection: Any,
@@ -601,6 +696,32 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
         if row is None:
             raise ConcurrentMutation(command.job_id)
         return _operation_from_row(row), None
+
+    @staticmethod
+    async def _insert_pending_internal_operation(
+        connection: Any,
+        command: BeginInternalReleaseCommand | BeginInternalFinalizeCommand,
+        ticket: OperationTicket,
+        now: datetime,
+    ) -> OperationRecord:
+        row = await connection.fetchrow(
+            _INSERT_OPERATION,
+            command.operation_id,
+            command.owner.tenant_id,
+            command.owner.workload_subject,
+            OperationSource.INTERNAL.value,
+            None,
+            command.kind.value,
+            command.request_digest,
+            command.job_id,
+            ticket.generation,
+            OperationStatus.PENDING.value,
+            _encode_ticket(ticket),
+            now,
+        )
+        if row is None:
+            raise ConcurrentMutation(command.job_id)
+        return _operation_from_row(row)
 
     @staticmethod
     async def _job(
@@ -1437,7 +1558,7 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
 
     @staticmethod
     def _verify_receipt(
-        command: BeginReleaseCommand,
+        command: BeginReleaseCommand | BeginInternalReleaseCommand,
         job: JobRecord,
         generation: GenerationRecord,
     ) -> None:
@@ -1475,6 +1596,80 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
                 )
                 if replay is not None:
                     return replay
+                job = await self._job(connection, command.owner, command.job_id)
+                self._expected_generation(job, command.expected_generation)
+                if (
+                    job.pending_operation_id is not None
+                    or job.current_generation != command.expected_generation
+                ):
+                    raise self._invalid_job(job, command.kind)
+                generation = await self._generation(
+                    connection, job.job_id, command.expected_generation
+                )
+                require_job_transition(command.kind, job.state, JobState.ACTIVE)
+                require_generation_transition(
+                    command.kind, generation.state, GenerationState.RELEASING
+                )
+                self._verify_receipt(command, job, generation)
+                now = await self._database_now(connection)
+                updated_job = replace(
+                    job,
+                    revision=job.revision + 1,
+                    pending_operation_id=command.operation_id,
+                    updated_at=now,
+                )
+                updated_generation = replace(
+                    generation,
+                    state=GenerationState.RELEASING,
+                    revision=generation.revision + 1,
+                    pending_operation_id=command.operation_id,
+                    receipt=command.receipt,
+                    release_target=command.target,
+                    release_terminal_outcome=command.terminal_outcome,
+                    updated_at=now,
+                )
+                ticket = replace(provisional, conversation_id=job.conversation_id)
+                await self._update_operation_ticket(
+                    connection, command.operation_id, ticket, now
+                )
+                await self._update_generation(
+                    connection, generation, updated_generation
+                )
+                await self._update_job(connection, job, updated_job)
+                await self._audit(
+                    connection,
+                    command=command.kind,
+                    owner=command.owner,
+                    job_id=job.job_id,
+                    generation=generation.generation,
+                    operation_id=command.operation_id,
+                    before_job_state=job.state,
+                    after_job_state=job.state,
+                    before_generation_state=generation.state,
+                    after_generation_state=GenerationState.RELEASING,
+                    reason_code=None,
+                    now=now,
+                )
+                return ticket
+
+    async def begin_internal_release(
+        self, command: BeginInternalReleaseCommand
+    ) -> OperationTicket:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                operation_time = await self._database_now(connection)
+                provisional = OperationTicket(
+                    operation_id=command.operation_id,
+                    command=command.kind,
+                    job_id=command.job_id,
+                    generation=command.expected_generation,
+                    job_state=JobState.ACTIVE,
+                    generation_state=GenerationState.RELEASING,
+                )
+                await self._insert_pending_internal_operation(
+                    connection, command, provisional, operation_time
+                )
                 job = await self._job(connection, command.owner, command.job_id)
                 self._expected_generation(job, command.expected_generation)
                 if (
@@ -1624,6 +1819,77 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
                 )
                 if replay is not None:
                     return replay
+                job = await self._job(connection, command.owner, command.job_id)
+                self._expected_generation(job, command.expected_generation)
+                if (
+                    job.pending_operation_id is not None
+                    or job.current_generation is not None
+                ):
+                    raise self._invalid_job(job, command.kind)
+                require_job_transition(command.kind, job.state, JobState.FINALIZING)
+                if (
+                    job.state is JobState.FINALIZING
+                    and job.terminal_outcome is not command.terminal_outcome
+                ):
+                    raise self._invalid_job(job, command.kind)
+                latest = (
+                    await self._generation(
+                        connection, job.job_id, job.generation, lock=False
+                    )
+                    if job.generation > 0
+                    else None
+                )
+                now = await self._database_now(connection)
+                updated_job = replace(
+                    job,
+                    state=JobState.FINALIZING,
+                    revision=job.revision + 1,
+                    pending_operation_id=command.operation_id,
+                    terminal_outcome=command.terminal_outcome,
+                    updated_at=now,
+                )
+                ticket = replace(
+                    provisional,
+                    conversation_id=job.conversation_id,
+                    generation_state=latest.state if latest else None,
+                )
+                await self._update_operation_ticket(
+                    connection, command.operation_id, ticket, now
+                )
+                await self._update_job(connection, job, updated_job)
+                await self._audit(
+                    connection,
+                    command=command.kind,
+                    owner=command.owner,
+                    job_id=job.job_id,
+                    generation=job.generation or None,
+                    operation_id=command.operation_id,
+                    before_job_state=job.state,
+                    after_job_state=JobState.FINALIZING,
+                    before_generation_state=latest.state if latest else None,
+                    after_generation_state=latest.state if latest else None,
+                    reason_code=None,
+                    now=now,
+                )
+                return ticket
+
+    async def begin_internal_finalize(
+        self, command: BeginInternalFinalizeCommand
+    ) -> OperationTicket:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                operation_time = await self._database_now(connection)
+                provisional = OperationTicket(
+                    operation_id=command.operation_id,
+                    command=command.kind,
+                    job_id=command.job_id,
+                    generation=command.expected_generation or None,
+                    job_state=JobState.FINALIZING,
+                )
+                await self._insert_pending_internal_operation(
+                    connection, command, provisional, operation_time
+                )
                 job = await self._job(connection, command.owner, command.job_id)
                 self._expected_generation(job, command.expected_generation)
                 if (

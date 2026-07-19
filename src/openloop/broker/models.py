@@ -647,6 +647,33 @@ class RecoverySnapshot:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class RecoveryCandidate:
+    """Secret-free hint returned by the bounded lifecycle recovery scan."""
+
+    owner: BrokerOwner
+    job_id: UUID
+    generation: int
+    job_state: JobState
+    generation_state: GenerationState | None
+    observed_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.owner, BrokerOwner):
+            raise TypeError("owner must be a BrokerOwner")
+        validate_uuid("job_id", self.job_id)
+        validate_bigint("generation", self.generation)
+        if not isinstance(self.job_state, JobState):
+            raise TypeError("job_state must be a JobState")
+        if self.generation_state is not None and not isinstance(
+            self.generation_state, GenerationState
+        ):
+            raise TypeError("generation_state must be a GenerationState or None")
+        validate_timestamp("observed_at", self.observed_at)
+        if self.generation == 0 and self.generation_state is not None:
+            raise ValueError("generation_state requires a positive generation")
+
+
 def _project_generation(record: GenerationRecord) -> GenerationSnapshot:
     return GenerationSnapshot(
         generation=record.generation,

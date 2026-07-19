@@ -23,6 +23,7 @@ from openloop.broker.postgres import (
     BROKER_MIGRATION_LOCK_ID,
     Migration,
     PostgresBrokerRepository,
+    _SCAN_RECOVERY_CANDIDATES,
     _decode_result,
     _decode_ticket,
     _encode_result,
@@ -344,6 +345,34 @@ def test_rpc_lifecycle_migration_allows_only_reviewed_intents():
         assert f"'{method}'" in sql
     assert "DROP CONSTRAINT broker_rpc_audit_method_check" in sql
     assert "ADD CONSTRAINT broker_rpc_audit_method_check" in sql
+
+
+def test_recovery_migration_adds_only_bounded_scan_indexes():
+    sql = (
+        resources.files("openloop.broker.migrations")
+        .joinpath("0004_recovery_indexes.sql")
+        .read_text(encoding="utf-8")
+    )
+    for fragment in (
+        "broker_generation_checkpoint_recovery",
+        "broker_generation_expired_running_recovery",
+        "broker_job_finalizing_recovery",
+        "WHERE state IN ('quiescing', 'quiesced', 'releasing')",
+        "WHERE state = 'running'",
+        "WHERE state = 'finalizing'",
+    ):
+        assert fragment in sql
+    assert "ALTER TABLE" not in sql.upper()
+
+
+def test_recovery_scan_has_separate_index_driven_arms_and_one_database_clock():
+    assert _SCAN_RECOVERY_CANDIDATES.count("UNION ALL") == 2
+    assert _SCAN_RECOVERY_CANDIDATES.count("clock_timestamp()") == 1
+    assert "LEFT JOIN" not in _SCAN_RECOVERY_CANDIDATES
+    assert "g.execution_lease_deadline <= recovery_clock.observed_at" in (
+        _SCAN_RECOVERY_CANDIDATES
+    )
+    assert "ORDER BY job_id" in _SCAN_RECOVERY_CANDIDATES
 
 
 def test_postgres_repository_implements_narrow_protocol():

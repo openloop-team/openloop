@@ -466,6 +466,110 @@ async def test_postgres_receipt_rejection_rolls_back_operation_and_audit(
     assert await _audit_count(pool) == before_audit
 
 
+async def test_postgres_recovery_scan_and_internal_operations_are_durable(
+    postgres_repository,
+):
+    repository, pool = postgres_repository
+    ledger = BrokerLedger(repository, id_factory=SequenceIds(start=1000))
+    created = await ledger.create_job(
+        OWNER, "postgres-recovery-01", "default", "docker", "postgres"
+    )
+    start = await begin_generation_start(
+        ledger,
+        idempotency_key="postgres-recovery-02",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
+    )
+    await mark_generation_running(
+        ledger,
+        job_id=created.job_id,
+        operation_id=start.operation_id,
+        generation=1,
+    )
+    _, _, barrier = await quiesce_generation(
+        ledger, job_id=created.job_id, generation=1, suffix="recovery"
+    )
+
+    candidates = await ledger.scan_recovery_candidates(limit=1)
+    assert [candidate.job_id for candidate in candidates] == [created.job_id]
+    receipt = receipt_for(
+        job_id=created.job_id,
+        conversation_id=created.conversation_id,
+        generation=1,
+        barrier_id=barrier,
+        suffix="recovery",
+    )
+    release = await ledger.begin_internal_release(
+        OWNER, created.job_id, 1, receipt, ReleaseTarget.PARKED
+    )
+    await ledger.mark_released(OWNER, release.operation_id, created.job_id, 1)
+    finalize = await ledger.begin_internal_finalize(
+        OWNER, created.job_id, 1, TerminalOutcome.SUCCESS
+    )
+    await ledger.mark_terminal(OWNER, finalize.operation_id, created.job_id)
+
+    async with pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT source, idempotency_key, command_kind, status
+            FROM broker_operations
+            WHERE operation_id = ANY($1::uuid[])
+            ORDER BY command_kind
+            """,
+            [release.operation_id, finalize.operation_id],
+        )
+    operation_metadata = {
+        (row["command_kind"], row["source"], row["idempotency_key"])
+        for row in rows
+    }
+    assert operation_metadata == {
+        ("begin_release", "internal", None),
+        ("begin_finalize", "internal", None),
+    }
+    assert all(row["status"] == "completed" for row in rows)
+    assert await ledger.scan_recovery_candidates() == ()
+
+
+async def test_postgres_recovery_running_expiry_uses_database_time(
+    postgres_repository,
+):
+    repository, pool = postgres_repository
+    ledger = BrokerLedger(repository, id_factory=SequenceIds(start=1100))
+    created = await ledger.create_job(
+        OWNER, "postgres-expiry-001", "default", "docker", "postgres"
+    )
+    start = await begin_generation_start(
+        ledger,
+        idempotency_key="postgres-expiry-002",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
+    )
+    await mark_generation_running(
+        ledger,
+        job_id=created.job_id,
+        operation_id=start.operation_id,
+        generation=1,
+    )
+    assert await ledger.scan_recovery_candidates() == ()
+    async with pool.acquire() as connection:
+        await connection.execute(
+            """
+            UPDATE broker_generations
+            SET execution_lease_deadline = clock_timestamp() - interval '1 second'
+            WHERE job_id = $1 AND generation = 1
+            """,
+            created.job_id,
+        )
+
+    candidates = await ledger.scan_recovery_candidates()
+
+    assert [candidate.job_id for candidate in candidates] == [created.job_id]
+    assert candidates[0].generation_state is GenerationState.RUNNING
+    assert candidates[0].observed_at.tzinfo is not None
+
+
 async def test_postgres_concurrent_repeated_setup_is_idempotent(
     postgres_repository,
 ):
@@ -477,7 +581,7 @@ async def test_postgres_concurrent_repeated_setup_is_idempotent(
         async with pool.acquire() as connection:
             assert await connection.fetchval(
                 "SELECT count(*) FROM broker_schema_migrations"
-            ) == 3
+            ) == 4
     finally:
         await second.close()
         await third.close()
@@ -505,7 +609,7 @@ async def test_postgres_concurrent_fresh_setup_serializes_bootstrap():
         async with pool.acquire() as connection:
             assert await connection.fetchval(
                 "SELECT count(*) FROM broker_schema_migrations"
-            ) == 3
+            ) == 4
             assert await connection.fetchval(
                 """
                 SELECT count(*) FROM information_schema.tables
@@ -530,7 +634,7 @@ async def test_postgres_append_only_upgrade_records_checksum(
     await repository.close()
     packaged = _load_packaged_migrations()
     upgrade = Migration.from_bytes(
-        4,
+        5,
         "contract_probe",
         b"CREATE TABLE broker_upgrade_probe (value INTEGER PRIMARY KEY);\n",
     )
@@ -543,7 +647,7 @@ async def test_postgres_append_only_upgrade_records_checksum(
     try:
         async with pool.acquire() as connection:
             row = await connection.fetchrow(
-                "SELECT name, checksum FROM broker_schema_migrations WHERE version = 4"
+                "SELECT name, checksum FROM broker_schema_migrations WHERE version = 5"
             )
             assert dict(row) == {
                 "name": "contract_probe",
@@ -563,7 +667,7 @@ async def test_postgres_append_only_upgrade_records_checksum(
         ),
         (
             "INSERT INTO broker_schema_migrations (version, name, checksum) "
-            "VALUES (4, 'future', repeat('a', 64))",
+            "VALUES (5, 'future', repeat('a', 64))",
             MigrationProblem.FUTURE_VERSION,
         ),
     ],
@@ -591,7 +695,7 @@ async def test_postgres_failed_pending_migration_rolls_back_and_detaches(
     await repository.close()
     packaged = _load_packaged_migrations()
     broken = Migration.from_bytes(
-        4,
+        5,
         "broken",
         (
             b"CREATE TABLE broker_should_rollback (value INTEGER);\n"
@@ -612,4 +716,4 @@ async def test_postgres_failed_pending_migration_rolls_back_and_detaches(
         ) is None
         assert await connection.fetchval(
             "SELECT max(version) FROM broker_schema_migrations"
-        ) == 3
+        ) == 4

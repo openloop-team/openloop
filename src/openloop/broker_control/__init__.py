@@ -9,6 +9,14 @@ from .receipts import (
     CheckpointReceiptVerifier,
     receipt_key,
 )
+from .local_receipts import (
+    LocalCheckpointReceiptConflict,
+    LocalCheckpointReceiptProblem,
+    LocalCheckpointReceiptStore,
+    canonical_checkpoint_key_json,
+    checkpoint_artifact_identity,
+    checkpoint_digest,
+)
 from .durable import (
     DurableStateDescriptor,
     LocalDurableBinding,
@@ -21,14 +29,28 @@ from .secrets import (
     RuntimeSecretProblem,
     RuntimeSecretRootRing,
 )
+from .recovery import (
+    BrokerLifecycleReconciler,
+    RECOVERY_REASON_CODES,
+    RecoveryItemReport,
+    RecoveryOutcome,
+    RecoveryPassReport,
+)
 
 __all__ = [
+    "BrokerLifecycleReconciler",
     "BrokerSegmentCoordinator",
     "CheckpointReceiptIssuer",
     "CheckpointReceiptKey",
     "CheckpointReceiptLocator",
     "CheckpointReceiptProblem",
     "CheckpointReceiptVerifier",
+    "LocalCheckpointReceiptConflict",
+    "LocalCheckpointReceiptProblem",
+    "LocalCheckpointReceiptStore",
+    "canonical_checkpoint_key_json",
+    "checkpoint_artifact_identity",
+    "checkpoint_digest",
     "receipt_key",
     "DerivedRuntimeSecrets",
     "DurableStateDescriptor",
@@ -38,4 +60,8 @@ __all__ = [
     "RuntimeSecretAuthority",
     "RuntimeSecretProblem",
     "RuntimeSecretRootRing",
+    "RECOVERY_REASON_CODES",
+    "RecoveryItemReport",
+    "RecoveryOutcome",
+    "RecoveryPassReport",
 ]

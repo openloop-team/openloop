@@ -311,11 +311,17 @@ class RecordingRepository:
     async def begin_release(self, command):
         return await self._record("begin_release", command)
 
+    async def begin_internal_release(self, command):
+        return await self._record("begin_internal_release", command)
+
     async def mark_released(self, command):
         return await self._record("mark_released", command)
 
     async def begin_finalize(self, command):
         return await self._record("begin_finalize", command)
+
+    async def begin_internal_finalize(self, command):
+        return await self._record("begin_internal_finalize", command)
 
     async def mark_terminal(self, command):
         return await self._record("mark_terminal", command)
@@ -328,6 +334,11 @@ class RecordingRepository:
 
     async def inspect_job_for_recovery(self, owner, job_id):
         return await self._record("inspect_job_for_recovery", (owner, job_id))
+
+    async def scan_recovery_candidates(self, after_job_id, limit):
+        return await self._record(
+            "scan_recovery_candidates", (after_job_id, limit)
+        )
 
 
 class IdFactory:
@@ -364,6 +375,9 @@ def test_repository_protocol_exposes_only_named_lifecycle_methods():
         "inspect_job",
         "inspect_job_authorization",
         "inspect_job_for_recovery",
+        "scan_recovery_candidates",
+        "begin_internal_release",
+        "begin_internal_finalize",
     }
     assert isinstance(RecordingRepository(), BrokerRepository)
 

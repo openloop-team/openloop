@@ -14,6 +14,7 @@ from .models import (
     JobSnapshot,
     OperationResult,
     OperationTicket,
+    RecoveryCandidate,
     RecoverySnapshot,
     ReleaseTarget,
     TerminalOutcome,
@@ -31,6 +32,8 @@ from .models import (
 from .repository import (
     AbandonGenerationCommand,
     BeginFinalizeCommand,
+    BeginInternalFinalizeCommand,
+    BeginInternalReleaseCommand,
     BeginQuiesceCommand,
     BeginReleaseCommand,
     BeginStartCommand,
@@ -297,6 +300,38 @@ class BrokerLedger:
         )
         return await self._repository.begin_release(self._prepare(command))
 
+    async def begin_internal_release(
+        self,
+        owner: BrokerOwner,
+        job_id: UUID,
+        expected_generation: int,
+        receipt: VerifiedCheckpointReceipt,
+        target: ReleaseTarget,
+        terminal_outcome: TerminalOutcome | None = None,
+    ) -> OperationTicket:
+        self._owner(owner)
+        validate_uuid("job_id", job_id)
+        validate_bigint("expected_generation", expected_generation)
+        if not isinstance(receipt, VerifiedCheckpointReceipt):
+            raise TypeError("receipt must be a VerifiedCheckpointReceipt")
+        self._enum("target", target, ReleaseTarget)
+        if target is ReleaseTarget.FINALIZING and terminal_outcome is None:
+            raise ValueError("a finalizing release requires terminal_outcome")
+        if target is ReleaseTarget.PARKED and terminal_outcome is not None:
+            raise ValueError("a parked release cannot set terminal_outcome")
+        if terminal_outcome is not None:
+            self._enum("terminal_outcome", terminal_outcome, TerminalOutcome)
+        command = BeginInternalReleaseCommand(
+            owner=owner,
+            operation_id=self._mint_id(),
+            job_id=job_id,
+            expected_generation=expected_generation,
+            receipt=receipt,
+            target=target,
+            terminal_outcome=terminal_outcome,
+        )
+        return await self._repository.begin_internal_release(self._prepare(command))
+
     async def mark_released(
         self,
         owner: BrokerOwner,
@@ -375,6 +410,44 @@ class BrokerLedger:
             terminal_outcome=terminal_outcome,
         )
         return await self._repository.begin_finalize(self._prepare(command))
+
+    async def begin_internal_finalize(
+        self,
+        owner: BrokerOwner,
+        job_id: UUID,
+        expected_generation: int,
+        terminal_outcome: TerminalOutcome,
+    ) -> OperationTicket:
+        self._owner(owner)
+        validate_uuid("job_id", job_id)
+        validate_bigint("expected_generation", expected_generation)
+        self._enum("terminal_outcome", terminal_outcome, TerminalOutcome)
+        command = BeginInternalFinalizeCommand(
+            owner=owner,
+            operation_id=self._mint_id(),
+            job_id=job_id,
+            expected_generation=expected_generation,
+            terminal_outcome=terminal_outcome,
+        )
+        return await self._repository.begin_internal_finalize(self._prepare(command))
+
+    async def scan_recovery_candidates(
+        self, after_job_id: UUID | None = None, limit: int = 100
+    ) -> tuple[RecoveryCandidate, ...]:
+        if after_job_id is not None:
+            validate_uuid("after_job_id", after_job_id)
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise TypeError("limit must be an integer")
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        result = await self._repository.scan_recovery_candidates(
+            after_job_id, limit
+        )
+        if not isinstance(result, tuple) or any(
+            not isinstance(item, RecoveryCandidate) for item in result
+        ):
+            raise TypeError("repository returned invalid recovery candidates")
+        return result
 
     async def mark_terminal(
         self,

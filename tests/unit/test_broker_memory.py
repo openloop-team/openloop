@@ -102,6 +102,77 @@ async def test_complete_park_resume_finalize_terminal_lifecycle(ledger, reposito
     assert len(await repository.audit_records_for_test()) == 15
 
 
+async def test_recovery_scan_is_bounded_ordered_and_uses_repository_clock(
+    ledger, clock
+):
+    first = await _create(ledger, "memory-scan-create1")
+    second = await _create(ledger, "memory-scan-create2")
+    first_start = await begin_generation_start(
+        ledger,
+        idempotency_key="memory-scan-start01",
+        job_id=first.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
+    )
+    second_start = await begin_generation_start(
+        ledger,
+        idempotency_key="memory-scan-start02",
+        job_id=second.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
+    )
+    await mark_generation_running(
+        ledger,
+        job_id=first.job_id,
+        operation_id=first_start.operation_id,
+        generation=1,
+    )
+    await mark_generation_running(
+        ledger,
+        job_id=second.job_id,
+        operation_id=second_start.operation_id,
+        generation=1,
+    )
+    await ledger.begin_quiesce(
+        OWNER,
+        "memory-scan-quiesce",
+        second.job_id,
+        1,
+        "scan-barrier",
+    )
+
+    before_expiry = await ledger.scan_recovery_candidates()
+    assert [item.job_id for item in before_expiry] == [second.job_id]
+    assert before_expiry[0].observed_at == clock.now
+    clock.now += timedelta(seconds=31)
+    expected = sorted((first.job_id, second.job_id))
+    first_page = await ledger.scan_recovery_candidates(limit=1)
+    second_page = await ledger.scan_recovery_candidates(first_page[-1].job_id, 1)
+
+    assert [first_page[0].job_id, second_page[0].job_id] == expected
+
+
+async def test_recovery_scan_reports_finalizing_jobs_without_generation_state(
+    ledger,
+):
+    created, _ = await _create_running(ledger, create_key="memory-scan-finalize")
+    await ledger.abandon_generation(
+        OWNER,
+        created.job_id,
+        1,
+        GenerationState.RUNNING,
+        "operator_abandon",
+        TerminalOutcome.FAILED,
+    )
+
+    candidates = await ledger.scan_recovery_candidates()
+
+    assert [item.job_id for item in candidates] == [created.job_id]
+    assert candidates[0].job_state is JobState.FINALIZING
+    assert candidates[0].generation == 1
+    assert candidates[0].generation_state is None
+
+
 async def test_create_exact_replay_returns_original_ids_without_audit(ledger, repository):
     first = await _create(ledger)
     replay = await _create(ledger)

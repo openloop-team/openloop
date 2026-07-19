@@ -95,6 +95,11 @@ class CheckpointReceiptIssuer:
         self._issuer = issuer
         self._audience = audience
 
+    @property
+    def issuer(self) -> str:
+        """Return the public issuer identity without exposing signing material."""
+        return self._issuer
+
     def issue(self, receipt: VerifiedCheckpointReceipt) -> SignedCheckpointReceipt:
         if not isinstance(receipt, VerifiedCheckpointReceipt):
             raise TypeError("receipt must be VerifiedCheckpointReceipt")

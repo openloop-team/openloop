@@ -34,6 +34,7 @@ from .models import (
     OperationSource,
     OperationStatus,
     OperationTicket,
+    RecoveryCandidate,
     ReleaseTarget,
     TerminalOutcome,
     project_job_snapshot,
@@ -43,6 +44,8 @@ from .models import (
 from .repository import (
     AbandonGenerationCommand,
     BeginFinalizeCommand,
+    BeginInternalFinalizeCommand,
+    BeginInternalReleaseCommand,
     BeginQuiesceCommand,
     BeginReleaseCommand,
     BeginStartCommand,
@@ -212,6 +215,54 @@ class InMemoryBrokerRepository:
             raise OperationMismatch(operation_id)
         return operation, None
 
+    async def scan_recovery_candidates(
+        self, after_job_id: UUID | None, limit: int
+    ) -> tuple[RecoveryCandidate, ...]:
+        async with self._lock:
+            now = self._now()
+            candidates: list[RecoveryCandidate] = []
+            for job_id in sorted(self._jobs):
+                if after_job_id is not None and job_id <= after_job_id:
+                    continue
+                job = self._jobs[job_id]
+                generation = self._latest_generation(job)
+                include = job.state is JobState.FINALIZING
+                generation_state: GenerationState | None = None
+                if (
+                    not include
+                    and job.state is JobState.ACTIVE
+                    and generation is not None
+                    and (
+                        generation.state
+                        in {
+                            GenerationState.QUIESCING,
+                            GenerationState.QUIESCED,
+                            GenerationState.RELEASING,
+                        }
+                        or (
+                            generation.state is GenerationState.RUNNING
+                            and generation.execution_lease_deadline <= now
+                        )
+                    )
+                ):
+                    include = True
+                    generation_state = generation.state
+                if not include:
+                    continue
+                candidates.append(
+                    RecoveryCandidate(
+                        owner=job.owner,
+                        job_id=job.job_id,
+                        generation=job.generation,
+                        job_state=job.state,
+                        generation_state=generation_state,
+                        observed_at=now,
+                    )
+                )
+                if len(candidates) == limit:
+                    break
+            return tuple(candidates)
+
     async def create_job(self, command: CreateJobCommand) -> OperationTicket:
         async with self._lock:
             replay = self._caller_replay(command)
@@ -283,7 +334,10 @@ class InMemoryBrokerRepository:
             job = self._job(command.owner, command.job_id)
             self._expected_generation(job, command.expected_generation)
             require_job_transition(command.kind, job.state, job.state)
-            if job.pending_operation_id is not None or job.current_generation is not None:
+            if (
+                job.pending_operation_id is not None
+                or job.current_generation is not None
+            ):
                 raise self._invalid_job(job, command.kind)
             if command.operation_id in self._operations:
                 raise ConcurrentMutation(job.job_id)
@@ -593,7 +647,7 @@ class InMemoryBrokerRepository:
 
     @staticmethod
     def _verify_receipt(
-        command: BeginReleaseCommand,
+        command: BeginReleaseCommand | BeginInternalReleaseCommand,
         job: JobRecord,
         generation: GenerationRecord,
     ) -> None:
@@ -681,6 +735,85 @@ class InMemoryBrokerRepository:
             self._jobs[job.job_id] = updated_job
             self._generations[(job.job_id, generation.generation)] = updated_generation
             self._publish_caller_operation(operation)
+            self._audit.append(audit)
+            return ticket
+
+    async def begin_internal_release(
+        self, command: BeginInternalReleaseCommand
+    ) -> OperationTicket:
+        async with self._lock:
+            job = self._job(command.owner, command.job_id)
+            self._expected_generation(job, command.expected_generation)
+            if (
+                job.pending_operation_id is not None
+                or job.current_generation != command.expected_generation
+            ):
+                raise self._invalid_job(job, command.kind)
+            generation = self._generation(job.job_id, command.expected_generation)
+            require_job_transition(command.kind, job.state, JobState.ACTIVE)
+            require_generation_transition(
+                command.kind, generation.state, GenerationState.RELEASING
+            )
+            self._verify_receipt(command, job, generation)
+            if command.operation_id in self._operations:
+                raise ConcurrentMutation(command.job_id)
+            now = self._now()
+            updated_job = replace(
+                job,
+                revision=job.revision + 1,
+                pending_operation_id=command.operation_id,
+                updated_at=now,
+            )
+            updated_generation = replace(
+                generation,
+                state=GenerationState.RELEASING,
+                revision=generation.revision + 1,
+                pending_operation_id=command.operation_id,
+                receipt=command.receipt,
+                release_target=command.target,
+                release_terminal_outcome=command.terminal_outcome,
+                updated_at=now,
+            )
+            ticket = OperationTicket(
+                operation_id=command.operation_id,
+                command=command.kind,
+                job_id=job.job_id,
+                conversation_id=job.conversation_id,
+                generation=generation.generation,
+                job_state=JobState.ACTIVE,
+                generation_state=GenerationState.RELEASING,
+            )
+            operation = OperationRecord(
+                operation_id=command.operation_id,
+                owner=command.owner,
+                source=OperationSource.INTERNAL,
+                idempotency_key=None,
+                command=command.kind,
+                request_digest=command.request_digest,
+                job_id=job.job_id,
+                generation=generation.generation,
+                status=OperationStatus.PENDING,
+                intent_ticket=ticket,
+                completion_result=None,
+                created_at=now,
+                updated_at=now,
+            )
+            audit = self._audit_record(
+                command=command.kind,
+                owner=command.owner,
+                job_id=job.job_id,
+                generation=generation.generation,
+                operation_id=command.operation_id,
+                before_job_state=job.state,
+                after_job_state=job.state,
+                before_generation_state=generation.state,
+                after_generation_state=GenerationState.RELEASING,
+                reason_code=None,
+                now=now,
+            )
+            self._jobs[job.job_id] = updated_job
+            self._generations[(job.job_id, generation.generation)] = updated_generation
+            self._operations[operation.operation_id] = operation
             self._audit.append(audit)
             return ticket
 
@@ -888,7 +1021,10 @@ class InMemoryBrokerRepository:
                 return replay
             job = self._job(command.owner, command.job_id)
             self._expected_generation(job, command.expected_generation)
-            if job.pending_operation_id is not None or job.current_generation is not None:
+            if (
+                job.pending_operation_id is not None
+                or job.current_generation is not None
+            ):
                 raise self._invalid_job(job, command.kind)
             require_job_transition(command.kind, job.state, JobState.FINALIZING)
             if (
@@ -936,6 +1072,77 @@ class InMemoryBrokerRepository:
             )
             self._jobs[job.job_id] = updated_job
             self._publish_caller_operation(operation)
+            self._audit.append(audit)
+            return ticket
+
+    async def begin_internal_finalize(
+        self, command: BeginInternalFinalizeCommand
+    ) -> OperationTicket:
+        async with self._lock:
+            job = self._job(command.owner, command.job_id)
+            self._expected_generation(job, command.expected_generation)
+            if (
+                job.pending_operation_id is not None
+                or job.current_generation is not None
+            ):
+                raise self._invalid_job(job, command.kind)
+            require_job_transition(command.kind, job.state, JobState.FINALIZING)
+            if (
+                job.state is JobState.FINALIZING
+                and job.terminal_outcome is not command.terminal_outcome
+            ):
+                raise self._invalid_job(job, command.kind)
+            if command.operation_id in self._operations:
+                raise ConcurrentMutation(command.job_id)
+            now = self._now()
+            updated_job = replace(
+                job,
+                state=JobState.FINALIZING,
+                revision=job.revision + 1,
+                pending_operation_id=command.operation_id,
+                terminal_outcome=command.terminal_outcome,
+                updated_at=now,
+            )
+            latest = self._latest_generation(job)
+            ticket = OperationTicket(
+                operation_id=command.operation_id,
+                command=command.kind,
+                job_id=job.job_id,
+                conversation_id=job.conversation_id,
+                generation=job.generation or None,
+                job_state=JobState.FINALIZING,
+                generation_state=latest.state if latest else None,
+            )
+            operation = OperationRecord(
+                operation_id=command.operation_id,
+                owner=command.owner,
+                source=OperationSource.INTERNAL,
+                idempotency_key=None,
+                command=command.kind,
+                request_digest=command.request_digest,
+                job_id=job.job_id,
+                generation=job.generation or None,
+                status=OperationStatus.PENDING,
+                intent_ticket=ticket,
+                completion_result=None,
+                created_at=now,
+                updated_at=now,
+            )
+            audit = self._audit_record(
+                command=command.kind,
+                owner=command.owner,
+                job_id=job.job_id,
+                generation=job.generation or None,
+                operation_id=command.operation_id,
+                before_job_state=job.state,
+                after_job_state=JobState.FINALIZING,
+                before_generation_state=latest.state if latest else None,
+                after_generation_state=latest.state if latest else None,
+                reason_code=None,
+                now=now,
+            )
+            self._jobs[job.job_id] = updated_job
+            self._operations[operation.operation_id] = operation
             self._audit.append(audit)
             return ticket
 
