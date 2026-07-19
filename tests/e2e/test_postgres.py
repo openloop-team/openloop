@@ -607,7 +607,7 @@ async def test_session_reconcile_across_real_postgres(postgres_pool):
     await workflows.setup(postgres_pool)
     try:
         # The turn's workflow completed, but the session crashed before delivery.
-        await workflows.upsert(WorkflowInstance(
+        await workflows.create(WorkflowInstance(
             id=sid, workflow=workflow_name, status="completed",
             state={
                 "final_text": "recovered across restart",
@@ -818,4 +818,307 @@ async def test_thread_inbox_and_claim_across_real_postgres(postgres_pool):
                     "DELETE FROM surface_threads WHERE scope_key = $1", key)
         except Exception:
             pass
+        await store.close()
+
+
+async def test_workflow_drive_arbitration_sql_semantics(postgres_pool):
+    """The claim/fence/release/evict predicates against real server-side SQL."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    from openloop.workflows import WorkflowInstance
+    from openloop.workflows.postgres import PostgresWorkflowStore
+
+    instance_id = f"wf-{uuid.uuid4().hex[:8]}"
+    store = PostgresWorkflowStore()
+    await store.setup(postgres_pool)
+    try:
+        pool = store._require_pool()
+
+        # create: inserts once, conflict loses without overwriting.
+        assert await store.create(WorkflowInstance(
+            id=instance_id, workflow="t", status="running",
+            state={"progress": "real"},
+        ))
+        assert not await store.create(WorkflowInstance(
+            id=instance_id, workflow="t", status="running",
+            state={"progress": "clobber"},
+        ))
+        assert (await store.get(instance_id)).state == {"progress": "real"}
+
+        # claim_drive: wins unleased, loses to a live lease, wins expired.
+        first = await store.claim_drive(instance_id, lease_seconds=60)
+        assert first is not None and first.drive_gen == 1
+        assert await store.claim_drive(instance_id, lease_seconds=60) is None
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE workflow_instances "
+                "SET leased_until = now() - interval '1 second' WHERE id = $1",
+                instance_id,
+            )
+        second = await store.claim_drive(instance_id, lease_seconds=60)
+        assert second is not None and second.drive_gen == 2
+
+        # fenced_write: stale gen mutates nothing; live gen lands but leaves
+        # the (renewed) lease untouched — lease monotonicity.
+        assert await store.renew_lease(instance_id, 1, lease_seconds=99) is False
+        assert await store.renew_lease(instance_id, 2, lease_seconds=120)
+        renewed_until = (await store.get(instance_id)).leased_until
+        stale = await store.get(instance_id)
+        stale.state = {"progress": "stale"}
+        assert await store.fenced_write(stale, 1) is False
+        assert (await store.get(instance_id)).state == {"progress": "real"}
+        second.state = {"progress": "step-1"}
+        assert await store.fenced_write(second, 2)
+        after = await store.get(instance_id)
+        assert after.state == {"progress": "step-1"}
+        assert after.leased_until == renewed_until
+        assert after.drive_gen == 2
+
+        # release: gen bump + lease cleared; the writer's own gen goes stale.
+        second.status = "waiting"
+        second.waiting_on = "gate"
+        assert await store.fenced_write(second, 2, release=True)
+        parked = await store.get(instance_id)
+        assert parked.drive_gen == 3 and parked.leased_until is None
+        assert await store.fenced_write(second, 2) is False
+
+        # claim_event: consumes the exact wait, leaves the lease unset.
+        woken = await store.claim_event(instance_id, "gate", {"by": "x"})
+        assert woken.status == "running" and woken.leased_until is None
+        assert await store.claim_event(instance_id, "gate", {}) is None
+
+        # cancel_instance: wins once (evicting via gen bump), then never again.
+        cancelled = await store.cancel_instance(instance_id, "denied")
+        assert cancelled.status == "cancelled"
+        assert cancelled.drive_gen == woken.drive_gen + 1
+        assert await store.cancel_instance(instance_id, "again") is None
+    finally:
+        try:
+            pool = store._require_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
+                )
+        except Exception:
+            pass
+        await store.close()
+
+
+async def test_workflow_drive_gen_migration_is_idempotent(postgres_pool):
+    """setup() adds drive_gen to a pre-existing populated table, once."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    from openloop.workflows.postgres import PostgresWorkflowStore
+
+    instance_id = f"wf-{uuid.uuid4().hex[:8]}"
+    store = PostgresWorkflowStore()
+    await store.setup(postgres_pool)
+    try:
+        pool = store._require_pool()
+        async with pool.acquire() as conn:
+            # Rewind to the pre-migration schema with a live row in place.
+            await conn.execute(
+                "ALTER TABLE workflow_instances DROP COLUMN IF EXISTS drive_gen"
+            )
+            await conn.execute(
+                "INSERT INTO workflow_instances (id, workflow, status) "
+                "VALUES ($1, 't', 'waiting')",
+                instance_id,
+            )
+        await store.setup(postgres_pool)  # migrate
+        await store.setup(postgres_pool)  # and prove it re-runs cleanly
+        migrated = await store.get(instance_id)
+        assert migrated.status == "waiting"
+        assert migrated.drive_gen == 0
+    finally:
+        try:
+            pool = store._require_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
+                )
+        except Exception:
+            pass
+        await store.close()
+
+
+async def test_workflow_concurrent_drives_run_steps_once(postgres_pool):
+    """Two engines over one real store: exactly one claims and runs the step."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    from openloop.workflows import Step, Workflow, WorkflowEngine
+    from openloop.workflows.postgres import PostgresWorkflowStore
+
+    instance_id = f"wf-{uuid.uuid4().hex[:8]}"
+    calls = 0
+
+    def _wf():
+        async def work(ctx):
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.05)
+
+        return Workflow("t", [Step("gate", wait=True), Step("work", work)])
+
+    store = PostgresWorkflowStore()
+    await store.setup(postgres_pool)
+    store2 = PostgresWorkflowStore()
+    await store2.setup(postgres_pool)
+    try:
+        first = WorkflowEngine(store, {"t": _wf()})
+        second = WorkflowEngine(store2, {"t": _wf()})
+        await first.start("t", instance_id, {})
+        await first.send_event(instance_id, "gate", drive=False)
+
+        first.drive_background(instance_id)
+        second.drive_background(instance_id)
+        await first.wait_background(instance_id)
+        await second.wait_background(instance_id)
+
+        assert calls == 1
+        assert (await store.get(instance_id)).status == "completed"
+    finally:
+        try:
+            pool = store._require_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
+                )
+        except Exception:
+            pass
+        await store2.close()
+        await store.close()
+
+
+async def test_workflow_lease_takeover_evicts_stale_drive(postgres_pool):
+    """Forced lease expiry: a rival claims, the stale drive is cancelled and
+    cannot clobber — asserting the public contract, not internal exceptions."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    from openloop.workflows import Step, Workflow, WorkflowEngine
+    from openloop.workflows.postgres import PostgresWorkflowStore
+
+    instance_id = f"wf-{uuid.uuid4().hex[:8]}"
+    started = asyncio.Event()
+    step_cancelled = asyncio.Event()
+
+    def _wf():
+        async def hang(ctx):
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                step_cancelled.set()
+                raise
+
+        return Workflow("t", [Step("gate", wait=True), Step("hang", hang)])
+
+    store = PostgresWorkflowStore()
+    await store.setup(postgres_pool)
+    store2 = PostgresWorkflowStore()
+    await store2.setup(postgres_pool)
+    try:
+        # Lease 3s → the stale drive's ticker checks every 1s; the takeover
+        # happens well inside the first tick.
+        stale_engine = WorkflowEngine(store, {"t": _wf()}, lease_seconds=3)
+        await stale_engine.start("t", instance_id, {})
+        await stale_engine.send_event(instance_id, "gate", drive=False)
+        stale_engine.drive_background(instance_id)
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        pool = store._require_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE workflow_instances "
+                "SET leased_until = now() - interval '1 second' WHERE id = $1",
+                instance_id,
+            )
+        rival = await store2.claim_drive(instance_id, lease_seconds=60)
+        assert rival is not None
+
+        # The stale drive's next renewal loses the fence and cancels its step.
+        await asyncio.wait_for(step_cancelled.wait(), timeout=5)
+        yielded = await stale_engine.wait_background(instance_id)
+        assert yielded.drive_gen == rival.drive_gen  # the rival's row, as-is
+        current = await store.get(instance_id)
+        assert current.status == "running"
+        assert "hang" not in current.completed_steps  # nothing clobbered
+    finally:
+        try:
+            pool = store._require_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
+                )
+        except Exception:
+            pass
+        await store2.close()
+        await store.close()
+
+
+async def test_workflow_cancel_during_drive_wins_over_writer(postgres_pool):
+    """cancel_instance evicts a live drive mid-step; the terminal state and
+    at-most-once callbacks survive the driver's losing write."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    from openloop.workflows import Step, Workflow, WorkflowEngine
+    from openloop.workflows.postgres import PostgresWorkflowStore
+
+    instance_id = f"wf-{uuid.uuid4().hex[:8]}"
+    started = asyncio.Event()
+    release = asyncio.Event()
+    terminal: list[str] = []
+
+    def _wf():
+        async def work(ctx):
+            started.set()
+            await release.wait()
+
+        return Workflow("t", [Step("gate", wait=True), Step("work", work)])
+
+    store = PostgresWorkflowStore()
+    await store.setup(postgres_pool)
+    store2 = PostgresWorkflowStore()
+    await store2.setup(postgres_pool)
+    try:
+        driver = WorkflowEngine(store, {"t": _wf()})
+        canceller = WorkflowEngine(store2, {"t": _wf()})
+
+        async def on_terminal(inst):
+            terminal.append(inst.id)
+
+        driver.add_terminal_callback(on_terminal)
+        canceller.add_terminal_callback(on_terminal)
+
+        await driver.start("t", instance_id, {})
+        await driver.send_event(instance_id, "gate", drive=False)
+        driver.drive_background(instance_id)
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        cancelled = await canceller.cancel(instance_id, "denied")
+        assert cancelled.status == "cancelled"
+        release.set()
+        await driver.wait_background(instance_id)  # its write loses the fence
+
+        final = await store.get(instance_id)
+        assert final.status == "cancelled"
+        assert "work" not in final.completed_steps
+        assert terminal == [instance_id]  # once, from the winning cancel only
+        await canceller.cancel(instance_id, "again")
+        assert terminal == [instance_id]
+    finally:
+        try:
+            pool = store._require_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
+                )
+        except Exception:
+            pass
+        await store2.close()
         await store.close()

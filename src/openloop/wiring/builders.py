@@ -988,7 +988,9 @@ async def run_recovery_pass(coordinator, tools: ToolGateway, session_runner) -> 
     (the leader's shared-store reconcile covers it). Idempotent and safe to repeat,
     which is what lets the periodic loop heal a leader that crashed mid-sweep once
     its lock TTL lapses. The lock is coordination, not correctness — a TTL expiry
-    or in-process fallback at worst re-does idempotent work.
+    or in-process fallback at worst re-does idempotent work, and the workflow
+    engine's per-instance drive claim (gen-fenced, server-clock lease) is the
+    layer that actually guarantees at most one durable writer per instance.
     """
     async with guard(
         coordinator,

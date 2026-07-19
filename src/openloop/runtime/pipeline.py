@@ -487,7 +487,7 @@ class Runtime:
         if self.remember and not s.get("remembered") and not s.get("continuation"):
             await self._remember(task, s["scope"], s.get("query_embedding"))
             s["remembered"] = True
-            await self.engine.checkpoint(ctx.instance)
+            await ctx.checkpoint()
         if not s.get("usage_recorded"):
             outcome = self._task_outcome(accounted)
             await self._record_usage(task, s["model"], accounted, outcome=outcome)

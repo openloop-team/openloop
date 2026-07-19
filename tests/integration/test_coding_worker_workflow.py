@@ -4,7 +4,9 @@ Phase C — approval is a wait node, and ToolGateway.resolve is a thin adapter t
 emits the approval event to wake the parked workflow.
 """
 
+from datetime import timedelta
 from pathlib import Path
+
 from openloop.agents import load_agent
 from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import CodingWorkerConnector
@@ -22,6 +24,7 @@ from openloop.tools.openhands_resume import (
 from openloop.tools.github import GitHubConnector
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from openloop.workflows.coding_worker import _worker_phase, build_coding_worker_workflow
+from openloop.workflows.store import _now
 from openloop.testing import FakeGitHub, FakeWorkerOrchestrator
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
@@ -191,17 +194,18 @@ async def test_resume_after_crash_between_approval_and_pr():
     )
     job_id = pending.approval.args["job_id"]
 
-    # Hand-roll the crash: wake the workflow, but make open_pr raise *and* leave
-    # the instance marked running (as a hard crash would, before failure persists).
-    inst = await store.get(job_id)
-    inst.status = "running"
-    inst.waiting_on = None
+    # Hand-roll the crash: consume the approval event, claim the drive, commit
+    # run_worker's checkpoint — then "die" by letting the lease lapse, leaving
+    # the instance running with no live owner (what a hard crash looks like).
+    await store.claim_event(job_id, "await_approval", {})
+    inst = await store.claim_drive(job_id, lease_seconds=30)
     inst.completed_steps = ["await_approval", "run_worker"]
     inst.state.update({
         "branch": f"openloop/job-{job_id}", "title": "t", "body": "b",
         "repo": "acme/x", "instruction": "x", "base": "main", "job_id": job_id,
     })
-    await store.upsert(inst)
+    await store.fenced_write(inst, inst.drive_gen)
+    store._by_id[job_id].leased_until = _now() - timedelta(seconds=1)
 
     resumed = await engine.resume_incomplete()
     assert job_id in resumed

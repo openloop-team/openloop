@@ -699,7 +699,7 @@ async def test_reconcile_redelivers_terminal_without_final():
 async def test_reconcile_recovers_crashed_turn_from_completed_workflow():
     runner, sessions, delivery = _runner(ScriptedGateway([]))
     # The workflow finished but the session crashed before delivering it.
-    await runner.runtime.engine.store.upsert(WorkflowInstance(
+    await runner.runtime.engine.store.create(WorkflowInstance(
         id="s2", workflow=runner.runtime.workflow_name, status="completed",
         state={
             "final_text": "recovered answer",
@@ -739,12 +739,13 @@ async def test_reconcile_delivers_approved_workflow_waiting_session():
     request.decided_by = "@maciag.artur"
     await tools.approvals.update(request)
     job_id = request.args["job_id"]
-    inst = await engine.store.get(job_id)
-    inst.status = "completed"
-    inst.waiting_on = None
-    inst.leased_until = None
-    inst.result = {"summary": "opened draft PR #7 in acme/x"}
-    await engine.store.upsert(inst)
+    # Complete the parked workflow the way a real drive would: consume the
+    # approval event, claim the drive, and land a fenced terminal write.
+    await engine.store.claim_event(job_id, "await_approval", {})
+    claimed = await engine.store.claim_drive(job_id, lease_seconds=30)
+    claimed.status = "completed"
+    claimed.result = {"summary": "opened draft PR #7 in acme/x"}
+    await engine.store.fenced_write(claimed, claimed.drive_gen, release=True)
 
     sessions = InMemorySurfaceSessionStore()
     delivery = FakeSurfaceDelivery()
@@ -774,7 +775,7 @@ async def test_reconcile_delivers_approved_workflow_waiting_session():
 
 async def test_reconcile_posts_interrupted_notice_for_abandoned_turn():
     runner, sessions, delivery = _runner(ScriptedGateway([]))
-    await runner.runtime.engine.store.upsert(WorkflowInstance(
+    await runner.runtime.engine.store.create(WorkflowInstance(
         id="s3", workflow=runner.runtime.workflow_name, status="abandoned",
         state={"task": {}},
     ))
@@ -793,7 +794,7 @@ async def test_reconcile_leaves_non_terminal_workflow_for_later():
     # The engine's own resume didn't (or couldn't) drive this to terminal — the
     # reconciler must not deliver a half-finished turn or abandon it; leave it.
     runner, sessions, delivery = _runner(ScriptedGateway([]))
-    await runner.runtime.engine.store.upsert(WorkflowInstance(
+    await runner.runtime.engine.store.create(WorkflowInstance(
         id="s5", workflow=runner.runtime.workflow_name, status="running",
         completed_steps=["prepare"], state={"task": {}},
     ))

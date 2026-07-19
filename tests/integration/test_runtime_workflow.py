@@ -138,7 +138,7 @@ async def test_crash_mid_run_resumes_without_replaying_committed_answer():
     usage = InMemoryUsageStore()
     gateway = CountingGateway()  # any call here would be a replay bug
     rt, engine, store = _runtime(gateway, usage=usage)
-    await store.upsert(WorkflowInstance(
+    await store.create(WorkflowInstance(
         id="midrun", workflow=rt.workflow_name, status="running",
         completed_steps=["prepare"],  # run not yet complete
         state={
@@ -184,7 +184,7 @@ async def test_resume_after_committed_final_round_at_budget_does_not_recall():
         msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": "ok"})
     msgs.append({"role": "assistant", "content": "the answer"})  # MAX-th round, final
 
-    await store.upsert(WorkflowInstance(
+    await store.create(WorkflowInstance(
         id="atbudget", workflow=rt.workflow_name, status="running",
         completed_steps=["prepare"],
         state={
@@ -242,7 +242,7 @@ async def test_resume_skips_already_executed_tool_call():
     tools = ToolGateway(tools=[GitHubConnector(github)])
     gateway = ScriptedGateway([ModelResponse(text="done", model="m")])
     rt, engine, store = _runtime(gateway, tools=tools)
-    await store.upsert(WorkflowInstance(
+    await store.create(WorkflowInstance(
         id="toolresume", workflow=rt.workflow_name, status="running",
         completed_steps=["prepare"],
         state={
@@ -280,7 +280,7 @@ async def test_crash_after_run_resumes_idempotent_persist_tail():
     usage = InMemoryUsageStore()
     gateway = CountingGateway()
     rt, engine, store = _runtime(gateway, usage=usage)
-    await store.upsert(WorkflowInstance(
+    await store.create(WorkflowInstance(
         id="midpersist", workflow=rt.workflow_name, status="running",
         completed_steps=["prepare", "run"],
         state={
