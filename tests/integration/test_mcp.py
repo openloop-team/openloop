@@ -5,7 +5,11 @@ from openloop.models.gateway import ModelResponse
 from openloop.runtime import Runtime, Task
 from openloop.tools import ToolGateway
 from openloop.tools.mcp import MCPConnector, MCPToolInfo
-from openloop.testing import ScriptedGateway, tool_call_response
+from openloop.testing import (
+    ScriptedGateway,
+    in_memory_workflow_engine,
+    tool_call_response,
+)
 
 
 class FakeMCPClient:
@@ -96,7 +100,9 @@ async def test_runtime_loop_calls_mcp_tool():
         tool_call_response("m", [("c1", "ci-logs_get_run_logs", {"run_id": "7"})]),
         ModelResponse(text="The build failed on step 3.", model="m"),
     ])
-    runtime = Runtime(agent, gateway=gateway, tools=gw)
+    runtime = Runtime(
+        agent, gateway=gateway, tools=gw, engine=in_memory_workflow_engine()
+    )
     result = await runtime.handle(Task(text="why did CI fail?", surface="slack",
                                        channel="#ci"))
     assert result.text == "The build failed on step 3."

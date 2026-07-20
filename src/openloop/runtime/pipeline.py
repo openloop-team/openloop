@@ -150,11 +150,6 @@ def _parse_json(raw) -> dict:
         return {}
 
 
-async def _noop_checkpoint() -> None:
-    """Checkpoint hook for the inline (engine-less) path — nothing to persist."""
-    return None
-
-
 def _result_content(result: ToolResult | None) -> str:
     """Serialize an executed tool's result for the model.
 
@@ -211,8 +206,8 @@ class Runtime:
         embedder: Embedder | None = None,
         usage: UsageStore | None = None,
         tools: ToolGateway | None = None,
-        engine: "WorkflowEngine | None" = None,
         *,
+        engine: "WorkflowEngine",
         remember: bool = True,
         limiter: TaskLimiter | None = None,
     ) -> None:
@@ -226,13 +221,13 @@ class Runtime:
         # Phase 5 throughput limits: per-(tenant, agent) rate/concurrency,
         # enforced at handle() before any other work. Config: spec.limits.
         self.limiter = limiter or InMemoryTaskLimiter()
-        # When an engine is wired, each task runs as a durable `agent_task`
-        # workflow (consumer #2). Namespaced per agent so multiple agents on one
-        # engine don't collide. Without an engine, handle() runs inline.
+        # Every task runs as an `agent_task` workflow. The caller chooses the
+        # engine's store explicitly: Postgres for durable composition, or an
+        # in-memory store for tests / deliberately non-durable local development.
+        # Namespaced per agent so multiple agents on one engine don't collide.
         self.engine = engine
         self.workflow_name = f"agent_task:{agent.metadata.name}"
-        if engine is not None:
-            engine.register(self._build_workflow())
+        engine.register(self._build_workflow())
 
     def _build_messages(
         self, task: Task, recalled: list[MemoryRecord]
@@ -289,30 +284,9 @@ class Runtime:
             )
             return _limited_response(decision.reason)
         try:
-            if self.engine is not None:
-                return await self._handle_workflow(task, instance_id)
-            return await self._handle_inline(task)
+            return await self._handle_workflow(task, instance_id)
         finally:
             await self.limiter.release(scope)
-
-    async def _handle_inline(self, task: Task) -> ModelResponse:
-        """Run the pipeline directly (no durable workflow)."""
-        model, scope, messages, query_embedding, block_reason = await self._prepare(task)
-        if block_reason is not None:
-            await self._record_usage(
-                task, model, ModelResponse(text="", model=model), outcome="blocked"
-            )
-            return _blocked_response(block_reason)
-
-        state: dict = {"model": model, "messages": messages}
-        await self._run_tool_loop(state, task, checkpoint=_noop_checkpoint)
-        if self.remember:
-            await self._remember(task, scope, query_embedding)
-        accounted = self._accounted_from_state(state)
-        outcome = self._task_outcome(accounted)
-        await self._record_usage(task, model, accounted, outcome=outcome)
-        self._log_completion(task, accounted, outcome)
-        return self._final_from_state(state)
 
     def _accounted_from_state(self, state: dict) -> ModelResponse:
         """The accumulated ModelResponse for usage accounting, from turn state."""
@@ -428,12 +402,6 @@ class Runtime:
         ``instance_id`` (deterministic per session+approval), so a re-spawn returns
         the existing continuation instead of re-driving the model.
         """
-        if self.engine is None:
-            state: dict = {
-                "model": self.agent.model_for(task.kind), "messages": messages,
-            }
-            await self._run_tool_loop(state, task, checkpoint=_noop_checkpoint)
-            return self._final_from_state(state)
         model = self.agent.model_for(task.kind)
         scope = scope_key_for(self.agent, task.channel)
         instance = await self.engine.start(
@@ -518,8 +486,6 @@ class Runtime:
         """
         from openloop.workflows.store import TERMINAL as WF_TERMINAL
 
-        if self.engine is None:
-            return False, None
         instance = await self.engine.store.get(instance_id)
         if instance is None:
             return False, None
@@ -739,5 +705,4 @@ def _task_from_dict(data: dict) -> Task:
         session_id=data.get("session_id"),
         context_notes=data.get("context_notes", []),
     )
-
 

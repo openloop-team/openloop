@@ -28,6 +28,8 @@ from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
 from openloop.usage import UsageRecord, budget_scope_key
 from openloop.usage.postgres import PostgresUsageStore
+from openloop.workflows import WorkflowEngine
+from openloop.workflows.postgres import PostgresWorkflowStore
 from openloop.testing import (
     FakeEmbedder,
     FakeGitHub,
@@ -79,15 +81,18 @@ async def stores(postgres_pool):
     memory = PostgresMemoryStore(embedding_dim=EMBED_DIM)
     usage = PostgresUsageStore()
     approvals = PostgresApprovalStore()
+    workflows = PostgresWorkflowStore()
     await memory.setup(postgres_pool)
     await usage.setup(postgres_pool)
     await approvals.setup(postgres_pool)
+    await workflows.setup(postgres_pool)
     try:
-        yield memory, usage, approvals
+        yield memory, usage, approvals, workflows
     finally:
         await memory.close()
         await usage.close()
         await approvals.close()
+        await workflows.close()
 
 
 async def test_usage_attribution_envelope_round_trip(stores):
@@ -95,7 +100,7 @@ async def test_usage_attribution_envelope_round_trip(stores):
     # non-null (broker-run spend) and null (legacy). The broker_generation value
     # is past INT32 max on purpose — it round-trips only because the column is
     # BIGINT (an INTEGER column would reject the insert), pinning that width.
-    _memory, usage, _approvals = stores
+    _memory, usage, _approvals, _workflows = stores
     run_id = uuid.uuid4().hex[:8]
     scope = f"ws:e2e:agent:{run_id}"
     big_generation = 9_000_000_000  # > 2**31 - 1
@@ -132,7 +137,7 @@ async def test_usage_attribution_envelope_round_trip(stores):
 
 
 async def test_happy_path_end_to_end(stores):
-    memory, usage, approvals = stores
+    memory, usage, approvals, workflows = stores
     agent = load_agent(AGENT_YAML)
     run_id = uuid.uuid4().hex[:8]
     channel = f"#e2e-{run_id}"  # unique scope so the run is isolated
@@ -154,8 +159,15 @@ async def test_happy_path_end_to_end(stores):
                                   {"repo": "acme/ingestion",
                                    "title": "Track: Redis Streams for v1"})]),
     ])
-    runtime = Runtime(agent, gateway=gateway, memory=memory, embedder=embedder,
-                      usage=usage, tools=tools)
+    runtime = Runtime(
+        agent,
+        gateway=gateway,
+        memory=memory,
+        embedder=embedder,
+        usage=usage,
+        tools=tools,
+        engine=WorkflowEngine(workflows),
+    )
 
     # --- the turn: write action is held for approval ---
     result = await runtime.handle(Task(

@@ -47,6 +47,7 @@ from openloop.models.gateway import ModelResponse
 from openloop.runtime import Runtime
 from openloop.sessions import InMemorySurfaceSessionStore
 from openloop.surfaces.slack import build_slack_app
+from openloop.testing import in_memory_workflow_engine
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
@@ -138,7 +139,9 @@ async def test_live_slack_mention_round_trip():
 
     nonce = uuid.uuid4().hex[:12]
     runtime = Runtime(
-        load_agent(AGENT_YAML), gateway=_FixedGateway(f"e2e-ack {nonce}")
+        load_agent(AGENT_YAML),
+        gateway=_FixedGateway(f"e2e-ack {nonce}"),
+        engine=in_memory_workflow_engine(),
     )
     slack_app = build_slack_app(
         runtime, InMemorySurfaceSessionStore(), bot_token=bot_token

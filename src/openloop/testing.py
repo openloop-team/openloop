@@ -8,9 +8,14 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from openloop.config import Settings
-
 from openloop.memory.embeddings import Embedder
 from openloop.models.gateway import ModelResponse, ToolCall
+from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
+
+
+def in_memory_workflow_engine() -> WorkflowEngine:
+    """Return a fresh, explicitly non-durable workflow engine for one test."""
+    return WorkflowEngine(InMemoryWorkflowStore())
 
 
 @asynccontextmanager

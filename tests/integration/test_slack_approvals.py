@@ -14,7 +14,12 @@ from openloop.surfaces.approvals import (
 )
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
-from openloop.testing import FakeGitHub, ScriptedGateway, tool_call_response
+from openloop.testing import (
+    FakeGitHub,
+    ScriptedGateway,
+    in_memory_workflow_engine,
+    tool_call_response,
+)
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
@@ -38,7 +43,9 @@ async def test_runtime_surfaces_approval_ids():
         tool_call_response("m", [("c1", "github_issues_write",
                                   {"repo": "acme/x", "title": "T"})]),
     ])
-    runtime = Runtime(agent, gateway=gateway, tools=tools)
+    runtime = Runtime(
+        agent, gateway=gateway, tools=tools, engine=in_memory_workflow_engine()
+    )
     result = await runtime.handle(
         Task(text="open an issue", surface="slack", channel="#dev-platform")
     )

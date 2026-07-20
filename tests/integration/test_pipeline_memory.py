@@ -4,7 +4,7 @@ from pathlib import Path
 from openloop.agents import load_agent
 from openloop.memory import InMemoryStore, MemoryRecord, scope_key_for
 from openloop.runtime import Runtime, Task
-from openloop.testing import FakeEmbedder, FakeGateway
+from openloop.testing import FakeEmbedder, FakeGateway, in_memory_workflow_engine
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
@@ -22,7 +22,13 @@ async def test_recalled_memory_is_injected_into_context():
     )
 
     gateway = FakeGateway()
-    runtime = Runtime(agent, gateway=gateway, memory=store, embedder=None)
+    runtime = Runtime(
+        agent,
+        gateway=gateway,
+        memory=store,
+        embedder=None,
+        engine=in_memory_workflow_engine(),
+    )
     await runtime.handle(
         Task(text="what did we pick for ingestion?", surface="slack",
              channel="#dev-platform")
@@ -37,8 +43,13 @@ async def test_recalled_memory_is_injected_into_context():
 async def test_handle_remembers_the_task():
     agent = _agent()
     store = InMemoryStore()
-    runtime = Runtime(agent, gateway=FakeGateway(), memory=store,
-                      embedder=FakeEmbedder())
+    runtime = Runtime(
+        agent,
+        gateway=FakeGateway(),
+        memory=store,
+        embedder=FakeEmbedder(),
+        engine=in_memory_workflow_engine(),
+    )
 
     await runtime.handle(
         Task(text="capture this decision", surface="slack",
@@ -56,7 +67,13 @@ async def test_handle_remembers_the_task():
 async def test_remember_disabled_stores_nothing():
     agent = _agent()
     store = InMemoryStore()
-    runtime = Runtime(agent, gateway=FakeGateway(), memory=store, remember=False)
+    runtime = Runtime(
+        agent,
+        gateway=FakeGateway(),
+        memory=store,
+        engine=in_memory_workflow_engine(),
+        remember=False,
+    )
     await runtime.handle(Task(text="hi", surface="slack", channel="#x"))
     assert await store.recall(scope_key_for(agent, "#x")) == []
 
@@ -64,11 +81,21 @@ async def test_remember_disabled_stores_nothing():
 async def test_memory_does_not_leak_across_channels():
     agent = _agent()
     store = InMemoryStore()
-    runtime = Runtime(agent, gateway=FakeGateway(), memory=store)
+    runtime = Runtime(
+        agent,
+        gateway=FakeGateway(),
+        memory=store,
+        engine=in_memory_workflow_engine(),
+    )
 
     await runtime.handle(Task(text="team A secret", surface="slack", channel="#a"))
     gateway_b = FakeGateway()
-    runtime_b = Runtime(agent, gateway=gateway_b, memory=store)
+    runtime_b = Runtime(
+        agent,
+        gateway=gateway_b,
+        memory=store,
+        engine=in_memory_workflow_engine(),
+    )
     await runtime_b.handle(Task(text="hello", surface="slack", channel="#b"))
 
     system_text = " ".join(

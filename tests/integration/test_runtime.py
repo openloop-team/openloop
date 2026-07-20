@@ -17,8 +17,13 @@ from openloop.runtime import Runtime, Task
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
 from openloop.usage import InMemoryUsageStore, budget_scope_key
-from openloop.testing import FakeEmbedder, FakeGitHub, ScriptedGateway
-from openloop.testing import tool_call_response
+from openloop.testing import (
+    FakeEmbedder,
+    FakeGitHub,
+    ScriptedGateway,
+    in_memory_workflow_engine,
+    tool_call_response,
+)
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
@@ -86,6 +91,7 @@ async def test_runtime_memory_tool_approval_usage_flow():
         embedder=embedder,
         usage=usage,
         tools=tools,
+        engine=in_memory_workflow_engine(),
     )
 
     result = await runtime.handle(
@@ -156,7 +162,9 @@ def test_surface_hint_shapes_system_prompt():
     # what Slack's server-side Markdown rendering can't express. It must never
     # ask for mrkdwn syntax — the delivery layer owns rendering.
     agent = load_agent(AGENT_YAML)
-    runtime = Runtime(agent, gateway=ScriptedGateway([]))
+    runtime = Runtime(
+        agent, gateway=ScriptedGateway([]), engine=in_memory_workflow_engine()
+    )
 
     slack = runtime._build_messages(Task(text="hi", surface="slack"), [])
     system = slack[0]["content"]
@@ -178,7 +186,12 @@ def test_tool_facts_ground_system_prompt():
 
     agent = load_agent(AGENT_YAML)
     tools = ToolGateway(tools=[GitHubConnector(FakeGitHub())])
-    runtime = Runtime(agent, gateway=ScriptedGateway([]), tools=tools)
+    runtime = Runtime(
+        agent,
+        gateway=ScriptedGateway([]),
+        tools=tools,
+        engine=in_memory_workflow_engine(),
+    )
 
     system = runtime._build_messages(Task(text="hi", surface="webhook"), [])[0][
         "content"
@@ -188,7 +201,9 @@ def test_tool_facts_ground_system_prompt():
 
     # Without tools, no tool facts — a capability claim about tools that
     # don't exist would itself invite invention.
-    bare = Runtime(agent, gateway=ScriptedGateway([]))
+    bare = Runtime(
+        agent, gateway=ScriptedGateway([]), engine=in_memory_workflow_engine()
+    )
     bare_system = bare._build_messages(Task(text="hi", surface="webhook"), [])[0][
         "content"
     ]

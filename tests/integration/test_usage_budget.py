@@ -13,7 +13,7 @@ from openloop.usage import (
     budget_scope_key,
     check_budget,
 )
-from openloop.testing import FakeGateway
+from openloop.testing import FakeGateway, in_memory_workflow_engine
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
@@ -48,7 +48,12 @@ async def test_check_budget_blocks_when_monthly_exceeded():
 async def test_handle_records_usage():
     agent = _agent()
     usage = InMemoryUsageStore()
-    runtime = Runtime(agent, gateway=FakeGateway(), usage=usage)
+    runtime = Runtime(
+        agent,
+        gateway=FakeGateway(),
+        usage=usage,
+        engine=in_memory_workflow_engine(),
+    )
     await runtime.handle(Task(text="hi", surface="slack", channel="#dev-platform",
                               user="U1", kind="summarize"))
     assert len(usage.records) == 1
@@ -66,7 +71,9 @@ async def test_budget_block_short_circuits_model_call():
                                    workspace="acme", agent="dev-platform",
                                    model="m", cost_usd=50.0))
     gateway = FakeGateway(reply="should not run")
-    runtime = Runtime(agent, gateway=gateway, usage=usage)
+    runtime = Runtime(
+        agent, gateway=gateway, usage=usage, engine=in_memory_workflow_engine()
+    )
 
     response = await runtime.handle(
         Task(text="do work", surface="slack", channel="#dev-platform")
@@ -87,7 +94,9 @@ async def test_per_task_overage_is_flagged():
         return ModelResponse(text="ok", model=model, cost_usd=0.75)
 
     gateway.complete = expensive  # type: ignore[assignment]
-    runtime = Runtime(agent, gateway=gateway, usage=usage)
+    runtime = Runtime(
+        agent, gateway=gateway, usage=usage, engine=in_memory_workflow_engine()
+    )
     await runtime.handle(Task(text="hi", surface="slack", channel="#dev-platform"))
     assert usage.records[0].outcome == "over_task_budget"
 
@@ -104,7 +113,9 @@ async def test_rate_limited_task_is_refused_before_the_model():
     agent.spec.limits.tasks_per_minute = 1
     usage = InMemoryUsageStore()
     gateway = FakeGateway(reply="second call")
-    runtime = Runtime(agent, gateway=gateway, usage=usage)
+    runtime = Runtime(
+        agent, gateway=gateway, usage=usage, engine=in_memory_workflow_engine()
+    )
 
     first = await runtime.handle(_task("one"))
     assert first.model != "throughput-guard"
@@ -133,7 +144,12 @@ async def test_concurrency_limit_refuses_overlapping_tasks_then_recovers():
             await gate.wait()
             return await super().complete(model, messages, **kwargs)
 
-    runtime = Runtime(agent, gateway=SlowGateway(), usage=InMemoryUsageStore())
+    runtime = Runtime(
+        agent,
+        gateway=SlowGateway(),
+        usage=InMemoryUsageStore(),
+        engine=in_memory_workflow_engine(),
+    )
 
     in_flight = asyncio.create_task(runtime.handle(_task("slow")))
     await asyncio.sleep(0)  # let the first task acquire its slot
@@ -151,6 +167,11 @@ async def test_unset_limits_change_nothing():
     agent = _agent()  # example agent's limits are ignored: fresh Limits below
     agent.spec.limits.max_concurrent_tasks = None
     agent.spec.limits.tasks_per_minute = None
-    runtime = Runtime(agent, gateway=FakeGateway(), usage=InMemoryUsageStore())
+    runtime = Runtime(
+        agent,
+        gateway=FakeGateway(),
+        usage=InMemoryUsageStore(),
+        engine=in_memory_workflow_engine(),
+    )
     for _ in range(5):
         assert (await runtime.handle(_task())).model != "throughput-guard"

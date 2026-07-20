@@ -14,6 +14,7 @@ from openloop.testing import (
     FakeWorkerOrchestrator,
     FakeGitHub,
     ScriptedGateway,
+    in_memory_workflow_engine,
     tool_call_response,
 )
 
@@ -152,7 +153,9 @@ async def test_tool_loop_holds_coding_worker_for_approval():
               {"repo": "acme/x", "instruction": "add retries"})],
         ),
     ])
-    runtime = Runtime(agent, gateway=model, tools=gw)
+    runtime = Runtime(
+        agent, gateway=model, tools=gw, engine=in_memory_workflow_engine()
+    )
 
     result = await runtime.handle(_task("open a PR adding retries"))
 

@@ -1,10 +1,11 @@
 """Integration: Runtime.handle running as a durable `agent_task` workflow.
 
-Phase C consumer #2 — when an engine is wired, each task runs through the workflow
+Phase C consumer #2 — every task runs through the explicitly supplied workflow
 engine (prepare → run → persist), persisting turn state and writing usage/memory
-idempotently, while never replaying non-idempotent model calls on crash.
+idempotently.
 """
 
+import inspect
 from pathlib import Path
 from openloop.agents import load_agent
 from openloop.memory import InMemoryStore, scope_key_for
@@ -54,6 +55,13 @@ def _runtime(model_gateway, *, tools=None, usage=None, memory=None):
         engine=engine,
     )
     return rt, engine, store
+
+
+def test_runtime_requires_a_keyword_only_engine():
+    parameter = inspect.signature(Runtime).parameters["engine"]
+
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
 
 
 async def test_plain_chat_runs_through_the_workflow():

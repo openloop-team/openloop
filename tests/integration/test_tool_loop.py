@@ -10,7 +10,12 @@ from openloop.runtime.pipeline import TOOL_RESULT_MAX_CHARS
 from openloop.tools import ActionSpec, ToolGateway, ToolResult
 from openloop.tools.github import GitHubConnector
 from openloop.usage import InMemoryUsageStore
-from openloop.testing import FakeGitHub, ScriptedGateway, tool_call_response
+from openloop.testing import (
+    FakeGitHub,
+    ScriptedGateway,
+    in_memory_workflow_engine,
+    tool_call_response,
+)
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
@@ -32,7 +37,9 @@ async def test_model_calls_read_tool_then_answers():
                                   {"repo": "acme/x", "number": 7})]),
         ModelResponse(text="Issue #7 is open.", model="m"),
     ])
-    runtime = Runtime(agent, gateway=gateway, tools=tools)
+    runtime = Runtime(
+        agent, gateway=gateway, tools=tools, engine=in_memory_workflow_engine()
+    )
 
     result = await runtime.handle(_task("status of issue 7?"))
     assert result.text == "Issue #7 is open."
@@ -58,7 +65,9 @@ async def test_write_tool_call_is_held_for_approval():
         tool_call_response("m", [("c1", "github_issues_write",
                                   {"repo": "acme/x", "title": "Track decision"})]),
     ])
-    runtime = Runtime(agent, gateway=gateway, tools=tools)
+    runtime = Runtime(
+        agent, gateway=gateway, tools=tools, engine=in_memory_workflow_engine()
+    )
 
     result = await runtime.handle(_task("open an issue to track this"))
     assert result.model == "approval-gate"
@@ -77,7 +86,9 @@ async def test_unoffered_tool_call_is_reported_to_model():
         tool_call_response("m", [("c1", "github_repos_delete", {})]),
         ModelResponse(text="I can't do that.", model="m"),
     ])
-    runtime = Runtime(agent, gateway=gateway, tools=tools)
+    runtime = Runtime(
+        agent, gateway=gateway, tools=tools, engine=in_memory_workflow_engine()
+    )
 
     result = await runtime.handle(_task("delete the repo"))
     assert result.text == "I can't do that."
@@ -107,7 +118,9 @@ async def test_oversized_tool_result_is_capped():
         tool_call_response("m", [("c1", "github_issues_read", {})]),
         ModelResponse(text="done", model="m"),
     ])
-    runtime = Runtime(agent, gateway=gateway, tools=tools)
+    runtime = Runtime(
+        agent, gateway=gateway, tools=tools, engine=in_memory_workflow_engine()
+    )
 
     await runtime.handle(_task("read the big one"))
     tool_msgs = [m for m in gateway.calls[1]["messages"] if m["role"] == "tool"]
@@ -119,7 +132,9 @@ async def test_oversized_tool_result_is_capped():
 async def test_no_tools_gateway_behaves_as_plain_chat():
     agent = _agent()
     gateway = ScriptedGateway([ModelResponse(text="hello", model="m")])
-    runtime = Runtime(agent, gateway=gateway)  # tools=None
+    runtime = Runtime(
+        agent, gateway=gateway, engine=in_memory_workflow_engine()
+    )  # tools=None
     result = await runtime.handle(_task("hi"))
     assert result.text == "hello"
     assert gateway.calls[0]["tools"] is None
@@ -137,8 +152,13 @@ async def test_usage_accumulates_across_loop():
                            prompt_tokens=20, completion_tokens=8)
 
     usage = InMemoryUsageStore()
-    runtime = Runtime(agent, gateway=ScriptedGateway([first, second]),
-                      tools=tools, usage=usage)
+    runtime = Runtime(
+        agent,
+        gateway=ScriptedGateway([first, second]),
+        tools=tools,
+        usage=usage,
+        engine=in_memory_workflow_engine(),
+    )
     await runtime.handle(_task())
 
     rec = usage.records[0]

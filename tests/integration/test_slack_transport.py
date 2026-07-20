@@ -11,12 +11,13 @@ from openloop.sessions import InMemorySurfaceSessionStore
 from openloop.sessions.postgres import PostgresSurfaceSessionStore
 from openloop.surfaces.slack import build_slack_app
 from openloop.surfaces.slack_socket import run_socket
+from openloop.testing import in_memory_workflow_engine
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 
 def _runtime():
-    return Runtime(load_agent(AGENT_YAML))
+    return Runtime(load_agent(AGENT_YAML), engine=in_memory_workflow_engine())
 
 
 def test_build_slack_app_socket_mode_without_signing_secret():

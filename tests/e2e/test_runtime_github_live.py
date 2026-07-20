@@ -26,6 +26,8 @@ from openloop.tools import ToolGateway
 from openloop.credentials import EnvCredentialResolver
 from openloop.tools.github import GitHubConnector, HttpGitHubClient
 from openloop.usage import InMemoryUsageStore, budget_scope_key
+from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
+from openloop.workflows.postgres import PostgresWorkflowStore
 
 APPROVER = "@e2e-runner"
 
@@ -86,7 +88,7 @@ def _build_agent(model: str) -> Agent:
 
 
 async def _maybe_postgres_stores():
-    """Return ((memory, usage, approvals), pool) when Postgres is reachable."""
+    """Return ((memory, usage, approvals, workflows), pool) when reachable."""
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         return None
@@ -104,10 +106,12 @@ async def _maybe_postgres_stores():
         memory = PostgresMemoryStore(embedding_dim=1536)
         usage = PostgresUsageStore()
         approvals = PostgresApprovalStore()
+        workflows = PostgresWorkflowStore()
         await memory.setup(pool)
         await usage.setup(pool)
         await approvals.setup(pool)
-        return (memory, usage, approvals), pool
+        await workflows.setup(pool)
+        return (memory, usage, approvals, workflows), pool
     except Exception:
         if pool is not None:
             await pool.close()
@@ -121,8 +125,11 @@ async def test_live_end_to_end():
 
     postgres = await _maybe_postgres_stores()
     stores, pool = postgres if postgres else (None, None)
-    memory, usage, approvals = stores or (
-        InMemoryStore(), InMemoryUsageStore(), InMemoryApprovalStore()
+    memory, usage, approvals, workflows = stores or (
+        InMemoryStore(),
+        InMemoryUsageStore(),
+        InMemoryApprovalStore(),
+        InMemoryWorkflowStore(),
     )
 
     tools = ToolGateway(
@@ -135,7 +142,12 @@ async def test_live_end_to_end():
     )
     agent = _build_agent(model)
     runtime = Runtime(
-        agent, gateway=ModelGateway(), memory=memory, usage=usage, tools=tools
+        agent,
+        gateway=ModelGateway(),
+        memory=memory,
+        usage=usage,
+        tools=tools,
+        engine=WorkflowEngine(workflows),
     )
 
     title = f"[openloop e2e] live check {uuid.uuid4().hex[:8]}"
