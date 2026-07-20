@@ -30,6 +30,7 @@ from openloop.surfaces.slack import build_slack_app
 from openloop.usage import InMemoryTaskLimiter, InMemoryUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from openloop.wiring import builders
+from openloop.wiring.broker import build_broker
 from openloop.wiring.context import AgentRuntimes, AppContext, SettledStores
 
 log = logging.getLogger("openloop")
@@ -54,6 +55,7 @@ _LEAF_KEYS = _STORE_KEYS | {
     "coordinator",
     "pool_factory",
     "tools_factory",
+    "broker_handle",
 }
 
 
@@ -328,6 +330,14 @@ async def compose(
         )
         limiter = _override_or(selected, "limiter", InMemoryTaskLimiter)
         engine = WorkflowEngine(stores.workflows)
+        # Compose the co-process broker behind its flag; build_broker owns its
+        # teardown on `stack`. Fail-closed: if the flag is on but the broker
+        # cannot be built, the handle stays None and build_coding_worker
+        # disables the worker rather than falling back to the direct launch path.
+        broker_handle = selected.get("broker_handle")
+        if broker_handle is None and settings.coding_worker_openhands_broker_enabled:
+            broker_handle = await build_broker(settings, stack, pool=pool)
+
         tools_factory = selected.get("tools_factory")
         if tools_factory is None:
             tools = builders.build_tool_gateway(
@@ -341,6 +351,7 @@ async def compose(
                 analysis_artifacts=stores.analysis_artifacts,
                 analysis_attempts=stores.analysis_attempts,
                 analysis_uploads=stores.analysis_uploads,
+                broker_handle=broker_handle,
             )
         else:
             tools = tools_factory(stores)

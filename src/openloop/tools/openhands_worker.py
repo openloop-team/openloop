@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from openloop.tools.coding_worker import StepCallback, WorkerEdit, WorkerRunAborted
+from openloop.tools.openhands_broker_workspace import BrokerWorkspaceError
 from openloop.tools.openhands_docker import (
     DEFAULT_OPENHANDS_SERVER_IMAGE,
     HardenedDockerWorkspace,
@@ -190,20 +191,26 @@ class OpenHandsCodingWorker:
                 f"extra to use CODING_WORKER_BACKEND=openhands ({exc})"
             ) from exc
         if self.docker:
-            try:
-                import openhands.workspace  # noqa: F401
-            except ImportError as exc:
-                raise OpenHandsUnavailable(
-                    "openhands-workspace is not installed — required for the "
-                    f"docker-mounted OpenHands runtime ({exc})"
-                ) from exc
             if self._docker_adapter is None:
                 raise OpenHandsUnavailable(
-                    "the hardened OpenHands Docker adapter is not configured"
+                    "the OpenHands Docker adapter is not configured"
                 )
+            # The broker adapter owns Docker out-of-process, so the local-daemon
+            # and docker-mounted-SDK checks do not apply to it.
+            local_runtime = getattr(
+                self._docker_adapter, "runs_containers_locally", True
+            )
+            if local_runtime:
+                try:
+                    import openhands.workspace  # noqa: F401
+                except ImportError as exc:
+                    raise OpenHandsUnavailable(
+                        "openhands-workspace is not installed — required for the "
+                        f"docker-mounted OpenHands runtime ({exc})"
+                    ) from exc
             try:
                 self._docker_adapter.probe()
-            except HardenedDockerWorkspaceError as exc:
+            except (HardenedDockerWorkspaceError, BrokerWorkspaceError) as exc:
                 raise OpenHandsUnavailable(str(exc)) from exc
             try:
                 probe_relay_compatibility()
@@ -211,18 +218,19 @@ class OpenHandsCodingWorker:
                 raise OpenHandsUnavailable(
                     f"native OpenHands relay compatibility check failed: {exc}"
                 ) from exc
-            import subprocess
+            if local_runtime:
+                import subprocess
 
-            try:
-                subprocess.run(
-                    ["docker", "version", "--format", "{{.Server.Version}}"],
-                    check=True, capture_output=True, timeout=10,
-                )
-            except Exception as exc:
-                raise OpenHandsUnavailable(
-                    f"docker is not usable ({exc}); the OpenHands docker "
-                    "runtime cannot start"
-                ) from exc
+                try:
+                    subprocess.run(
+                        ["docker", "version", "--format", "{{.Server.Version}}"],
+                        check=True, capture_output=True, timeout=10,
+                    )
+                except Exception as exc:
+                    raise OpenHandsUnavailable(
+                        f"docker is not usable ({exc}); the OpenHands docker "
+                        "runtime cannot start"
+                    ) from exc
 
     async def run(
         self,

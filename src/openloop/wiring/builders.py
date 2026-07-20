@@ -432,7 +432,9 @@ def _provider_key(settings: Settings, model: str) -> str | None:
     }.get(provider)
 
 
-def build_coding_worker(settings: Settings) -> "CodingWorker | None":
+def build_coding_worker(
+    settings: Settings, broker_handle: object | None = None
+) -> "CodingWorker | None":
     """Pick the worker backend behind ``CODING_WORKER_BACKEND`` — fail-closed.
 
     Returns ``None`` when the requested backend can't run safely (missing
@@ -440,17 +442,15 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
     coding worker loudly rather than degrading to a different worker or a
     weaker isolation boundary.
     """
-    # Broker wiring (architecture step 4, phases 2-3) has not landed yet. The
-    # flag exists so operators can opt in, but honoring it today by building the
-    # direct in-process ``HardenedDockerWorkspace`` would silently hand back the
-    # very launch path the broker replaces — a fail-closed violation. Refuse
-    # loudly until the broker-backed adapter lands (phase 3 replaces this guard
-    # with the real broker branch).
-    if settings.coding_worker_openhands_broker_enabled:
+    # The OpenHands broker path is opt-in and only supports the openhands
+    # backend on the docker sandbox; fail closed for any other combination so
+    # the flag never silently selects a weaker or unrelated path.
+    broker_enabled = settings.coding_worker_openhands_broker_enabled
+    if broker_enabled and settings.coding_worker_backend != "openhands":
         log.error(
-            "CODING_WORKER_OPENHANDS_BROKER_ENABLED is set but broker wiring is "
-            "not yet available — refusing to fall back to the direct container "
-            "launch path. Coding worker DISABLED."
+            "CODING_WORKER_OPENHANDS_BROKER_ENABLED requires "
+            "CODING_WORKER_BACKEND=openhands (got %r) — coding worker DISABLED",
+            settings.coding_worker_backend,
         )
         return None
     backend = settings.coding_worker_backend
@@ -480,6 +480,12 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
                 "host mode has no durable authenticated agent-server lifecycle"
             )
             return None
+        if broker_enabled and settings.coding_worker_sandbox != "docker":
+            log.error(
+                "CODING_WORKER_OPENHANDS_BROKER_ENABLED requires "
+                "CODING_WORKER_SANDBOX=docker — coding worker DISABLED"
+            )
+            return None
 
         docker = settings.coding_worker_sandbox == "docker"
         docker_adapter = None
@@ -491,6 +497,14 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
                     "Docker OpenHands requires "
                     "CODING_WORKER_OPENHANDS_STATE_MASTER_KEY (a dedicated "
                     "base64-encoded 32-byte secret)"
+                )
+                return None
+            if broker_enabled and broker_handle is None:
+                # Flag on but the broker could not be composed: disable loudly
+                # rather than fall back to the direct in-process launch path.
+                log.error(
+                    "CODING_WORKER_OPENHANDS_BROKER_ENABLED is set but the "
+                    "broker is unavailable — coding worker DISABLED"
                 )
                 return None
             try:
@@ -509,13 +523,27 @@ def build_coding_worker(settings: Settings) -> "CodingWorker | None":
                     master_key_id=settings.coding_worker_openhands_master_key_id,
                 )
                 artifact_store = WorkspaceArtifactStore(layout, keys)
-                docker_adapter = HardenedDockerWorkspace(
-                    layout=layout,
-                    keys=keys,
-                    server_image=settings.coding_worker_openhands_image,
-                    network=settings.coding_worker_openhands_network,
-                    connect=settings.coding_worker_openhands_connect,
-                )
+                if broker_enabled:
+                    from openloop.tools.openhands_broker_workspace import (
+                        BrokerWorkspaceAdapter,
+                    )
+
+                    docker_adapter = BrokerWorkspaceAdapter(
+                        client=broker_handle.client,
+                        loop=broker_handle.loop,
+                        receipt_issuer=broker_handle.receipt_issuer,
+                    )
+                    log.info(
+                        "coding worker OpenHands runtime = broker (co-process)"
+                    )
+                else:
+                    docker_adapter = HardenedDockerWorkspace(
+                        layout=layout,
+                        keys=keys,
+                        server_image=settings.coding_worker_openhands_image,
+                        network=settings.coding_worker_openhands_network,
+                        connect=settings.coding_worker_openhands_connect,
+                    )
             except Exception as exc:  # noqa: BLE001 — boot gate normalizes errors
                 log.error(
                     "OpenHands hardened Docker state configuration is invalid: %s",
@@ -744,6 +772,7 @@ def build_tool_gateway(
     analysis_artifacts: ArtifactStore | None = None,
     analysis_attempts: AnalysisAttemptStore | None = None,
     analysis_uploads: UploadStore | None = None,
+    broker_handle: object | None = None,
 ) -> ToolGateway:
     """Register native connectors plus an MCP connector per configured server.
 
@@ -763,7 +792,7 @@ def build_tool_gateway(
         # The coding worker runs model-generated edits, so it stays off unless
         # explicitly enabled (it needs a contents:write credential + a sandbox).
         if settings.coding_worker_enabled:
-            worker = build_coding_worker(settings)
+            worker = build_coding_worker(settings, broker_handle=broker_handle)
             ledger = (
                 _build_worker_ledger(settings, agents, usage)
                 if usage is not None

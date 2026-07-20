@@ -56,6 +56,21 @@ async def test_precomposed_gateway_override_is_rejected():
             pass
 
 
+async def test_broker_handle_is_a_recognized_override():
+    # broker_handle is a leaf override; supplying it skips build_broker and
+    # threads through to build_tool_gateway without an "unknown override" error.
+    async with compose(
+        Settings(
+            _env_file=None,
+            storage_mode="memory",
+            coding_worker_openhands_broker_enabled=True,
+        ),
+        {},
+        overrides={"broker_handle": object()},
+    ) as ctx:
+        assert ctx is not None
+
+
 async def test_auto_fallback_settles_every_capture_before_wiring(monkeypatch):
     async def unavailable_pool(*args, **kwargs):
         raise RuntimeError("postgres unavailable")

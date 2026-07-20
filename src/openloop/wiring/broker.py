@@ -27,6 +27,7 @@ Decision-locked shape (see
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import logging
@@ -112,12 +113,16 @@ class BrokerClientHandle:
     ``receipt_issuer`` (current-version PRIVATE key) is deliberately kept out of
     the broker graph — it belongs to the checkpoint store the worker adapter
     signs with (phase 3). ``reconciler`` is filled in phase 3 when the local
-    checkpoint store (its receipt locator) is wired.
+    checkpoint store (its receipt locator) is wired. ``loop`` is the app event
+    loop the broker client runs on, captured so the synchronous coding-worker
+    thread can bridge into the async client via ``run_coroutine_threadsafe``.
     """
 
     client: BrokerRpcClient
     owner: BrokerOwner
     receipt_issuer: CheckpointReceiptIssuer
+    receipt_verifier: CheckpointReceiptVerifier
+    loop: asyncio.AbstractEventLoop
     reconciler: Any | None = None
 
 
@@ -209,7 +214,10 @@ async def build_broker(
     """
     if not settings.coding_worker_openhands_broker_enabled:
         return None
-    now = clock or (lambda: datetime.now(UTC))
+    # Whole-second UTC: generation deadlines derived from this clock flow into
+    # RunningGenerationAccess, which rejects any sub-second timestamp — a raw
+    # datetime.now(UTC) would make every start_segment fail INTERNAL.
+    now = clock or (lambda: datetime.now(UTC).replace(microsecond=0))
 
     # Everything below is fail-closed: any construction or setup failure logs a
     # specific reason and returns None so the caller disables the coding worker
@@ -311,7 +319,10 @@ async def build_broker(
         ledger = BrokerLedger(repository)
 
         durable = local_durable_adapter_for_docker(runtime_config)
-        runtime = runtime_driver or DockerOpenHandsRuntimeDriver(runtime_config)
+        # Share the whole-second clock so the driver and ledger agree on time.
+        runtime = runtime_driver or DockerOpenHandsRuntimeDriver(
+            runtime_config, clock=now
+        )
         policy = BrokerRpcPolicy(
             _POLICY_PROFILE,
             _RUNTIME_DRIVER,
@@ -379,5 +390,10 @@ async def build_broker(
         socket_path,
     )
     return BrokerClientHandle(
-        client=client, owner=owner, receipt_issuer=receipt_issuer, reconciler=None
+        client=client,
+        owner=owner,
+        receipt_issuer=receipt_issuer,
+        receipt_verifier=receipt_verifier,
+        loop=asyncio.get_running_loop(),
+        reconciler=None,
     )
