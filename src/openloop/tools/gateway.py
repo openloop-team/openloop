@@ -111,6 +111,7 @@ class ToolGateway:
         *,
         requested_by: str | None = None,
         warm_key: str | None = None,
+        session_id: str | None = None,
     ) -> Invocation:
         tool_name, permission = split_action(action)
 
@@ -156,8 +157,13 @@ class ToolGateway:
         prepare = getattr(tool, "prepare_args", None)
         if prepare is not None:
             # warm_key (Phase B) rides the args across the approval boundary so a
-            # workflow-backed tool can reuse the requesting thread's warm context.
-            args = prepare(permission, args, agent, warm_key=warm_key)
+            # workflow-backed tool can reuse the requesting thread's warm context;
+            # session_id (step 5) rides the same way so worker spend attributes to
+            # the originating surface session. Both are gateway-supplied — a
+            # model-supplied value is ignored.
+            args = prepare(
+                permission, args, agent, warm_key=warm_key, session_id=session_id
+            )
 
         # Untyped actions (MCP passthrough) keep the permissive-subset seam:
         # enforce the action's own declared schema on the prepared args, before

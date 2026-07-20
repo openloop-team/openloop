@@ -1062,6 +1062,7 @@ class AnalysisWorkerConnector:
         agent: "Agent | None" = None,
         *,
         warm_key: str | None = None,
+        session_id: str | None = None,
     ) -> dict:
         """Mint identity on the parsed args — nothing here is caller-suppliable.
 
@@ -1074,6 +1075,13 @@ class AnalysisWorkerConnector:
         ownership-tuple key (`thread_scope_key`), stamped as the request scope
         that upload provisioning is checked against — model-supplied scope
         would void upload scoping, and scopeless paths stamp None.
+
+        ``session_id`` (step 5) is accepted so the gateway can call every
+        ``prepare_args`` uniformly, but deliberately NOT stamped into the sealed
+        analysis record: session attribution for the sealed worker is out of this
+        slice, and the fresh-dict whitelist above is the backstop that keeps it
+        out. Its ``UsageRecord.session_id`` stays null (honest absence) until a
+        dedicated pass wires it through the analysis attempt/settle path.
         """
         if permission != ANALYSIS_REPORT_WRITE:
             return args

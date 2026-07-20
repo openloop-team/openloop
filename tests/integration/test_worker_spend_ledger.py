@@ -213,7 +213,13 @@ async def test_within_budget_run_is_recorded_and_ships(monkeypatch):
     )
 
     result = await connector.execute(
-        "pr:write", {"repo": "acme/x", "instruction": "x", "job_id": "j2"}
+        "pr:write",
+        {
+            "repo": "acme/x", "instruction": "x", "job_id": "j2",
+            # The engine-less path receives session_id via _args_for_execute the
+            # same way the gateway stamps it into the approval args (step 5).
+            "session_id": "sess-direct",
+        },
     )
 
     assert result.ok
@@ -221,6 +227,8 @@ async def test_within_budget_run_is_recorded_and_ships(monkeypatch):
     (record,) = usage.records
     assert record.outcome == "ok"
     assert record.task_kind == "coding_worker"
+    # Step 5: the direct execute → WorkerState → settle leg carries session_id.
+    assert record.session_id == "sess-direct"
     # Worker spend now counts against the same monthly scope /usage reports.
     assert await usage.monthly_total("ws:acme:agent:dev-platform") == 0.25
 
@@ -264,8 +272,12 @@ async def test_spend_follows_the_invoking_agent_through_the_approval_hop(
     pending = await gateway.invoke(
         invoking, "coding_worker.pr:write",
         {"repo": "acme/x", "instruction": "x"},
+        session_id="sess-abc",
     )
     assert pending.approval.args["agent"] == "docs-bot"
+    # Step 5: the gateway stamps the originating session id into the approval
+    # args, so it survives into the durable workflow state.
+    assert pending.approval.args["session_id"] == "sess-abc"
 
     resolved = await gateway.resolve(
         pending.approval.id, "@maciag.artur", approve=True
@@ -283,4 +295,6 @@ async def test_spend_follows_the_invoking_agent_through_the_approval_hop(
     assert record.job_id == pending.approval.args["job_id"]
     assert record.approval_id == pending.approval.id
     assert record.approver == "maciag.artur"
-    assert record.session_id is None  # no warm_key on this invoke
+    # Step 5: session attribution flows gateway → durable workflow → settle,
+    # landing on the spend record (not derived from warm_key, which is absent).
+    assert record.session_id == "sess-abc"

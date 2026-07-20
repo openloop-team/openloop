@@ -189,6 +189,12 @@ class Task:
     # the gateway as the trusted request scope upload provisioning is checked
     # against. None for non-threaded turns.
     thread_key: str | None = None
+    # The originating surface session's id (SurfaceSession.id), stamped by the
+    # session runner. Threaded down to a workflow-backed tool so worker spend
+    # attributes to the session it was invoked from (UsageRecord.session_id).
+    # Distinct from thread_key, which is a workspace-reuse key, not an identity.
+    # None for paths with no session (direct runtime.handle, tests).
+    session_id: str | None = None
     # Trusted surrounding context the surface/runner supplies (e.g. the
     # thread's shared-file inventory), rendered as one system message.
     context_notes: list[str] = field(default_factory=list)
@@ -609,6 +615,7 @@ class Runtime:
                     self.agent, action, _parse_json(fn.get("arguments")),
                     requested_by=task.user,
                     warm_key=task.thread_key,
+                    session_id=task.session_id,
                 )
                 if inv.status == "executed":
                     messages.append(_tool_message(call_id, _result_content(inv.result)))
@@ -713,6 +720,9 @@ def _task_to_dict(task: Task) -> dict:
         # re-hydrates the task before running the tool loop, and the gateway's
         # warm-context reuse AND the analysis upload scope stamp both ride it.
         "thread_key": task.thread_key,
+        # session_id must survive the durable round-trip too: the workflow-backed
+        # tool loop stamps it into the approval args so worker spend traces to it.
+        "session_id": task.session_id,
         "context_notes": task.context_notes,
     }
 
@@ -726,6 +736,7 @@ def _task_from_dict(data: dict) -> Task:
         kind=data.get("kind"),
         history=data.get("history", []),
         thread_key=data.get("thread_key"),
+        session_id=data.get("session_id"),
         context_notes=data.get("context_notes", []),
     )
 

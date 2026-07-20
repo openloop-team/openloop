@@ -167,6 +167,11 @@ class WorkerState:
     # Gateway-stamped from the request id; carried so worker spend records trace
     # back to their authorization. ``None`` for pre-envelope checkpoints.
     approval_id: str | None = None
+    # The originating surface session's id (attribution envelope, step 5).
+    # Gateway-stamped from the invoking turn's session; carried so worker spend
+    # records (UsageRecord.session_id) trace to the session that asked. ``None``
+    # for sessionless paths (direct invoke, tests) and pre-envelope checkpoints.
+    session_id: str | None = None
     # Warm-context key (Phase B): the requesting thread's durable scope key,
     # stamped by the gateway from the invoking turn. When a warm-workspace pool is
     # wired, the orchestrator reuses this thread's kept checkout instead of cloning
@@ -205,7 +210,7 @@ class WorkerState:
         fields = {
             "job_id", "repo", "instruction", "base", "branch",
             "completed_steps", "title", "body", "agent", "warm_key",
-            "requester_id", "approval_id", "openhands_resume",
+            "requester_id", "approval_id", "session_id", "openhands_resume",
         }
         values = {k: v for k, v in data.items() if k in fields}
         resume = values.get("openhands_resume")
@@ -383,7 +388,13 @@ class CodingWorkerConnector:
         return {CODING_WORKER_PR_WRITE}
 
     def prepare_args(
-        self, permission: str, args: dict, agent=None, *, warm_key: str | None = None
+        self,
+        permission: str,
+        args: dict,
+        agent=None,
+        *,
+        warm_key: str | None = None,
+        session_id: str | None = None,
     ) -> dict:
         """Finalize args before they cross the approval boundary.
 
@@ -399,6 +410,9 @@ class CodingWorkerConnector:
           workspace pool can reuse this thread's checkout across turns. Only the
           gateway supplies it (from the invoking turn); a model-supplied value is
           ignored.
+        - stamps the originating ``session_id`` (step 5) so worker spend traces
+          to the surface session it was invoked from. Gateway-supplied only,
+          like ``warm_key``; a model-supplied value is ignored.
         """
         if permission != CODING_WORKER_PR_WRITE:
             return args
@@ -411,6 +425,8 @@ class CodingWorkerConnector:
             args = {**args, "agent": agent.metadata.name}
         if warm_key:
             args = {**args, "warm_key": warm_key}
+        if session_id:
+            args = {**args, "session_id": session_id}
         return args
 
     def describe(self, permission: str) -> ActionSpec:
@@ -451,6 +467,7 @@ class CodingWorkerConnector:
                 agent=args.get("agent"),
                 requester_id=args.get("approved_by"),
                 approval_id=args.get("approval_id"),
+                session_id=args.get("session_id"),
                 warm_key=args.get("warm_key"),
             )
 
@@ -881,6 +898,7 @@ class GitWorkspaceOrchestrator:
                 job_id=state.job_id,
                 approval_id=state.approval_id,
                 approver=state.requester_id,
+                session_id=state.session_id,
             )
             # Stamp this agent's per-task cap so an agentic worker can stop
             # itself near the ceiling instead of running to completion and
@@ -958,6 +976,7 @@ class GitWorkspaceOrchestrator:
                         job_id=state.job_id,
                         approval_id=state.approval_id,
                         approver=state.requester_id,
+                        session_id=state.session_id,
                         cost_usd=aborted.cost_usd,
                         prompt_tokens=aborted.prompt_tokens,
                         completion_tokens=aborted.completion_tokens,
@@ -988,6 +1007,7 @@ class GitWorkspaceOrchestrator:
                     job_id=state.job_id,
                     approval_id=state.approval_id,
                     approver=state.requester_id,
+                    session_id=state.session_id,
                     cost_usd=edit.cost_usd,
                     prompt_tokens=edit.prompt_tokens,
                     completion_tokens=edit.completion_tokens,
@@ -1104,6 +1124,7 @@ class GitWorkspaceOrchestrator:
                 job_id=state.job_id,
                 approval_id=state.approval_id,
                 approver=state.requester_id,
+                session_id=state.session_id,
             )
             state.budget_usd = self._ledger.per_task_usd_for(state.agent)
         token = await self._credentials.resolve(self._scope)
@@ -1618,6 +1639,7 @@ class GitWorkspaceOrchestrator:
                 job_id=state.job_id,
                 approval_id=state.approval_id,
                 approver=state.requester_id,
+                session_id=state.session_id,
                 broker_job_id=resume.broker_job_id,
                 broker_generation=resume.broker_generation,
                 idempotency_key=(

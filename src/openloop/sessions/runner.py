@@ -232,6 +232,10 @@ class SessionRunner:
         # One session : one workflow instance — share the id so the approval
         # continuation / reconciler can map between them trivially.
         session.workflow_instance_id = session.id
+        # Step 5: tag the turn with its session id so a workflow-backed tool
+        # (the coding worker) attributes its spend to the originating session
+        # (UsageRecord.session_id). Unlike thread_key, every turn has one.
+        task.session_id = session.id
         try:
             await self.sessions.upsert(session)
         except Exception:  # noqa: BLE001 — a concurrent duplicate won the race
@@ -624,6 +628,9 @@ class SessionRunner:
                 if session.target.thread is not None
                 else None
             ),
+            # Same session → same spend attribution if the continuation issues a
+            # new write (step 5).
+            session_id=session.id,
         )
         cont_id = f"{session.id}:cont:{approval_id}"
         response = await cont(task, messages, instance_id=cont_id)
