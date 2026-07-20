@@ -589,6 +589,9 @@ def _args_for_execute(tool: Tool, request: ApprovalRequest) -> dict:
         # typed tools may persist it for later authorization; it was never part
         # of model-facing arguments.
         "approved_by": (request.decided_by or "").lstrip("@") or None,
+        # The approval id rides the direct execute path too (the workflow path
+        # already carries it), so worker spend traces to its authorization.
+        "approval_id": request.id,
     }
 
 

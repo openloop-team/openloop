@@ -96,6 +96,10 @@ def build_coding_worker_workflow(
                     .lstrip("@")
                     or None
                 ),
+                # The approval that authorized this run (attribution envelope,
+                # finding 4), stamped into the durable workflow state by the
+                # gateway — carried so worker spend traces to its authorization.
+                approval_id=s.get("approval_id"),
                 # The requesting thread's warm-context key (Phase B) — lets the
                 # orchestrator reuse this thread's kept checkout.
                 warm_key=s.get("warm_key"),

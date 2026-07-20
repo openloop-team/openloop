@@ -108,18 +108,35 @@ class WorkerSpendLedger:
             )
         return None
 
-    async def check_monthly(self, agent_name: str | None, *, job_id: str) -> None:
+    async def check_monthly(
+        self,
+        agent_name: str | None,
+        *,
+        job_id: str,
+        approval_id: str | None = None,
+        approver: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
         """Refuse the attempt if the invoking agent's monthly budget is spent.
 
         Runs *before* the attempt does any work (no credential resolve, no
         clone, no model spend). Reuses :func:`check_budget`, so ``on_exceeded:
         warn`` logs and proceeds — the ``block | warn`` semantics are the
         budget's, not the ledger's. A blocked attempt is recorded (zero cost,
-        ``outcome="blocked"``) so the refusal is visible in ``/audit``.
+        ``outcome="blocked"``) so the refusal is visible in ``/audit`` — and it
+        carries the full attribution envelope, because a refusal is the *only*
+        audit row that attempt ever writes (it then raises), so dropping the
+        approval/approver/session here would lose them permanently.
         """
         agent = self._agent_for(agent_name)
+        envelope = dict(
+            job_id=job_id,
+            approval_id=approval_id,
+            approver=approver,
+            session_id=session_id,
+        )
         if reason := self._missing_cap_reason(agent):
-            await self._record(agent, cost_usd=0.0, outcome="blocked")
+            await self._record(agent, cost_usd=0.0, outcome="blocked", **envelope)
             raise WorkerBudgetExceeded(
                 f"worker job {job_id} refused for agent {agent.metadata.name}: "
                 f"{reason} — failing closed (no attempt, no push, no PR)"
@@ -128,7 +145,7 @@ class WorkerSpendLedger:
         decision = await check_budget(agent, self.usage)
         if decision.allowed:
             return
-        await self._record(agent, cost_usd=0.0, outcome="blocked")
+        await self._record(agent, cost_usd=0.0, outcome="blocked", **envelope)
         raise WorkerBudgetExceeded(
             f"worker job {job_id} refused for agent {agent.metadata.name}: "
             f"{decision.reason} — failing closed (no attempt, no push, no PR)"
@@ -147,6 +164,9 @@ class WorkerSpendLedger:
         record_prompt_tokens: int | None = None,
         record_completion_tokens: int | None = None,
         cap_cost_usd: float | None = None,
+        approval_id: str | None = None,
+        approver: str | None = None,
+        session_id: str | None = None,
     ) -> None:
         """Record one segment delta and cap against cumulative task spend.
 
@@ -181,6 +201,10 @@ class WorkerSpendLedger:
                 completion_tokens=record_completion,
                 outcome="blocked",
                 idempotency_key=idempotency_key,
+                job_id=job_id,
+                approval_id=approval_id,
+                approver=approver,
+                session_id=session_id,
             )
             raise WorkerBudgetExceeded(
                 f"worker job {job_id} spent ${cap_cost:.4f}, but {reason} "
@@ -195,6 +219,10 @@ class WorkerSpendLedger:
             completion_tokens=record_completion,
             outcome="over_task_budget" if over else "ok",
             idempotency_key=idempotency_key,
+            job_id=job_id,
+            approval_id=approval_id,
+            approver=approver,
+            session_id=session_id,
         )
         if over:
             raise WorkerBudgetExceeded(
@@ -220,6 +248,10 @@ class WorkerSpendLedger:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         idempotency_key: str | None = None,
+        job_id: str | None = None,
+        approval_id: str | None = None,
+        approver: str | None = None,
+        session_id: str | None = None,
     ) -> None:
         await self.usage.record(
             UsageRecord(
@@ -233,5 +265,11 @@ class WorkerSpendLedger:
                 completion_tokens=completion_tokens,
                 cost_usd=cost_usd,
                 outcome=outcome,
+                # Attribution envelope (finding 4) — trace a worker charge to the
+                # job, the approval that authorized it, and its origin session.
+                job_id=job_id,
+                approval_id=approval_id,
+                approver=approver,
+                session_id=session_id,
             )
         )

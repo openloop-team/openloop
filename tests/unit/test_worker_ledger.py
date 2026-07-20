@@ -102,6 +102,34 @@ async def test_settle_records_spend_under_the_agent_scope():
     assert await usage.monthly_total("ws:acme:agent:dev-platform") == 0.12
 
 
+async def test_settle_records_the_attribution_envelope():
+    # Finding 4: a worker charge traces to its job, approval, approver, session.
+    usage = InMemoryUsageStore()
+    await _ledger(usage).settle(
+        job_id="job-abc123",
+        approval_id="apr-42",
+        approver="alice",
+        session_id="thread-7",
+        cost_usd=0.20,
+    )
+    (record,) = usage.records
+    assert record.job_id == "job-abc123"
+    assert record.approval_id == "apr-42"
+    assert record.approver == "alice"
+    assert record.session_id == "thread-7"
+
+
+async def test_settle_leaves_envelope_null_when_unattributed():
+    # job_id always flows; the rest stay null for an unattributed settle.
+    usage = InMemoryUsageStore()
+    await _ledger(usage).settle(job_id="j1", cost_usd=0.10)
+    (record,) = usage.records
+    assert record.job_id == "j1"
+    assert record.approval_id is None
+    assert record.approver is None
+    assert record.session_id is None
+
+
 async def test_settle_with_idempotency_key_records_once():
     usage = InMemoryUsageStore()
     ledger = _ledger(usage)
@@ -265,6 +293,24 @@ async def test_check_monthly_blocks_and_records_the_refusal():
     assert blocked.outcome == "blocked"
     assert blocked.cost_usd == 0.0
     assert blocked.task_kind == "coding_worker"
+
+
+async def test_check_monthly_refusal_carries_attribution():
+    # A refusal is the ONLY audit row that attempt writes, so it must carry the
+    # attribution envelope (finding 4) or the trace is lost permanently.
+    usage = InMemoryUsageStore()
+    ledger = _ledger(usage, monthly_usd=50.0, on_exceeded="block")
+    await _spent(usage, "ws:acme:agent:dev-platform", 50.0)
+
+    with pytest.raises(WorkerBudgetExceeded):
+        await ledger.check_monthly(
+            "dev-platform", job_id="j1", approval_id="apr-1", approver="bob"
+        )
+
+    blocked = usage.records[-1]
+    assert blocked.job_id == "j1"
+    assert blocked.approval_id == "apr-1"
+    assert blocked.approver == "bob"
 
 
 async def test_check_monthly_warn_mode_proceeds():

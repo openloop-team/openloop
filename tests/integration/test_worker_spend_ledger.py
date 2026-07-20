@@ -278,3 +278,9 @@ async def test_spend_follows_the_invoking_agent_through_the_approval_hop(
     assert record.agent == "docs-bot"
     assert record.scope_key == "ws:acme:agent:docs-bot"
     assert record.outcome == "ok"
+    # Attribution envelope (finding 4): the workflow path carries the job, the
+    # approval, and the approver all the way to the spend record.
+    assert record.job_id == pending.approval.args["job_id"]
+    assert record.approval_id == pending.approval.id
+    assert record.approver == "maciag.artur"
+    assert record.session_id is None  # no warm_key on this invoke

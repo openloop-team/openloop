@@ -163,6 +163,10 @@ class WorkerState:
     # Human who approved/initiated the durable worker on its surface. Cold
     # resume uses this stable identity to authorize later action decisions.
     requester_id: str | None = None
+    # The approval that authorized this worker (attribution envelope, finding 4).
+    # Gateway-stamped from the request id; carried so worker spend records trace
+    # back to their authorization. ``None`` for pre-envelope checkpoints.
+    approval_id: str | None = None
     # Warm-context key (Phase B): the requesting thread's durable scope key,
     # stamped by the gateway from the invoking turn. When a warm-workspace pool is
     # wired, the orchestrator reuses this thread's kept checkout instead of cloning
@@ -201,7 +205,7 @@ class WorkerState:
         fields = {
             "job_id", "repo", "instruction", "base", "branch",
             "completed_steps", "title", "body", "agent", "warm_key",
-            "requester_id", "openhands_resume",
+            "requester_id", "approval_id", "openhands_resume",
         }
         values = {k: v for k, v in data.items() if k in fields}
         resume = values.get("openhands_resume")
@@ -446,6 +450,7 @@ class CodingWorkerConnector:
                 branch=_branch_for(job_id),
                 agent=args.get("agent"),
                 requester_id=args.get("approved_by"),
+                approval_id=args.get("approval_id"),
                 warm_key=args.get("warm_key"),
             )
 
@@ -859,7 +864,12 @@ class GitWorkspaceOrchestrator:
         # outright, before a credential is resolved or a workspace exists.
         # Raises out of the attempt → terminal fail on both durable paths.
         if self._ledger is not None:
-            await self._ledger.check_monthly(state.agent, job_id=state.job_id)
+            await self._ledger.check_monthly(
+                state.agent,
+                job_id=state.job_id,
+                approval_id=state.approval_id,
+                approver=state.requester_id,
+            )
             # Stamp this agent's per-task cap so an agentic worker can stop
             # itself near the ceiling instead of running to completion and
             # failing the post-run settle (the money is already spent by then).
@@ -934,6 +944,8 @@ class GitWorkspaceOrchestrator:
                     await self._ledger.settle(
                         agent=state.agent,
                         job_id=state.job_id,
+                        approval_id=state.approval_id,
+                        approver=state.requester_id,
                         cost_usd=aborted.cost_usd,
                         prompt_tokens=aborted.prompt_tokens,
                         completion_tokens=aborted.completion_tokens,
@@ -962,6 +974,8 @@ class GitWorkspaceOrchestrator:
                 await self._ledger.settle(
                     agent=state.agent,
                     job_id=state.job_id,
+                    approval_id=state.approval_id,
+                    approver=state.requester_id,
                     cost_usd=edit.cost_usd,
                     prompt_tokens=edit.prompt_tokens,
                     completion_tokens=edit.completion_tokens,
@@ -1073,7 +1087,12 @@ class GitWorkspaceOrchestrator:
             await on_step(state)
 
         if self._ledger is not None:
-            await self._ledger.check_monthly(state.agent, job_id=state.job_id)
+            await self._ledger.check_monthly(
+                state.agent,
+                job_id=state.job_id,
+                approval_id=state.approval_id,
+                approver=state.requester_id,
+            )
             state.budget_usd = self._ledger.per_task_usd_for(state.agent)
         token = await self._credentials.resolve(self._scope)
         if self._workspace_root is not None:
@@ -1457,6 +1476,8 @@ class GitWorkspaceOrchestrator:
             await self._ledger.settle(
                 agent=state.agent,
                 job_id=state.job_id,
+                approval_id=state.approval_id,
+                approver=state.requester_id,
                 idempotency_key=(
                     f"{state.job_id}:{resume.conversation_id}:{resume.segment_id}"
                 ),
