@@ -528,10 +528,16 @@ def build_coding_worker(
                         BrokerWorkspaceAdapter,
                     )
 
+                    checkpoint_store = broker_handle.bind_checkpoint_store(
+                        artifact_store
+                    )
                     docker_adapter = BrokerWorkspaceAdapter(
                         client=broker_handle.client,
                         loop=broker_handle.loop,
                         receipt_issuer=broker_handle.receipt_issuer,
+                        checkpoint_store=checkpoint_store,
+                        workspace_ingress=broker_handle.workspace_ingress,
+                        tenant_id=broker_handle.owner.tenant_id,
                     )
                     log.info(
                         "coding worker OpenHands runtime = broker (co-process)"
@@ -1022,7 +1028,13 @@ _RECOVERY_LOCK_TTL_SECONDS = 60.0
 _RECOVERY_LOCK_RENEW_SECONDS = 20.0
 
 
-async def run_recovery_pass(coordinator, tools: ToolGateway, session_runner) -> bool:
+async def run_recovery_pass(
+    coordinator,
+    tools: ToolGateway,
+    session_runner,
+    *,
+    broker_reconciler=None,
+) -> bool:
     """Guarded sweep of the crash-recovery reconcilers; returns whether we led it.
 
     Acquires the shared ``startup-recovery`` lock so that across replicas only one
@@ -1043,6 +1055,24 @@ async def run_recovery_pass(coordinator, tools: ToolGateway, session_runner) -> 
         if not is_leader:
             log.debug("another replica is leading recovery — skipping this pass")
             return False
+        # Broker lifecycle authority converges before the app-level worker
+        # checkpoint is interpreted. A worker left in ``parking`` may become
+        # app-visible ``parked`` only after the receipt-gated broker transition
+        # has reached PARKED.
+        if broker_reconciler is not None:
+            try:
+                report = await broker_reconciler.run_pass()
+                if report.total:
+                    log.info(
+                        "broker recovery examined %d job(s): repaired=%d "
+                        "failed_closed=%d error=%d",
+                        report.total,
+                        report.repaired,
+                        report.failed_closed,
+                        report.error,
+                    )
+            except Exception:
+                log.exception("broker lifecycle reconcile failed")
         # The workflow engine re-drives any instance left "running"; the connector
         # reconciler covers the Phase B (no-engine) checkpoint path. resolve() won't
         # re-invoke an approved request, so these reconcilers trigger the resume.
@@ -1091,7 +1121,12 @@ async def run_recovery_pass(coordinator, tools: ToolGateway, session_runner) -> 
 
 
 async def _recovery_loop(
-    coordinator, tools: ToolGateway, session_runner, *, interval: float
+    coordinator,
+    tools: ToolGateway,
+    session_runner,
+    *,
+    interval: float,
+    broker_reconciler=None,
 ) -> None:
     """Re-run :func:`run_recovery_pass` every ``interval`` seconds until cancelled.
 
@@ -1101,7 +1136,15 @@ async def _recovery_loop(
     while True:
         await asyncio.sleep(interval)
         try:
-            await run_recovery_pass(coordinator, tools, session_runner)
+            if broker_reconciler is None:
+                await run_recovery_pass(coordinator, tools, session_runner)
+            else:
+                await run_recovery_pass(
+                    coordinator,
+                    tools,
+                    session_runner,
+                    broker_reconciler=broker_reconciler,
+                )
         except asyncio.CancelledError:
             raise
         except Exception:

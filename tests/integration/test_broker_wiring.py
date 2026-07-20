@@ -105,6 +105,7 @@ async def test_build_broker_create_job_round_trip(tmp_path, sock_dir):
         # The receipt PRIVATE key lives on the checkpoint-store side (the handle),
         # never in the broker graph.
         assert isinstance(handle.receipt_issuer, CheckpointReceiptIssuer)
+        assert handle.workspace_ingress is not None
 
     # Teardown unlinked the socket.
     assert not (sock_dir / "control.sock").exists()

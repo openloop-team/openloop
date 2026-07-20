@@ -1,5 +1,6 @@
 import os
 import shutil
+import socket
 import stat
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,7 @@ from openloop.broker_runtime.docker_policy import (
 )
 from openloop.broker_runtime.filesystem import (
     generation_filesystem_observation,
+    harden_relay_socket,
     install_checkpoint_relay_config,
     prepare_generation_filesystem,
     relay_artifact_mode,
@@ -95,6 +97,22 @@ def test_prepare_installs_exact_artifacts_and_replays(short_root):
     assert generation_filesystem_observation(
         policy.paths, uid=os.getuid()
     ) == (True, True)
+
+
+def test_harden_relay_socket_validates_identity_and_sets_owner_only_mode(short_root):
+    policy = _policy(short_root)
+    prepare_generation_filesystem(
+        policy.paths, policy.compiled_relay, uid=os.getuid()
+    )
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(os.fspath(policy.paths.host_socket))
+
+        harden_relay_socket(policy.paths, uid=os.getuid())
+
+        assert stat.S_IMODE(policy.paths.host_socket.stat().st_mode) == 0o600
+    finally:
+        listener.close()
 
 
 def test_checkpoint_transition_replaces_only_config_and_replays(short_root):

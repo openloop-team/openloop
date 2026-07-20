@@ -218,7 +218,7 @@ class FakeDocker:
                 "Ports": {},
                 "Networks": {
                     argv[argv.index("--network") + 1]: {
-                        "Aliases": [name, "agent"] if role == "agent" else [name]
+                        "Aliases": [name, "agent"] if role == "agent" else None
                     }
                 },
             },
@@ -325,7 +325,13 @@ class Health:
             raise self.failure
 
 
-def _driver(short_root, *, health=None, clock=lambda: NOW):
+def _driver(
+    short_root,
+    *,
+    health=None,
+    clock=lambda: NOW,
+    socket_hardener=lambda _paths, _uid: None,
+):
     config = _config(short_root)
     docker = FakeDocker(config)
     checker = health or Health()
@@ -334,6 +340,7 @@ def _driver(short_root, *, health=None, clock=lambda: NOW):
         runner=docker,
         clock=clock,
         health_checker=checker,
+        socket_hardener=socket_hardener,
     )
     return driver, docker, checker
 

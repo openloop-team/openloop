@@ -34,7 +34,7 @@ import logging
 import os
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -51,6 +51,8 @@ from openloop.broker.models import BrokerOwner, IsolationMode
 from openloop.broker.postgres import PostgresBrokerRepository
 from openloop.broker_control.coordinator import BrokerSegmentCoordinator
 from openloop.broker_control.development import local_durable_adapter_for_docker
+from openloop.broker_control.local_receipts import LocalCheckpointReceiptStore
+from openloop.broker_control.recovery import BrokerLifecycleReconciler
 from openloop.broker_control.receipts import (
     CheckpointReceiptIssuer,
     CheckpointReceiptVerifier,
@@ -59,6 +61,7 @@ from openloop.broker_control.secrets import (
     RuntimeSecretAuthority,
     RuntimeSecretRootRing,
 )
+from openloop.broker_control.workspace_ingress import LocalWorkspaceIngress
 from openloop.broker_rpc.application import BrokerRpcApplication
 from openloop.broker_rpc.audit import (
     InMemoryRpcAuditSink,
@@ -104,9 +107,15 @@ _RECEIPT_ISSUER = "checkpoint-store"
 _POLICY_PROFILE = "default"
 _RUNTIME_DRIVER = "docker"
 _DURABLE_DRIVER = "local"
+# START_SEGMENT performs the bounded Docker probe, creation, and 15-second
+# readiness gate inside one authenticated RPC. The transport's generic 5-second
+# application limit cannot represent that operation, so the co-process profile
+# pins a longer but still finite envelope across server, client, and sync bridge.
+BROKER_RPC_APPLICATION_TIMEOUT_SECONDS = 120.0
+BROKER_RPC_TOTAL_TIMEOUT_SECONDS = 130.0
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class BrokerClientHandle:
     """A live broker client plus the checkpoint-store-side signing material.
 
@@ -123,7 +132,33 @@ class BrokerClientHandle:
     receipt_issuer: CheckpointReceiptIssuer
     receipt_verifier: CheckpointReceiptVerifier
     loop: asyncio.AbstractEventLoop
+    workspace_ingress: LocalWorkspaceIngress
+    _ledger: BrokerLedger = field(repr=False)
+    _coordinator: BrokerSegmentCoordinator = field(repr=False)
+    checkpoint_store: LocalCheckpointReceiptStore | None = None
     reconciler: Any | None = None
+
+    def bind_checkpoint_store(self, artifact_store: Any) -> LocalCheckpointReceiptStore:
+        """Bind the worker-side artifact store once and finish recovery wiring."""
+        if self.checkpoint_store is not None:
+            if getattr(self.checkpoint_store, "_artifacts", None) is not artifact_store:
+                raise ValueError("broker checkpoint store is already bound")
+            return self.checkpoint_store
+        checkpoint_store = LocalCheckpointReceiptStore(
+            artifact_store=artifact_store,
+            issuer=self.receipt_issuer,
+            historical_verifier=self.receipt_verifier,
+            expected_uid=os.getuid(),
+            expected_gid=os.getgid(),
+        )
+        self.checkpoint_store = checkpoint_store
+        self.reconciler = BrokerLifecycleReconciler(
+            ledger=self._ledger,
+            coordinator=self._coordinator,
+            receipt_locator=checkpoint_store,
+            receipt_verifier=self.receipt_verifier,
+        )
+        return checkpoint_store
 
 
 def _decode_roots(
@@ -319,9 +354,14 @@ async def build_broker(
         ledger = BrokerLedger(repository)
 
         durable = local_durable_adapter_for_docker(runtime_config)
+        workspace_ingress = LocalWorkspaceIngress(
+            runtime_config.runtime_root / ".workspace-ingress"
+        )
         # Share the whole-second clock so the driver and ledger agree on time.
         runtime = runtime_driver or DockerOpenHandsRuntimeDriver(
-            runtime_config, clock=now
+            runtime_config,
+            clock=now,
+            workspace_materializer=workspace_ingress,
         )
         policy = BrokerRpcPolicy(
             _POLICY_PROFILE,
@@ -353,7 +393,10 @@ async def build_broker(
             application=application,
             socket_policy=UnixSocketPolicy(socket_path, mode=0o600),
             peer_provider=_peer_credential_provider(),
-            limits=BrokerRpcLimits(),
+            limits=BrokerRpcLimits(
+                application_timeout_seconds=BROKER_RPC_APPLICATION_TIMEOUT_SECONDS,
+                total_timeout_seconds=BROKER_RPC_TOTAL_TIMEOUT_SECONDS,
+            ),
         )
         owner = BrokerOwner(_OWNER_TENANT, _OWNER_SUBJECT)
         worker_instance_id: UUID = uuid4()
@@ -369,7 +412,12 @@ async def build_broker(
                 intents={intent},
             )
 
-        client = BrokerRpcClient(path=socket_path, identity_provider=identity_provider)
+        client = BrokerRpcClient(
+            path=socket_path,
+            identity_provider=identity_provider,
+            io_timeout_seconds=BROKER_RPC_APPLICATION_TIMEOUT_SECONDS + 5.0,
+            total_timeout_seconds=BROKER_RPC_TOTAL_TIMEOUT_SECONDS,
+        )
     except Exception as exc:  # noqa: BLE001 — boot gate: never crash app startup
         log.error("broker DISABLED: %s", exc)
         return None
@@ -395,5 +443,8 @@ async def build_broker(
         receipt_issuer=receipt_issuer,
         receipt_verifier=receipt_verifier,
         loop=asyncio.get_running_loop(),
+        workspace_ingress=workspace_ingress,
+        _ledger=ledger,
+        _coordinator=coordinator,
         reconciler=None,
     )

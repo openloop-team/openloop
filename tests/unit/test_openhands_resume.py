@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import replace
 
 import pytest
@@ -122,6 +123,35 @@ def test_legal_transition_requires_resolving_event_and_preserves_schema():
 
     with pytest.raises(OpenHandsResumeError, match="illegal"):
         state.transition_to("cleaned")
+
+
+def test_broker_finalizing_state_round_trips_and_transitions_terminal():
+    broker_job_id = str(uuid.uuid4())
+    artifact = _artifact(kind="checkpoint")
+    artifact = replace(
+        artifact,
+        artifact=replace(
+            artifact.artifact,
+            identity=replace(artifact.artifact.identity, job_id=broker_job_id),
+        ),
+    )
+    state = OpenHandsResumeState(
+        status="finalizing",
+        conversation_id="conversation-1",
+        segment_id="segment-1",
+        base_ref="refs/heads/main",
+        resolved_base_commit=BASE,
+        workspace_artifact=artifact,
+        broker_job_id=broker_job_id,
+        broker_generation=2,
+        image_digest=IMAGE,
+        master_key_id="key-v1",
+    )
+
+    restored = OpenHandsResumeState.from_dict(state.to_dict())
+    restored.transition_to("terminal")
+
+    assert restored.status == "terminal"
 
 
 @pytest.mark.parametrize(

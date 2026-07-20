@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -15,18 +16,33 @@ OPENHANDS_RESUME_READER_VERSION = 1
 OPENHANDS_REJECTION_REASON = "User rejected the pending action in Slack"
 
 OpenHandsResumeStatus = Literal[
-    "running", "parking", "parked", "resuming", "terminal", "cleaned"
+    "running",
+    "parking",
+    "parked",
+    "resuming",
+    "finalizing",
+    "terminal",
+    "cleaned",
 ]
 DecisionKind = Literal["accept", "reject"]
 
 _STATUSES = frozenset(
-    {"running", "parking", "parked", "resuming", "terminal", "cleaned"}
+    {
+        "running",
+        "parking",
+        "parked",
+        "resuming",
+        "finalizing",
+        "terminal",
+        "cleaned",
+    }
 )
 _TRANSITIONS = {
-    "running": frozenset({"parking", "terminal"}),
+    "running": frozenset({"parking", "finalizing", "terminal"}),
     "parking": frozenset({"parked", "terminal"}),
     "parked": frozenset({"resuming", "terminal"}),
-    "resuming": frozenset({"parking", "terminal"}),
+    "resuming": frozenset({"parking", "finalizing", "terminal"}),
+    "finalizing": frozenset({"terminal"}),
     "terminal": frozenset({"cleaned"}),
     "cleaned": frozenset(),
 }
@@ -168,6 +184,8 @@ class OpenHandsResumeState:
     schema_version: int = OPENHANDS_RESUME_SCHEMA_VERSION
     minimum_reader_version: int = OPENHANDS_RESUME_READER_VERSION
     decision_id: str | None = None
+    broker_job_id: str | None = None
+    broker_generation: int | None = None
     slack_requester_id: str | None = None
     pending_action_summary: str | None = None
     pending_action_fingerprint: str | None = None
@@ -205,6 +223,18 @@ class OpenHandsResumeState:
         if not _DIGEST_IMAGE.fullmatch(self.image_digest):
             raise OpenHandsResumeError("invalid OpenHands resume image digest")
         validate_state_identifier(self.master_key_id, field="master_key_id")
+        if self.broker_job_id is not None:
+            try:
+                uuid.UUID(self.broker_job_id)
+            except (TypeError, ValueError) as exc:
+                raise OpenHandsResumeError("invalid broker job ID") from exc
+        if self.broker_generation is not None and (
+            isinstance(self.broker_generation, bool)
+            or not isinstance(self.broker_generation, int)
+            or self.broker_generation < 1
+            or self.broker_job_id is None
+        ):
+            raise OpenHandsResumeError("invalid broker generation")
 
         if self.decision_id is not None:
             validate_state_identifier(self.decision_id, field="decision_id")
@@ -258,8 +288,21 @@ class OpenHandsResumeState:
                 raise OpenHandsResumeError(
                     f"OpenHands {self.status} state is missing decision data"
                 )
-            if self.workspace_artifact.artifact.identity.kind != "paused":
+            if self.workspace_artifact.artifact.identity.kind not in {
+                "paused",
+                "checkpoint",
+            }:
                 raise OpenHandsResumeError("parked state requires a paused artifact")
+        if self.status == "finalizing":
+            if (
+                self.broker_job_id is None
+                or self.broker_generation is None
+                or self.workspace_artifact is None
+                or self.workspace_artifact.artifact.identity.kind != "checkpoint"
+            ):
+                raise OpenHandsResumeError(
+                    "finalizing state requires a broker checkpoint artifact"
+                )
         if self.workspace_artifact is not None:
             identity = self.workspace_artifact.artifact.identity
             if identity.conversation_id != self.conversation_id:
@@ -268,8 +311,14 @@ class OpenHandsResumeState:
             # a decision is durably accepted, ``resuming`` preallocates the
             # *next* segment ID before external work while retaining that
             # previous artifact as its reconstruction input.
-            if self.status != "resuming" and identity.segment_id != self.segment_id:
+            if (
+                self.broker_job_id is None
+                and self.status != "resuming"
+                and identity.segment_id != self.segment_id
+            ):
                 raise OpenHandsResumeError("artifact segment mismatch")
+            if self.broker_job_id is not None and identity.job_id != self.broker_job_id:
+                raise OpenHandsResumeError("artifact broker job mismatch")
             if self.workspace_artifact.base_commit != self.resolved_base_commit:
                 raise OpenHandsResumeError("artifact base commit mismatch")
             if self.workspace_artifact.artifact.master_key_id != self.master_key_id:
@@ -303,6 +352,8 @@ class OpenHandsResumeState:
             "base_ref": self.base_ref,
             "resolved_base_commit": self.resolved_base_commit,
             "decision_id": self.decision_id,
+            "broker_job_id": self.broker_job_id,
+            "broker_generation": self.broker_generation,
             "slack_requester_id": self.slack_requester_id,
             "pending_action_summary": self.pending_action_summary,
             "pending_action_fingerprint": self.pending_action_fingerprint,

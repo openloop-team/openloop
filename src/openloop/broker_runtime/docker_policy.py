@@ -44,7 +44,10 @@ LABEL_DEADLINE = "openloop.runtime.deadline"
 AGENT_MEMORY_BYTES = 4 * 1024 * 1024 * 1024
 AGENT_PIDS_LIMIT = 512
 AGENT_CPUS = 2.0
-AGENT_TMPFS = "/tmp:rw,nosuid,nodev,size=512m"
+# The pinned 1.36 agent-server is a PyInstaller binary and extracts executable
+# shared objects beneath /tmp. Docker Desktop otherwise mounts tmpfs noexec even
+# when noexec is omitted, producing a loader failure under the read-only root.
+AGENT_TMPFS = "/tmp:rw,exec,nosuid,nodev,size=512m"
 AGENT_COMMAND = (
     "/usr/local/bin/openhands-agent-server",
     "--host",
@@ -55,6 +58,10 @@ AGENT_COMMAND = (
 AGENT_FIXED_ENVIRONMENT = (
     ("OH_CONVERSATIONS_PATH", "/openhands-state/conversations"),
     ("OH_LEASE_TTL_SECONDS", CONVERSATION_LEASE_TTL_SECONDS),
+    # Present in the immutable OpenHands 1.36 image. Reassert it explicitly so
+    # the runtime's allowlist owns the value instead of silently trusting an
+    # image-level OH_* default.
+    ("OH_ENABLE_VNC", "false"),
     ("HOME", "/tmp"),
     ("GIT_CONFIG_COUNT", "1"),
     ("GIT_CONFIG_KEY_0", "safe.directory"),

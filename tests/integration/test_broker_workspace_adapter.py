@@ -8,15 +8,18 @@ with fakes so no OpenHands SDK, Docker, or relay is needed.
 
 import asyncio
 import base64
+import io
 import shutil
+import subprocess
 import tempfile
+import uuid
 from contextlib import AsyncExitStack
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from openloop.broker.models import VerifiedCheckpointReceipt
+from openloop.broker.models import JobState, VerifiedCheckpointReceipt
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 from openloop.config import Settings
 from openloop.tools.openhands_broker_workspace import (
@@ -24,6 +27,17 @@ from openloop.tools.openhands_broker_workspace import (
     BrokerWorkspaceError,
 )
 from openloop.tools.openhands_docker import ArchiveStreamResult
+from openloop.tools.openhands_resume import ResumeDecision, WorkerPaused
+from openloop.tools.openhands_state import OpenHandsKeyDeriver, OpenHandsStateLayout
+from openloop.tools.openhands_artifacts import (
+    WorkspaceArtifactManifest,
+    WorkspaceArtifactStore,
+)
+from openloop.tools.openhands_worker import (
+    _ColdRuntime,
+    OpenHandsCodingWorker,
+)
+from openloop.tools.coding_worker import WorkerState
 from openloop.tools.openhands_relay_client import RelayClientEndpoint, RelayMode
 from openloop.wiring.broker import build_broker
 
@@ -338,3 +352,230 @@ async def test_build_coding_worker_selects_broker_adapter(tmp_path, sock_dir):
     assert worker is not None
     assert isinstance(worker._docker_adapter, BrokerWorkspaceAdapter)
     assert worker._docker_adapter.runs_containers_locally is False
+    assert worker._docker_adapter._checkpoint_store is handle.checkpoint_store
+    assert handle.reconciler is not None
+
+
+class _LifecycleWorkspace:
+    def __init__(self, endpoint, patch):
+        self.endpoint = endpoint
+        self._patch = patch
+
+    def stream_git_delta(self, sink, *, base_ref):
+        sink.write(self._patch)
+        return base_ref, len(self._patch)
+
+
+class _LifecycleConversation:
+    def __init__(self, workspace, callbacks, status):
+        self.workspace = workspace
+        self.callbacks = callbacks
+        action = type("TerminalAction", (), {"tool_name": "terminal"})()
+        self.state = SimpleNamespace(
+            execution_status=status,
+            events=[action],
+        )
+        usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5)
+        metrics = SimpleNamespace(accumulated_cost=0.1, accumulated_token_usage=usage)
+        self.conversation_stats = SimpleNamespace(
+            get_combined_metrics=lambda: metrics
+        )
+        self.prompt = None
+
+    def send_message(self, prompt):
+        self.prompt = prompt
+
+    def set_confirmation_policy(self, _policy):
+        return None
+
+    def run(self):
+        for callback in self.callbacks:
+            callback(self.state.events[-1])
+
+    def close(self):
+        return None
+
+
+def _git(repo, *args):
+    return subprocess.run(
+        ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+async def test_worker_checkpoint_park_resume_finalize_over_real_rpc(tmp_path, sock_dir):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "canary@example.invalid")
+    _git(repo, "config", "user.name", "Canary")
+    (repo / "base.txt").write_text("base\n")
+    _git(repo, "add", "base.txt")
+    _git(repo, "commit", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    final_patch = (
+        "diff --git a/OPENLOOP_PR.md b/OPENLOOP_PR.md\n"
+        "new file mode 100644\n--- /dev/null\n+++ b/OPENLOOP_PR.md\n"
+        "@@ -0,0 +1,2 @@\n+Broker canary\n+Body\n"
+        "diff --git a/result.txt b/result.txt\n"
+        "new file mode 100644\n--- /dev/null\n+++ b/result.txt\n"
+        "@@ -0,0 +1 @@\n+resumed\n"
+    ).encode()
+    patches = [b"", final_patch]
+
+    async with AsyncExitStack() as stack:
+        handle = await build_broker(
+            _settings(tmp_path, sock_dir),
+            stack,
+            runtime_driver=InMemoryRuntimeDriver(),
+        )
+        assert handle is not None
+        layout = OpenHandsStateLayout(tmp_path / "artifacts")
+        keys = OpenHandsKeyDeriver(bytes(range(32)), master_key_id="artifact-v1")
+        artifacts = WorkspaceArtifactStore(
+            layout, keys, scratch_root=tmp_path / "artifact-scratch"
+        )
+        checkpoint_store = handle.bind_checkpoint_store(artifacts)
+        adapter = BrokerWorkspaceAdapter(
+            client=handle.client,
+            loop=handle.loop,
+            checkpoint_store=checkpoint_store,
+            workspace_factory=lambda endpoint: _LifecycleWorkspace(
+                endpoint, patches.pop(0)
+            ),
+            tenant_id=handle.owner.tenant_id,
+        )
+        worker = OpenHandsCodingWorker(
+            "openai/fake",
+            docker=True,
+            docker_adapter=adapter,
+            artifact_store=artifacts,
+            cold_resume_enabled=True,
+        )
+        worker._git_head = lambda workspace: base
+        status = ["WAITING_FOR_CONFIRMATION", "FINISHED"]
+
+        def open_runtime(workspace, state, callbacks):
+            target = adapter.create(workspace, state.job_id)
+            conversation = _LifecycleConversation(target, callbacks, status.pop(0))
+            return _ColdRuntime(conversation, target, lambda: None)
+
+        worker._open_cold_runtime = open_runtime
+        state = WorkerState(
+            job_id="job-canary-0001",
+            repo="acme/repo",
+            instruction="exercise broker",
+            base="main",
+            branch="openloop/job-canary-0001",
+            requester_id="U123",
+        )
+
+        paused = await worker.run(repo, state)
+        assert isinstance(paused, WorkerPaused)
+        assert state.openhands_resume.status == "parking"
+        assert await asyncio.to_thread(
+            adapter.is_parked,
+            state.job_id,
+            state.openhands_resume.broker_job_id,
+            state.openhands_resume.broker_generation,
+        )
+        state.openhands_resume.transition_to("parked")
+        decision = ResumeDecision("accept", paused.decision_id, "event-1", "U123")
+        state.openhands_resume.transition_to(
+            "resuming",
+            segment_id=uuid.uuid4().hex,
+            resolved_event_id=decision.event_id,
+            resolved_decision=decision,
+        )
+
+        edit = await worker.run(repo, state)
+        assert edit.workspace_artifact.artifact.identity.kind == "checkpoint"
+        assert state.openhands_resume.status == "terminal"
+        assert state.openhands_resume.broker_generation == 2
+        assert (repo / "result.txt").read_text() == "resumed\n"
+        assert not (repo / "OPENLOOP_PR.md").exists()
+        broker_state = adapter._jobs[state.job_id]
+        inspected = await handle.client.inspect_job(
+            broker_state.broker_job_id, broker_state.capability
+        )
+        assert inspected.snapshot.state.value == "terminal"
+
+
+async def test_recover_checkpoint_replays_pre_effect_app_intents(tmp_path, sock_dir):
+    job = "job-recovery-0001"
+    async with AsyncExitStack() as stack:
+        handle = await build_broker(
+            _settings(tmp_path, sock_dir),
+            stack,
+            runtime_driver=InMemoryRuntimeDriver(),
+        )
+        assert handle is not None
+        artifacts = WorkspaceArtifactStore(
+            OpenHandsStateLayout(tmp_path / "recovery-artifacts"),
+            OpenHandsKeyDeriver(bytes(range(32)), master_key_id="artifact-v1"),
+            scratch_root=tmp_path / "recovery-scratch",
+        )
+        checkpoint_store = handle.bind_checkpoint_store(artifacts)
+
+        def new_adapter():
+            return BrokerWorkspaceAdapter(
+                client=handle.client,
+                loop=handle.loop,
+                checkpoint_store=checkpoint_store,
+                workspace_factory=lambda endpoint: _FakeWorkspace(endpoint),
+                tenant_id=handle.owner.tenant_id,
+            )
+
+        initial = new_adapter()
+        await asyncio.to_thread(initial.create, tmp_path, job)
+        first = initial.generation_identity(job)
+        first_barrier = "barrier-recovery-01"
+        first_descriptor = artifacts.put_atomic(
+            initial.checkpoint_identity(job, first_barrier),
+            io.BytesIO(b"first checkpoint"),
+            WorkspaceArtifactManifest(format="git-delta", base_commit="a" * 40),
+        )
+
+        # Simulate an app crash after persisting PARKING but before quiesce.
+        recovered = new_adapter()
+        await asyncio.to_thread(
+            recovered.recover_checkpoint,
+            job,
+            str(first.broker_job_id),
+            first.generation,
+            first_barrier,
+            first_descriptor,
+            terminal=False,
+        )
+        parked = await handle.client.inspect_job(
+            first.broker_job_id, recovered._jobs[job].capability
+        )
+        assert parked.snapshot.state is JobState.PARKED
+
+        await asyncio.to_thread(recovered.create, tmp_path, job)
+        second = recovered.generation_identity(job)
+        second_barrier = "barrier-recovery-02"
+        second_descriptor = artifacts.put_atomic(
+            recovered.checkpoint_identity(job, second_barrier),
+            io.BytesIO(b"second checkpoint"),
+            WorkspaceArtifactManifest(
+                format="git-delta",
+                base_commit="a" * 40,
+                pr_title="Recovered terminal",
+            ),
+        )
+
+        # Simulate the equivalent FINALIZING crash window in a fresh adapter.
+        finalizer = new_adapter()
+        await asyncio.to_thread(
+            finalizer.recover_checkpoint,
+            job,
+            str(second.broker_job_id),
+            second.generation,
+            second_barrier,
+            second_descriptor,
+            terminal=True,
+        )
+        terminal = await handle.client.inspect_job(
+            second.broker_job_id, finalizer._jobs[job].capability
+        )
+        assert terminal.snapshot.state is JobState.TERMINAL

@@ -91,7 +91,13 @@ def _acl_path(endpoint: RelayClientEndpoint, suffix: str = "") -> str:
 
 def _render_haproxy_config(endpoint: RelayClientEndpoint) -> str:
     conversation_path = _acl_path(endpoint)
-    events_path = _acl_path(endpoint, "/events/search")
+    event_create_path = _acl_path(endpoint, "/events")
+    events_search_path = _acl_path(endpoint, "/events/search")
+    run_path = _acl_path(endpoint, "/run")
+    confirmation_policy_path = _acl_path(endpoint, "/confirmation_policy")
+    confirmation_response_path = _acl_path(
+        endpoint, "/events/respond_to_confirmation"
+    )
     websocket_path = f"/sockets/events/{endpoint.conversation_id}"
 
     common_acls = f"""\
@@ -104,7 +110,11 @@ def _render_haproxy_config(endpoint: RelayClientEndpoint) -> str:
   acl path_health path -m str /health
   acl path_conversations path -m str /api/conversations
   acl path_conversation path -m str {conversation_path}
-  acl path_events path -m str {events_path}
+  acl path_event_create path -m str {event_create_path}
+  acl path_events_search path -m str {events_search_path}
+  acl path_run path -m str {run_path}
+  acl path_confirmation_policy path -m str {confirmation_policy_path}
+  acl path_confirmation_response path -m str {confirmation_response_path}
   acl path_archive path -m str /api/file/archive
   acl path_websocket path -m str {websocket_path}
   acl wants_websocket req.hdr(Upgrade) -m str -i websocket
@@ -116,7 +126,12 @@ def _render_haproxy_config(endpoint: RelayClientEndpoint) -> str:
   http-request allow if method_get path_health
   http-request allow if method_post path_conversations
   http-request allow if method_get path_conversation
-  http-request allow if method_get path_events
+  http-request allow if method_post path_event_create
+  http-request allow if method_get path_events_search
+  http-request allow if method_post path_run
+  http-request allow if method_post path_confirmation_policy
+  http-request allow if method_post path_confirmation_response
+  http-request allow if method_get path_archive
   http-request allow if { var(txn.valid_websocket) -m bool }
 """
     else:
@@ -145,7 +160,7 @@ defaults
   timeout tunnel 60s
 
 frontend openhands_generation
-  bind {endpoint.socket_path} mode 600
+  bind {endpoint.socket_path}
   log-format "relay status=%ST bytes=%B termination=%ts"
 {common_acls}\
   http-request deny deny_status 403 unless relay_capability_once relay_capability_ok

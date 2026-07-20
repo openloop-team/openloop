@@ -31,10 +31,13 @@ from typing import BinaryIO
 from uuid import UUID
 
 from openloop.broker.models import (
+    JobState,
     ReleaseTarget,
     SignedCheckpointReceipt,
     TerminalOutcome,
 )
+from openloop.broker_control.local_receipts import checkpoint_artifact_identity
+from openloop.broker_control.receipts import CheckpointReceiptKey
 from openloop.broker_rpc.capability import JobCapability
 from openloop.broker_rpc.client import BrokerRpcClient
 from openloop.tools.openhands_docker import ArchiveStreamResult
@@ -42,13 +45,18 @@ from openloop.tools.openhands_relay_client import (
     RelayClientEndpoint,
     RelayMode,
     create_relay_workspace,
+    relay_websocket_callback_client_factory,
 )
 
 log = logging.getLogger("openloop")
 
-_BRIDGE_TIMEOUT_SECONDS = 30.0
+_BRIDGE_TIMEOUT_SECONDS = 135.0
 
 WorkspaceFactory = Callable[[RelayClientEndpoint], object]
+
+
+class WorkspaceIngress:
+    def stage(self, job_id: UUID, generation: int, source: Path) -> object: ...
 
 
 class BrokerWorkspaceError(RuntimeError):
@@ -71,6 +79,14 @@ class _JobState:
     current_generation: int = 0
     running_generation: int | None = None
     conversation_id: UUID | None = None
+    endpoint: RelayClientEndpoint | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerGenerationIdentity:
+    broker_job_id: UUID
+    conversation_id: UUID
+    generation: int | None
 
 
 def _create_idempotency_key(job_id: str) -> str:
@@ -109,12 +125,18 @@ class BrokerWorkspaceAdapter:
         client: BrokerRpcClient,
         loop: asyncio.AbstractEventLoop,
         receipt_issuer: object | None = None,
+        checkpoint_store: object | None = None,
+        workspace_ingress: WorkspaceIngress | None = None,
+        tenant_id: str = "openloop",
         workspace_factory: WorkspaceFactory = create_relay_workspace,
         bridge_timeout_seconds: float = _BRIDGE_TIMEOUT_SECONDS,
     ) -> None:
         self._client = client
         self._loop = loop
         self._receipt_issuer = receipt_issuer  # phase 3b (checkpoint signing)
+        self._checkpoint_store = checkpoint_store
+        self._workspace_ingress = workspace_ingress
+        self._tenant_id = tenant_id
         self._workspace_factory = workspace_factory
         self._bridge_timeout = bridge_timeout_seconds
         self._jobs: dict[str, _JobState] = {}
@@ -143,18 +165,54 @@ class BrokerWorkspaceAdapter:
                     "OpenHands relay workspace SDK is unavailable"
                 ) from exc
 
-    def create(self, workspace: Path, job_id: str) -> object:
-        """Open a fresh running segment and return its relay-backed workspace."""
+    def prepare_job(
+        self,
+        job_id: str,
+        *,
+        broker_job_id: str | None = None,
+        current_generation: int = 0,
+    ) -> BrokerGenerationIdentity:
+        """Recover the job capability and validate persisted broker identity."""
         state = self._jobs.get(job_id)
         if state is None:
             created = self._bridge(
                 self._client.create_job(_create_idempotency_key(job_id))
             )
+            if created.ticket.job_id is None or created.ticket.conversation_id is None:
+                raise BrokerWorkspaceError("broker create returned incomplete identity")
+            if broker_job_id is not None and str(created.ticket.job_id) != broker_job_id:
+                raise BrokerWorkspaceError("persisted broker job identity mismatch")
             state = _JobState(
                 broker_job_id=created.ticket.job_id,
                 capability=created.capability,
+                current_generation=current_generation,
+                conversation_id=created.ticket.conversation_id,
             )
             self._jobs[job_id] = state
+        elif (
+            (broker_job_id is not None and str(state.broker_job_id) != broker_job_id)
+            or state.current_generation != current_generation
+        ):
+            raise BrokerWorkspaceError("broker job cursor mismatch")
+        assert state.conversation_id is not None
+        return BrokerGenerationIdentity(
+            state.broker_job_id,
+            state.conversation_id,
+            state.running_generation,
+        )
+
+    def create(self, workspace: Path, job_id: str) -> object:
+        """Open a fresh running segment and return its relay-backed workspace."""
+        if job_id not in self._jobs:
+            self.prepare_job(job_id)
+        state = self._jobs[job_id]
+
+        if self._workspace_ingress is not None:
+            self._workspace_ingress.stage(
+                state.broker_job_id,
+                state.current_generation + 1,
+                workspace,
+            )
 
         started = self._bridge(
             self._client.start_segment(
@@ -165,16 +223,66 @@ class BrokerWorkspaceAdapter:
             )
         )
         access = started.access
+        if (
+            access.job_id != state.broker_job_id
+            or access.conversation_id != state.conversation_id
+            or access.generation != state.current_generation + 1
+        ):
+            raise BrokerWorkspaceError("broker start returned mismatched identity")
         state.running_generation = access.generation
         state.conversation_id = access.conversation_id
-        endpoint = RelayClientEndpoint(
+        state.endpoint = RelayClientEndpoint(
             socket_path=access.socket_path,
             conversation_id=access.conversation_id,
             relay_capability=access.relay_capability,
             session_api_key=access.session_api_key,
             mode=RelayMode.RUNNING,
         )
-        return self._workspace_factory(endpoint)
+        return self._workspace_factory(state.endpoint)
+
+    def generation_identity(self, job_id: str) -> BrokerGenerationIdentity:
+        state = self._running(job_id)
+        assert state.conversation_id is not None
+        return BrokerGenerationIdentity(
+            state.broker_job_id,
+            state.conversation_id,
+            state.running_generation,
+        )
+
+    def websocket_factory(self, job_id: str):
+        state = self._running(job_id)
+        if state.endpoint is None:
+            raise BrokerWorkspaceError("broker relay endpoint is unavailable")
+        return relay_websocket_callback_client_factory(state.endpoint)
+
+    def checkpoint_key(self, job_id: str, barrier_id: str) -> CheckpointReceiptKey:
+        state = self._running(job_id)
+        assert state.conversation_id is not None
+        return CheckpointReceiptKey(
+            self._tenant_id,
+            state.broker_job_id,
+            state.conversation_id,
+            state.running_generation,
+            barrier_id,
+        )
+
+    def checkpoint_identity(self, job_id: str, barrier_id: str):
+        return checkpoint_artifact_identity(self.checkpoint_key(job_id, barrier_id))
+
+    def publish_checkpoint(self, job_id: str, barrier_id: str, descriptor):
+        if self._checkpoint_store is None:
+            raise BrokerWorkspaceError("broker checkpoint store is unavailable")
+        return self._bridge(
+            self._checkpoint_store.publish(
+                self.checkpoint_key(job_id, barrier_id), descriptor
+            )
+        )
+
+    @staticmethod
+    def close_workspace(workspace: object) -> None:
+        reset = getattr(workspace, "reset_client", None)
+        if callable(reset):
+            reset()
 
     def stream_git_delta(
         self, workspace: object, sink: BinaryIO, *, base_ref: str
@@ -228,6 +336,18 @@ class BrokerWorkspaceAdapter:
             RemoteConversation,
         )
 
+        state = next(
+            (
+                candidate
+                for candidate in self._jobs.values()
+                if candidate.conversation_id == conversation_id
+                and candidate.endpoint is not None
+            ),
+            None,
+        )
+        if state is None or state.endpoint is None:
+            raise BrokerWorkspaceError("broker conversation endpoint is unavailable")
+
         return RemoteConversation(
             agent=agent,
             workspace=workspace,
@@ -236,6 +356,9 @@ class BrokerWorkspaceAdapter:
             max_iteration_per_run=max_iterations,
             visualizer=None,
             delete_on_close=False,
+            websocket_client_factory=relay_websocket_callback_client_factory(
+                state.endpoint
+            ),
         )
 
     # --- lifecycle transitions (phase 3b) --------------------------------
@@ -254,7 +377,7 @@ class BrokerWorkspaceAdapter:
     def quiesce(self, job_id: str, barrier_id: str) -> None:
         """Quiesce the running segment at a confirmation barrier (checkpoint)."""
         state = self._running(job_id)
-        self._bridge(
+        result = self._bridge(
             self._client.quiesce_segment(
                 state.broker_job_id,
                 state.running_generation,
@@ -262,6 +385,14 @@ class BrokerWorkspaceAdapter:
                 barrier_id,
                 state.capability,
             )
+        )
+        access = result.access
+        state.endpoint = RelayClientEndpoint(
+            socket_path=access.socket_path,
+            conversation_id=access.conversation_id,
+            relay_capability=access.relay_capability,
+            session_api_key=access.session_api_key,
+            mode=RelayMode.CHECKPOINT,
         )
 
     def park(self, job_id: str, receipt: SignedCheckpointReceipt) -> None:
@@ -284,6 +415,7 @@ class BrokerWorkspaceAdapter:
         )
         state.current_generation = generation
         state.running_generation = None
+        state.endpoint = None
 
     def finalize(
         self,
@@ -316,3 +448,79 @@ class BrokerWorkspaceAdapter:
             )
         )
         state.running_generation = None
+        state.current_generation = generation
+        state.endpoint = None
+
+    def is_parked(self, job_id: str, broker_job_id: str, generation: int) -> bool:
+        """Inspect a crash-recovered job before the app marks it parked."""
+        identity = self.prepare_job(
+            job_id,
+            broker_job_id=broker_job_id,
+            current_generation=generation,
+        )
+        inspected = self._bridge(
+            self._client.inspect_job(
+                identity.broker_job_id, self._jobs[job_id].capability
+            )
+        )
+        return inspected.snapshot.state is JobState.PARKED
+
+    def recover_checkpoint(
+        self,
+        job_id: str,
+        broker_job_id: str,
+        generation: int,
+        barrier_id: str,
+        descriptor,
+        *,
+        terminal: bool,
+    ) -> None:
+        """Idempotently finish an app-persisted checkpoint transition.
+
+        The app persists ``parking``/``finalizing`` before its first broker
+        effect. On restart the broker reconciler may already have completed an
+        interrupted broker operation; otherwise this method replays the same
+        deterministic quiesce, receipt publication, and release/finalize keys.
+        """
+        state = self._jobs.get(job_id)
+        if state is None:
+            self.prepare_job(
+                job_id,
+                broker_job_id=broker_job_id,
+                current_generation=generation - 1,
+            )
+            state = self._jobs[job_id]
+        elif str(state.broker_job_id) != broker_job_id:
+            raise BrokerWorkspaceError("persisted broker job identity mismatch")
+
+        inspected = self._bridge(
+            self._client.inspect_job(state.broker_job_id, state.capability)
+        )
+        if (
+            inspected.snapshot.job_id != state.broker_job_id
+            or inspected.snapshot.conversation_id != state.conversation_id
+            or inspected.snapshot.generation != generation
+        ):
+            raise BrokerWorkspaceError("broker checkpoint recovery cursor mismatch")
+        target = JobState.TERMINAL if terminal else JobState.PARKED
+        if inspected.snapshot.state is target:
+            state.current_generation = generation
+            state.running_generation = None
+            state.endpoint = None
+            return
+        if inspected.snapshot.state not in {
+            JobState.ACTIVE,
+            JobState.FINALIZING,
+        } or (inspected.snapshot.state is JobState.FINALIZING and not terminal):
+            raise BrokerWorkspaceError(
+                "broker job cannot recover the persisted checkpoint transition"
+            )
+
+        state.running_generation = generation
+        if inspected.snapshot.state is JobState.ACTIVE:
+            self.quiesce(job_id, barrier_id)
+        receipt = self.publish_checkpoint(job_id, barrier_id, descriptor)
+        if terminal:
+            self.finalize(job_id, receipt)
+        else:
+            self.park(job_id, receipt)

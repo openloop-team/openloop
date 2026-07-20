@@ -40,6 +40,19 @@ class _SpyRunner:
         return []
 
 
+class _SpyBrokerReconciler:
+    def __init__(self, order) -> None:
+        self.order = order
+
+    async def run_pass(self):
+        self.order.append("broker")
+        return type(
+            "Report",
+            (),
+            {"total": 1, "repaired": 1, "failed_closed": 0, "error": 0},
+        )()
+
+
 def test_build_lock_auto_follows_memory_backend():
     # auto + in-memory stores → process-local; auto + postgres → advisory lock
     # (reuses the DB the deploy already runs, no extra service).
@@ -137,6 +150,31 @@ async def test_recovery_pass_leads_and_runs_reconcilers():
 
     assert led is True
     assert engine.calls == 1 and runner.calls == 1
+
+
+async def test_recovery_pass_converges_broker_before_app_recovery():
+    order = []
+
+    class OrderedEngine:
+        async def resume_incomplete(self):
+            order.append("engine")
+            return []
+
+    class OrderedRunner:
+        async def reconcile(self):
+            order.append("runner")
+            return []
+
+    tools = _SpyTools(OrderedEngine())
+    led = await builders.run_recovery_pass(
+        InProcessLock(),
+        tools,
+        OrderedRunner(),
+        broker_reconciler=_SpyBrokerReconciler(order),
+    )
+
+    assert led is True
+    assert order == ["broker", "engine", "runner"]
 
 
 async def test_recovery_pass_sweeps_expired_sealed_analysis_containers(monkeypatch):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import time
 from pathlib import Path
 
 from openloop.tools.openhands_relay import (
@@ -250,6 +251,45 @@ def generation_filesystem_observation(
     return artifacts_ready, workspace_ready
 
 
+def harden_relay_socket(paths: GenerationPaths, *, uid: int) -> None:
+    """Validate the relay-created UDS and set its final owner-only mode.
+
+    HAProxy cannot change metadata on a Docker Desktop bind-mounted Unix socket.
+    The socket directory is already an owner-only broker directory and is
+    mounted only into the fixed relay. Once HAProxy binds, the trusted host
+    runtime performs the metadata transition before health/access is exposed.
+    """
+    directory = _open_trusted_root(paths.socket, name="relay socket", uid=uid)
+    try:
+        stop = time.monotonic() + 5.0
+        entries = _entries(directory, label="relay socket")
+        while not entries and time.monotonic() < stop:
+            time.sleep(0.05)
+            entries = _entries(directory, label="relay socket")
+        if entries != frozenset({"agent.sock"}):
+            raise RuntimeIdentityConflict("relay socket directory does not match")
+        try:
+            before = os.stat("agent.sock", dir_fd=directory, follow_symlinks=False)
+        except OSError as exc:
+            raise RuntimeUnavailable("relay socket is not safely accessible") from exc
+        if not stat.S_ISSOCK(before.st_mode) or before.st_uid != uid:
+            raise RuntimeIdentityConflict("relay socket identity does not match")
+        try:
+            os.chmod("agent.sock", 0o600, dir_fd=directory, follow_symlinks=False)
+            after = os.stat("agent.sock", dir_fd=directory, follow_symlinks=False)
+        except OSError as exc:
+            raise RuntimeUnavailable("relay socket mode could not be hardened") from exc
+        if (
+            not stat.S_ISSOCK(after.st_mode)
+            or after.st_uid != uid
+            or stat.S_IMODE(after.st_mode) != 0o600
+            or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise RuntimeIdentityConflict("relay socket metadata does not match")
+    finally:
+        os.close(directory)
+
+
 def relay_artifact_mode(
     paths: GenerationPaths,
     running: CompiledOpenHandsRelay,
@@ -490,6 +530,7 @@ def release_generation_filesystem(paths: GenerationPaths, *, uid: int) -> None:
 __all__ = [
     "cleanup_checkpoint_transition_artifact",
     "generation_filesystem_observation",
+    "harden_relay_socket",
     "install_checkpoint_relay_config",
     "prepare_generation_filesystem",
     "relay_artifact_mode",

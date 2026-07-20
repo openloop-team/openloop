@@ -119,6 +119,21 @@ async def test_settle_records_the_attribution_envelope():
     assert record.session_id == "thread-7"
 
 
+async def test_settle_records_broker_generation_identity():
+    usage = InMemoryUsageStore()
+    await _ledger(usage).settle(
+        job_id="app-job-7",
+        broker_job_id="11111111-2222-3333-4444-555555555555",
+        broker_generation=2,
+        cost_usd=0.20,
+    )
+
+    (record,) = usage.records
+    assert record.job_id == "app-job-7"
+    assert record.broker_job_id == "11111111-2222-3333-4444-555555555555"
+    assert record.broker_generation == 2
+
+
 async def test_settle_leaves_envelope_null_when_unattributed():
     # job_id always flows; the rest stay null for an unattributed settle.
     usage = InMemoryUsageStore()

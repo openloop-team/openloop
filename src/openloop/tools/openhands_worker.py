@@ -277,16 +277,33 @@ class OpenHandsCodingWorker:
             )
 
         resume = state.openhands_resume
+        prepare_broker_job = getattr(self._docker_adapter, "prepare_job", None)
         if resume is None:
             resolved_base = await asyncio.to_thread(self._git_head, workspace)
+            broker_identity = None
+            if callable(prepare_broker_job):
+                broker_identity = await asyncio.to_thread(
+                    prepare_broker_job,
+                    state.job_id,
+                    current_generation=0,
+                )
             resume = OpenHandsResumeState(
                 status="running",
-                conversation_id=str(uuid.uuid4()),
+                conversation_id=(
+                    str(broker_identity.conversation_id)
+                    if broker_identity is not None
+                    else str(uuid.uuid4())
+                ),
                 segment_id=uuid.uuid4().hex,
                 base_ref=state.base,
                 resolved_base_commit=resolved_base,
                 image_digest=self.server_image,
                 master_key_id=self.artifact_store.keys.master_key_id,
+                broker_job_id=(
+                    str(broker_identity.broker_job_id)
+                    if broker_identity is not None
+                    else None
+                ),
                 slack_requester_id=state.requester_id,
             )
             state.openhands_resume = resume
@@ -298,15 +315,24 @@ class OpenHandsCodingWorker:
             raise OpenHandsResumeError(
                 f"cannot execute OpenHands segment in {resume.status!r} state"
             )
+        elif callable(prepare_broker_job):
+            await asyncio.to_thread(
+                prepare_broker_job,
+                state.job_id,
+                broker_job_id=resume.broker_job_id,
+                current_generation=resume.broker_generation or 0,
+            )
 
         loop = asyncio.get_running_loop()
         heartbeat = self._heartbeat(loop, state, on_step)
+        checkpoint = self._checkpoint_bridge(loop, state, on_step)
         result = await asyncio.to_thread(
             self._drive_cold,
             workspace,
             state,
             heartbeat,
             state.budget_usd,
+            checkpoint,
         )
         if isinstance(result, WorkerEdit):
             state.completed_steps.append("edit")
@@ -334,6 +360,7 @@ class OpenHandsCodingWorker:
         state: "WorkerState",
         heartbeat,
         cost_limit: float | None,
+        checkpoint,
     ) -> WorkerEdit | WorkerPaused:
         """Run and capture one fresh/resumed segment before tearing it down."""
         resume = state.openhands_resume
@@ -363,6 +390,25 @@ class OpenHandsCodingWorker:
         conversation = runtime.conversation
         conv_box.append(conversation)
         try:
+            broker_identity = getattr(
+                self._docker_adapter, "generation_identity", None
+            )
+            if callable(broker_identity):
+                identity = broker_identity(state.job_id)
+                if (
+                    str(identity.conversation_id) != resume.conversation_id
+                    or (
+                        resume.broker_job_id is not None
+                        and str(identity.broker_job_id) != resume.broker_job_id
+                    )
+                    or identity.generation is None
+                ):
+                    raise OpenHandsResumeError(
+                        "broker generation identity does not match worker state"
+                    )
+                resume.broker_job_id = str(identity.broker_job_id)
+                resume.broker_generation = identity.generation
+                checkpoint()
             if resume.status == "running":
                 conversation.send_message(self._prompt(state))
                 # Remote agent initialization is lazy and may replace policy
@@ -399,8 +445,9 @@ class OpenHandsCodingWorker:
                     runtime.workspace,
                     state,
                     kind="paused",
+                    barrier_id=resume.segment_id,
                 )
-                return WorkerPaused(
+                paused = WorkerPaused(
                     conversation_id=resume.conversation_id,
                     segment_id=resume.segment_id,
                     decision_id=decision_id,
@@ -411,19 +458,55 @@ class OpenHandsCodingWorker:
                     cumulative_prompt_tokens=prompt_tokens,
                     cumulative_completion_tokens=completion_tokens,
                 )
+                if resume.broker_job_id is not None:
+                    resume.transition_to(
+                        "parking",
+                        decision_id=decision_id,
+                        pending_action_summary=summary,
+                        pending_action_fingerprint=fingerprint,
+                        workspace_artifact=artifact,
+                        cumulative_cost=cost,
+                        cumulative_prompt_tokens=prompt_tokens,
+                        cumulative_completion_tokens=completion_tokens,
+                        resolved_event_id=None,
+                        resolved_decision=None,
+                    )
+                    checkpoint()
+                    self._complete_broker_checkpoint(
+                        state, resume.segment_id, artifact, terminal=False
+                    )
+                return paused
             if status != "finished":
                 raise OpenHandsResumeError(
                     "OpenHands segment returned an unsupported execution status"
                 )
 
-            title, body = self._read_pr_file(workspace, state)
-            artifact = self._capture_artifact(
-                runtime.workspace,
-                state,
-                kind="final",
-                pr_title=title,
-                pr_body=body,
-            )
+            if resume.broker_job_id is not None:
+                title, body, artifact = self._capture_broker_terminal(
+                    runtime.workspace, workspace, state, resume.segment_id
+                )
+                resume.transition_to(
+                    "finalizing",
+                    workspace_artifact=artifact,
+                    cumulative_cost=cost,
+                    cumulative_prompt_tokens=prompt_tokens,
+                    cumulative_completion_tokens=completion_tokens,
+                )
+                checkpoint()
+                self._complete_broker_checkpoint(
+                    state, resume.segment_id, artifact, terminal=True
+                )
+                resume.transition_to("terminal")
+                checkpoint()
+            else:
+                title, body = self._read_pr_file(workspace, state)
+                artifact = self._capture_artifact(
+                    runtime.workspace,
+                    state,
+                    kind="final",
+                    pr_title=title,
+                    pr_body=body,
+                )
             return WorkerEdit(
                 title=title,
                 body=body,
@@ -458,7 +541,7 @@ class OpenHandsCodingWorker:
         try:
             conversation_id = uuid.UUID(resume.conversation_id)
             if resume.status == "running":
-                conversation = Conversation(
+                conversation_kwargs = dict(
                     agent=agent,
                     workspace=target,
                     conversation_id=conversation_id,
@@ -467,6 +550,24 @@ class OpenHandsCodingWorker:
                     visualizer=None,
                     delete_on_close=False,
                 )
+                websocket_factory = getattr(
+                    self._docker_adapter, "websocket_factory", None
+                )
+                if callable(websocket_factory):
+                    conversation_kwargs["websocket_client_factory"] = (
+                        websocket_factory(state.job_id)
+                    )
+                    # The public Conversation factory does not accept the
+                    # pinned fork's injected WebSocket transport parameter.
+                    # Broker workspaces are remote by construction, so select
+                    # the concrete remote implementation directly.
+                    from openhands.sdk.conversation.impl.remote_conversation import (
+                        RemoteConversation,
+                    )
+
+                    conversation = RemoteConversation(**conversation_kwargs)
+                else:
+                    conversation = Conversation(**conversation_kwargs)
             else:
                 conversation = self._docker_adapter.attach_conversation(
                     target,
@@ -476,9 +577,21 @@ class OpenHandsCodingWorker:
                     max_iterations=self.max_iterations,
                 )
         except BaseException:
-            target.cleanup()
+            close_workspace = getattr(
+                self._docker_adapter, "close_workspace", None
+            )
+            if callable(close_workspace):
+                close_workspace(target)
+            else:
+                target.cleanup()
             raise
-        return _ColdRuntime(conversation, target, target.cleanup)
+        close_workspace = getattr(self._docker_adapter, "close_workspace", None)
+        cleanup = (
+            (lambda: close_workspace(target))
+            if callable(close_workspace)
+            else target.cleanup
+        )
+        return _ColdRuntime(conversation, target, cleanup)
 
     def _build_agent(self):
         from openhands.sdk import LLM, Agent, Tool
@@ -536,6 +649,7 @@ class OpenHandsCodingWorker:
         kind: str,
         pr_title: str | None = None,
         pr_body: str | None = None,
+        barrier_id: str | None = None,
     ) -> WorkspaceArtifactRef:
         from openloop.tools.openhands_artifacts import (
             WorkspaceArtifactIdentity,
@@ -546,11 +660,18 @@ class OpenHandsCodingWorker:
         assert self.artifact_store is not None
         resume = state.openhands_resume
         assert resume is not None
-        identity = WorkspaceArtifactIdentity(
-            state.job_id,
-            resume.conversation_id,
-            resume.segment_id,
-            kind,
+        checkpoint_identity = getattr(
+            self._docker_adapter, "checkpoint_identity", None
+        )
+        identity = (
+            checkpoint_identity(state.job_id, barrier_id)
+            if callable(checkpoint_identity) and barrier_id is not None
+            else WorkspaceArtifactIdentity(
+                state.job_id,
+                resume.conversation_id,
+                resume.segment_id,
+                kind,
+            )
         )
         with tempfile.TemporaryFile(mode="w+b") as plaintext:
             archived = self._docker_adapter.stream_git_delta(
@@ -576,6 +697,102 @@ class OpenHandsCodingWorker:
             format="git-delta",
             base_commit=archived.base_commit,
         )
+
+    def _complete_broker_checkpoint(
+        self,
+        state: "WorkerState",
+        barrier_id: str,
+        artifact: WorkspaceArtifactRef,
+        *,
+        terminal: bool,
+    ) -> None:
+        assert self._docker_adapter is not None
+        publish = getattr(self._docker_adapter, "publish_checkpoint", None)
+        if not callable(publish):
+            raise OpenHandsResumeError("broker checkpoint publisher is unavailable")
+        self._docker_adapter.quiesce(state.job_id, barrier_id)
+        receipt = publish(state.job_id, barrier_id, artifact.artifact)
+        if terminal:
+            self._docker_adapter.finalize(state.job_id, receipt)
+        else:
+            self._docker_adapter.park(state.job_id, receipt)
+
+    def _capture_broker_terminal(
+        self,
+        runtime_workspace: object,
+        workspace: Path,
+        state: "WorkerState",
+        barrier_id: str,
+    ) -> tuple[str, str, WorkspaceArtifactRef]:
+        """Reconstruct broker scratch locally, sanitize PR metadata, checkpoint."""
+        from openloop.tools.openhands_artifacts import WorkspaceArtifactManifest
+
+        assert self._docker_adapter is not None
+        assert self.artifact_store is not None
+        resume = state.openhands_resume
+        assert resume is not None
+        with tempfile.TemporaryFile(mode="w+b") as remote_delta:
+            archived = self._docker_adapter.stream_git_delta(
+                runtime_workspace,
+                remote_delta,
+                base_ref=resume.resolved_base_commit,
+            )
+            if archived.base_commit != resume.resolved_base_commit:
+                raise OpenHandsResumeError("OpenHands artifact base commit mismatch")
+            remote_delta.seek(0)
+            patch = remote_delta.read()
+        self._run_git_bytes(workspace, ("reset", "--hard", "HEAD"))
+        self._run_git_bytes(workspace, ("clean", "-fdx"))
+        if patch:
+            self._run_git_bytes(workspace, ("apply", "--binary", "-"), patch)
+        title, body = self._read_pr_file(workspace, state)
+        self._run_git_bytes(workspace, ("add", "-N", "--", "."))
+        sanitized = self._run_git_bytes(
+            workspace,
+            ("diff", "--binary", "--full-index", "--no-ext-diff", "HEAD", "--", "."),
+            capture=True,
+        )
+        identity = self._docker_adapter.checkpoint_identity(
+            state.job_id, barrier_id
+        )
+        # ``put_atomic`` consumes a stream; publish the sanitized bytes through a
+        # bounded temporary file instead of ever placing plaintext in the store.
+        with tempfile.TemporaryFile(mode="w+b") as plaintext:
+            plaintext.write(sanitized)
+            plaintext.seek(0)
+            descriptor = self.artifact_store.put_atomic(
+                identity,
+                plaintext,
+                WorkspaceArtifactManifest(
+                    format="git-delta",
+                    base_commit=archived.base_commit,
+                    pr_title=title,
+                    pr_body=body,
+                ),
+            )
+        return title, body, WorkspaceArtifactRef(
+            artifact=descriptor,
+            format="git-delta",
+            base_commit=archived.base_commit,
+        )
+
+    @staticmethod
+    def _run_git_bytes(
+        workspace: Path,
+        args: tuple[str, ...],
+        stdin: bytes | None = None,
+        *,
+        capture: bool = False,
+    ) -> bytes:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=workspace,
+            input=stdin,
+            check=True,
+            stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        return result.stdout if capture else b""
 
     def _drive(
         self,
@@ -707,6 +924,20 @@ class OpenHandsCodingWorker:
             asyncio.run_coroutine_threadsafe(on_step(state), loop)
 
         return emit
+
+    @staticmethod
+    def _checkpoint_bridge(
+        loop, state: "WorkerState", on_step: StepCallback | None
+    ):
+        """Synchronously persist an intent before the worker thread has effects."""
+        if on_step is None:
+            return lambda: None
+
+        def persist() -> None:
+            future = asyncio.run_coroutine_threadsafe(on_step(state), loop)
+            future.result(timeout=30.0)
+
+        return persist
 
     def _prompt(self, state: "WorkerState") -> str:
         """The task handed to the agent: the instruction plus hard boundaries.

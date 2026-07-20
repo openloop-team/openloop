@@ -36,6 +36,11 @@ from .recovery import (
     RecoveryOutcome,
     RecoveryPassReport,
 )
+from .workspace_ingress import (
+    LocalWorkspaceIngress,
+    StagedWorkspace,
+    WorkspaceIngressProblem,
+)
 
 __all__ = [
     "BrokerLifecycleReconciler",
@@ -64,4 +69,7 @@ __all__ = [
     "RecoveryItemReport",
     "RecoveryOutcome",
     "RecoveryPassReport",
+    "LocalWorkspaceIngress",
+    "StagedWorkspace",
+    "WorkspaceIngressProblem",
 ]

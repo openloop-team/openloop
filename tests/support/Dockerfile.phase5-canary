@@ -1,0 +1,17 @@
+FROM openloop-runtime:latest
+
+USER root
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=openloop-openhands-relay-probe:079a88f22abeb3b5 \
+    /opt/openloop-relay-probe/.venv /opt/openloop-relay-probe/.venv
+
+ENV PATH="/opt/openloop-relay-probe/.venv/bin:${PATH}" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    OPENHANDS_SUPPRESS_BANNER=1
+
+USER 1000:1000
+ENTRYPOINT ["python"]

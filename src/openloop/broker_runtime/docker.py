@@ -61,6 +61,7 @@ from .docker_policy import (
 from .filesystem import (
     cleanup_checkpoint_transition_artifact,
     generation_filesystem_observation,
+    harden_relay_socket,
     install_checkpoint_relay_config,
     prepare_generation_filesystem,
     relay_artifact_mode,
@@ -120,7 +121,16 @@ class CommandRunner(Protocol):
     async def __call__(self, command: DockerCommand) -> CommandExecution: ...
 
 
+class WorkspaceMaterializer(Protocol):
+    def materialize(
+        self, identity: GenerationRuntimeIdentity, destination: Path
+    ) -> None: ...
+
+    def discard(self, identity: GenerationRuntimeIdentity) -> None: ...
+
+
 HealthChecker = Callable[[DockerGenerationPolicy], Awaitable[None]]
+SocketHardener = Callable[[GenerationPaths, int], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +351,8 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
         runner: CommandRunner | None = None,
         clock: Callable[[], datetime] | None = None,
         health_checker: HealthChecker | None = None,
+        workspace_materializer: WorkspaceMaterializer | None = None,
+        socket_hardener: SocketHardener | None = None,
     ) -> None:
         if not isinstance(config, DockerRuntimeConfig):
             raise TypeError("config must be a DockerRuntimeConfig")
@@ -348,6 +360,10 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
         self._runner = runner or _default_command_runner
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._health_checker = health_checker or self._default_health_check
+        self._workspace_materializer = workspace_materializer
+        self._socket_hardener = socket_hardener or (
+            lambda paths, uid: harden_relay_socket(paths, uid=uid)
+        )
         self._probe_lock = asyncio.Lock()
         self._probe_complete = False
         self._resource_locks: dict[str, _LockEntry] = {}
@@ -709,6 +725,12 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
         if not isinstance(attachment, dict):
             raise RuntimeIdentityConflict(f"{role} network attachment is invalid")
         aliases = attachment.get("Aliases")
+        # Docker Desktop reports JSON null for a container with no explicit
+        # network aliases, while Engine on Linux commonly reports the implicit
+        # container-name alias. Both mean the relay has no privileged `agent`
+        # alias; the agent still requires its explicit alias below.
+        if aliases is None and role == "relay":
+            aliases = []
         if not isinstance(aliases, list) or any(
             not isinstance(alias, str) for alias in aliases
         ):
@@ -920,9 +942,27 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
                     raise RuntimeUnavailable(
                         "generation filesystem preparation failed"
                     ) from exc
+                if self._workspace_materializer is not None:
+                    try:
+                        await asyncio.to_thread(
+                            self._workspace_materializer.materialize,
+                            identity,
+                            policy.paths.workspace,
+                        )
+                    except RuntimeDriverError:
+                        raise
+                    except Exception as exc:
+                        raise RuntimeUnavailable(
+                            "generation workspace materialization failed"
+                        ) from exc
                 await self._ensure_network(policy)
                 await self._ensure_container(policy, "agent")
                 await self._ensure_container(policy, "relay")
+                await asyncio.to_thread(
+                    self._socket_hardener,
+                    policy.paths,
+                    self.config.uid,
+                )
                 try:
                     await self._health_checker(policy)
                 except RuntimeDriverError:
@@ -994,6 +1034,11 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
                     uid=self.config.uid,
                 )
             await self._ensure_container(checkpoint, "relay")
+            await asyncio.to_thread(
+                self._socket_hardener,
+                checkpoint.paths,
+                self.config.uid,
+            )
             try:
                 await self._health_checker(checkpoint)
             except RuntimeDriverError:
@@ -1089,6 +1134,15 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
             raise RuntimeUnavailable(
                 "generation filesystem release failed"
             ) from exc
+        if self._workspace_materializer is not None:
+            try:
+                await asyncio.to_thread(
+                    self._workspace_materializer.discard, identity
+                )
+            except Exception as exc:
+                raise RuntimeUnavailable(
+                    "generation workspace seed cleanup failed"
+                ) from exc
         return ReleaseObservation(identity=identity, released=True)
 
     async def release(
@@ -1287,4 +1341,5 @@ __all__ = [
     "DockerOpenHandsRuntimeDriver",
     "ExpirySweepObservation",
     "HealthChecker",
+    "SocketHardener",
 ]

@@ -398,7 +398,17 @@ async def compose(
                 "SLACK_BOT_TOKEN"
             )
 
-        await builders.run_recovery_pass(coordinator, tools, session_runner)
+        broker_reconciler = (
+            getattr(broker_handle, "reconciler", None)
+            if broker_handle is not None
+            else None
+        )
+        await builders.run_recovery_pass(
+            coordinator,
+            tools,
+            session_runner,
+            broker_reconciler=broker_reconciler,
+        )
         recovery_task = None
         if settings.recovery_interval_seconds > 0:
             recovery_task = asyncio.create_task(
@@ -407,6 +417,7 @@ async def compose(
                     tools,
                     session_runner,
                     interval=settings.recovery_interval_seconds,
+                    broker_reconciler=broker_reconciler,
                 )
             )
             stack.push_async_callback(_cancel_task, recovery_task)

@@ -93,12 +93,34 @@ def test_running_config_uses_secret_file_and_contains_no_credentials() -> None:
     assert compiled.capability_file.payload == f"{CAPABILITY}\n".encode()
     assert compiled.capability_file.mode == 0o400
     assert "bind :" not in config
+    assert f"bind {compiled.endpoint.socket_path}\n" in config
+    assert " mode 600" not in config
     assert "path_beg /api/" not in config
     assert f"acl path_conversation path -m str {conversation}\n" in config
-    assert f"acl path_events path -m str {conversation}/events/search\n" in config
+    assert f"acl path_event_create path -m str {conversation}/events\n" in config
+    assert (
+        f"acl path_events_search path -m str {conversation}/events/search\n" in config
+    )
+    assert f"acl path_run path -m str {conversation}/run\n" in config
+    assert (
+        "acl path_confirmation_policy path -m str "
+        f"{conversation}/confirmation_policy\n" in config
+    )
+    assert (
+        "acl path_confirmation_response path -m str "
+        f"{conversation}/events/respond_to_confirmation\n" in config
+    )
     assert f"acl path_websocket path -m str /sockets/events/{CONVERSATION_ID}" in config
     assert "http-request allow if method_post path_conversations" in config
-    assert "http-request allow if method_get path_archive" not in config
+    assert "http-request allow if method_post path_event_create" in config
+    assert "http-request allow if method_get path_events_search" in config
+    assert "http-request allow if method_post path_run" in config
+    assert "http-request allow if method_post path_confirmation_policy" in config
+    assert "http-request allow if method_post path_confirmation_response" in config
+    # The controller captures a deterministic checkpoint after the agent has
+    # stopped at WAITING/FINISHED but before the relay is switched to its
+    # checkpoint-only profile.
+    assert "http-request allow if method_get path_archive" in config
 
     capability_check = config.index("http-request deny deny_status 403 unless")
     capability_delete = config.index(

@@ -468,7 +468,19 @@ class CodingWorkerConnector:
             state.completed_steps = []
             await self._save(state, "running")
             try:
-                if resume is not None and resume.status == "terminal":
+                if resume is not None and resume.status in {
+                    "finalizing",
+                    "terminal",
+                }:
+                    if resume.status == "finalizing":
+                        reconcile = getattr(
+                            self.orchestrator, "reconcile_finalizing", None
+                        )
+                        if reconcile is None:
+                            raise OpenHandsResumeError(
+                                "finalizing OpenHands recovery is unavailable"
+                            )
+                        await reconcile(state, on_step=self._checkpointer())
                     deliver = getattr(self.orchestrator, "deliver_terminal", None)
                     if deliver is None:
                         raise OpenHandsResumeError(
@@ -686,7 +698,7 @@ class CodingWorkerConnector:
                         await self._save(state, "parked")
                         resumed.append(cp.job_id)
                         continue
-                    if resume.status == "terminal":
+                    if resume.status in {"finalizing", "terminal"}:
                         await self.execute(
                             "pr:write",
                             {
@@ -1219,10 +1231,26 @@ class GitWorkspaceOrchestrator:
             resume is None
             or resume.status != "terminal"
             or resume.workspace_artifact is None
-            or resume.workspace_artifact.artifact.identity.kind != "final"
+            or resume.workspace_artifact.artifact.identity.kind
+            not in {"final", "checkpoint"}
         ):
             raise OpenHandsResumeError("no recoverable terminal OpenHands artifact")
         artifact_ref = resume.workspace_artifact
+        await self._settle_cumulative(
+            state,
+            resume.cumulative_cost,
+            resume.cumulative_prompt_tokens,
+            resume.cumulative_completion_tokens,
+        )
+        resume.last_settled_cumulative_cost = resume.cumulative_cost
+        resume.last_settled_cumulative_prompt_tokens = (
+            resume.cumulative_prompt_tokens
+        )
+        resume.last_settled_cumulative_completion_tokens = (
+            resume.cumulative_completion_tokens
+        )
+        if on_step is not None:
+            await on_step(state)
         token = await self._credentials.resolve(self._scope)
         if self._workspace_root is not None:
             self._workspace_root.mkdir(parents=True, exist_ok=True)
@@ -1318,7 +1346,8 @@ class GitWorkspaceOrchestrator:
         store = getattr(self.worker, "artifact_store", None)
         if store is None:
             raise OpenHandsResumeError("OpenHands artifact store is unavailable")
-        paths = store.layout.for_job(state.job_id)
+        artifact_job_id = resume.broker_job_id or state.job_id
+        paths = store.layout.for_job(artifact_job_id)
         shutil.rmtree(paths.root, ignore_errors=True)
         resume.transition_to(
             "cleaned",
@@ -1336,27 +1365,43 @@ class GitWorkspaceOrchestrator:
         on_step: StepCallback | None,
     ) -> None:
         resume = state.openhands_resume
-        if resume is None or resume.status not in {"running", "resuming"}:
+        if resume is None or resume.status not in {
+            "running",
+            "resuming",
+            "parking",
+        }:
             raise OpenHandsResumeError("cannot park inactive OpenHands segment")
         if (
             paused.conversation_id != resume.conversation_id
             or paused.segment_id != resume.segment_id
         ):
             raise OpenHandsResumeError("OpenHands paused result identity mismatch")
-        resume.transition_to(
-            "parking",
-            decision_id=paused.decision_id,
-            pending_action_summary=paused.pending_action_summary,
-            pending_action_fingerprint=paused.pending_action_fingerprint,
-            workspace_artifact=paused.workspace_artifact,
-            cumulative_cost=paused.cumulative_cost,
-            cumulative_prompt_tokens=paused.cumulative_prompt_tokens,
-            cumulative_completion_tokens=paused.cumulative_completion_tokens,
-            resolved_event_id=None,
-            resolved_decision=None,
-        )
-        if on_step is not None:
-            await on_step(state)
+        if resume.status != "parking":
+            resume.transition_to(
+                "parking",
+                decision_id=paused.decision_id,
+                pending_action_summary=paused.pending_action_summary,
+                pending_action_fingerprint=paused.pending_action_fingerprint,
+                workspace_artifact=paused.workspace_artifact,
+                cumulative_cost=paused.cumulative_cost,
+                cumulative_prompt_tokens=paused.cumulative_prompt_tokens,
+                cumulative_completion_tokens=paused.cumulative_completion_tokens,
+                resolved_event_id=None,
+                resolved_decision=None,
+            )
+            if on_step is not None:
+                await on_step(state)
+        elif any(
+            (
+                resume.decision_id != paused.decision_id,
+                resume.workspace_artifact != paused.workspace_artifact,
+                resume.cumulative_cost != paused.cumulative_cost,
+                resume.cumulative_prompt_tokens != paused.cumulative_prompt_tokens,
+                resume.cumulative_completion_tokens
+                != paused.cumulative_completion_tokens,
+            )
+        ):
+            raise OpenHandsResumeError("broker parking checkpoint mismatch")
         await self._settle_cumulative(
             state,
             paused.cumulative_cost,
@@ -1397,6 +1442,42 @@ class GitWorkspaceOrchestrator:
         with store.open_verified(resume.workspace_artifact.artifact, identity) as verified:
             if verified.manifest.base_commit != resume.resolved_base_commit:
                 raise OpenHandsResumeError("OpenHands parking artifact base mismatch")
+        if resume.broker_job_id is not None:
+            adapter = getattr(self.worker, "_docker_adapter", None)
+            is_parked = getattr(adapter, "is_parked", None)
+            if not callable(is_parked) or resume.broker_generation is None:
+                raise OpenHandsResumeError("broker parking recovery is unavailable")
+            parked = await asyncio.to_thread(
+                is_parked,
+                state.job_id,
+                resume.broker_job_id,
+                resume.broker_generation,
+            )
+            if not parked:
+                recover = getattr(adapter, "recover_checkpoint", None)
+                if not callable(recover):
+                    raise OpenHandsResumeError(
+                        "broker checkpoint recovery is unavailable"
+                    )
+                await asyncio.to_thread(
+                    recover,
+                    state.job_id,
+                    resume.broker_job_id,
+                    resume.broker_generation,
+                    resume.segment_id,
+                    resume.workspace_artifact.artifact,
+                    terminal=False,
+                )
+                parked = await asyncio.to_thread(
+                    is_parked,
+                    state.job_id,
+                    resume.broker_job_id,
+                    resume.broker_generation,
+                )
+                if not parked:
+                    raise OpenHandsResumeError(
+                        "broker job has not reached parked state"
+                    )
         await self._settle_cumulative(
             state,
             resume.cumulative_cost,
@@ -1425,6 +1506,50 @@ class GitWorkspaceOrchestrator:
             cumulative_completion_tokens=resume.cumulative_completion_tokens,
         )
 
+    async def reconcile_finalizing(
+        self,
+        state: WorkerState,
+        on_step: StepCallback | None = None,
+    ) -> None:
+        """Finish a crash-interrupted broker finalization without model work."""
+        resume = state.openhands_resume
+        if (
+            resume is None
+            or resume.status != "finalizing"
+            or resume.workspace_artifact is None
+            or resume.broker_job_id is None
+            or resume.broker_generation is None
+        ):
+            raise OpenHandsResumeError("OpenHands finalizing state is incomplete")
+        store = getattr(self.worker, "artifact_store", None)
+        if store is None:
+            raise OpenHandsResumeError("OpenHands artifact store is unavailable")
+        identity = resume.workspace_artifact.artifact.identity
+        with store.open_verified(resume.workspace_artifact.artifact, identity) as verified:
+            if (
+                verified.manifest.base_commit != resume.resolved_base_commit
+                or verified.manifest.pr_title is None
+            ):
+                raise OpenHandsResumeError(
+                    "OpenHands finalizing artifact manifest mismatch"
+                )
+        adapter = getattr(self.worker, "_docker_adapter", None)
+        recover = getattr(adapter, "recover_checkpoint", None)
+        if not callable(recover):
+            raise OpenHandsResumeError("broker checkpoint recovery is unavailable")
+        await asyncio.to_thread(
+            recover,
+            state.job_id,
+            resume.broker_job_id,
+            resume.broker_generation,
+            resume.segment_id,
+            resume.workspace_artifact.artifact,
+            terminal=True,
+        )
+        resume.transition_to("terminal")
+        if on_step is not None:
+            await on_step(state)
+
     async def _record_terminal(
         self,
         state: WorkerState,
@@ -1434,7 +1559,10 @@ class GitWorkspaceOrchestrator:
         resume = state.openhands_resume
         if resume is None or edit.workspace_artifact is None:
             raise OpenHandsResumeError("terminal OpenHands edit has no final artifact")
-        if edit.workspace_artifact.artifact.identity.kind != "final":
+        if edit.workspace_artifact.artifact.identity.kind not in {
+            "final",
+            "checkpoint",
+        }:
             raise OpenHandsResumeError("terminal OpenHands artifact has wrong kind")
         await self._settle_cumulative(
             state,
@@ -1442,16 +1570,28 @@ class GitWorkspaceOrchestrator:
             edit.prompt_tokens,
             edit.completion_tokens,
         )
-        resume.transition_to(
-            "terminal",
-            workspace_artifact=edit.workspace_artifact,
-            cumulative_cost=edit.cost_usd,
-            cumulative_prompt_tokens=edit.prompt_tokens,
-            cumulative_completion_tokens=edit.completion_tokens,
-            last_settled_cumulative_cost=edit.cost_usd,
-            last_settled_cumulative_prompt_tokens=edit.prompt_tokens,
-            last_settled_cumulative_completion_tokens=edit.completion_tokens,
-        )
+        if resume.status == "terminal":
+            if (
+                resume.workspace_artifact != edit.workspace_artifact
+                or resume.cumulative_cost != edit.cost_usd
+                or resume.cumulative_prompt_tokens != edit.prompt_tokens
+                or resume.cumulative_completion_tokens != edit.completion_tokens
+            ):
+                raise OpenHandsResumeError("broker terminal checkpoint mismatch")
+            resume.last_settled_cumulative_cost = edit.cost_usd
+            resume.last_settled_cumulative_prompt_tokens = edit.prompt_tokens
+            resume.last_settled_cumulative_completion_tokens = edit.completion_tokens
+        else:
+            resume.transition_to(
+                "terminal",
+                workspace_artifact=edit.workspace_artifact,
+                cumulative_cost=edit.cost_usd,
+                cumulative_prompt_tokens=edit.prompt_tokens,
+                cumulative_completion_tokens=edit.completion_tokens,
+                last_settled_cumulative_cost=edit.cost_usd,
+                last_settled_cumulative_prompt_tokens=edit.prompt_tokens,
+                last_settled_cumulative_completion_tokens=edit.completion_tokens,
+            )
         if on_step is not None:
             await on_step(state)
 
@@ -1478,6 +1618,8 @@ class GitWorkspaceOrchestrator:
                 job_id=state.job_id,
                 approval_id=state.approval_id,
                 approver=state.requester_id,
+                broker_job_id=resume.broker_job_id,
+                broker_generation=resume.broker_generation,
                 idempotency_key=(
                     f"{state.job_id}:{resume.conversation_id}:{resume.segment_id}"
                 ),

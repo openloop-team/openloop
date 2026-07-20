@@ -167,6 +167,8 @@ class WorkerSpendLedger:
         approval_id: str | None = None,
         approver: str | None = None,
         session_id: str | None = None,
+        broker_job_id: str | None = None,
+        broker_generation: int | None = None,
     ) -> None:
         """Record one segment delta and cap against cumulative task spend.
 
@@ -205,6 +207,8 @@ class WorkerSpendLedger:
                 approval_id=approval_id,
                 approver=approver,
                 session_id=session_id,
+                broker_job_id=broker_job_id,
+                broker_generation=broker_generation,
             )
             raise WorkerBudgetExceeded(
                 f"worker job {job_id} spent ${cap_cost:.4f}, but {reason} "
@@ -223,6 +227,8 @@ class WorkerSpendLedger:
             approval_id=approval_id,
             approver=approver,
             session_id=session_id,
+            broker_job_id=broker_job_id,
+            broker_generation=broker_generation,
         )
         if over:
             raise WorkerBudgetExceeded(
@@ -252,6 +258,8 @@ class WorkerSpendLedger:
         approval_id: str | None = None,
         approver: str | None = None,
         session_id: str | None = None,
+        broker_job_id: str | None = None,
+        broker_generation: int | None = None,
     ) -> None:
         await self.usage.record(
             UsageRecord(
@@ -268,6 +276,8 @@ class WorkerSpendLedger:
                 # Attribution envelope (finding 4) — trace a worker charge to the
                 # job, the approval that authorized it, and its origin session.
                 job_id=job_id,
+                broker_job_id=broker_job_id,
+                broker_generation=broker_generation,
                 approval_id=approval_id,
                 approver=approver,
                 session_id=session_id,
