@@ -47,6 +47,7 @@ def _check_directory_descriptor(
     name: str,
     uid: int,
     mode: int = 0o700,
+    gid: int | None = None,
 ) -> None:
     try:
         info = os.fstat(descriptor)
@@ -56,11 +57,20 @@ def _check_directory_descriptor(
         raise RuntimeIdentityConflict(f"{name} is not a directory")
     if info.st_uid != uid:
         raise RuntimeIdentityConflict(f"{name} directory owner does not match")
+    if gid is not None and info.st_gid != gid:
+        raise RuntimeIdentityConflict(f"{name} directory group does not match")
     if stat.S_IMODE(info.st_mode) != mode:
         raise RuntimeIdentityConflict(f"{name} directory mode does not match")
 
 
-def _open_trusted_root(path: Path, *, name: str, uid: int) -> int:
+def _open_trusted_root(
+    path: Path,
+    *,
+    name: str,
+    uid: int,
+    mode: int = 0o700,
+    gid: int | None = None,
+) -> int:
     try:
         descriptor = os.open(path, _directory_flags())
     except FileNotFoundError as exc:
@@ -68,18 +78,34 @@ def _open_trusted_root(path: Path, *, name: str, uid: int) -> int:
     except OSError as exc:
         raise RuntimeUnavailable(f"configured {name} is not safely accessible") from exc
     try:
-        _check_directory_descriptor(descriptor, name=name, uid=uid)
+        _check_directory_descriptor(
+            descriptor,
+            name=name,
+            uid=uid,
+            mode=mode,
+            gid=gid,
+        )
     except BaseException:
         os.close(descriptor)
         raise
     return descriptor
 
 
-def _ensure_child(parent_fd: int, name: str, *, label: str, uid: int) -> int:
+def _ensure_child(
+    parent_fd: int,
+    name: str,
+    *,
+    label: str,
+    uid: int,
+    mode: int = 0o700,
+    gid: int | None = None,
+) -> int:
     if not name or name in (".", "..") or "/" in name or "\0" in name:
         raise RuntimeUnavailable(f"invalid derived {label} name")
+    created = False
     try:
-        os.mkdir(name, 0o700, dir_fd=parent_fd)
+        os.mkdir(name, mode, dir_fd=parent_fd)
+        created = True
     except FileExistsError:
         pass
     except OSError as exc:
@@ -89,7 +115,24 @@ def _ensure_child(parent_fd: int, name: str, *, label: str, uid: int) -> int:
     except OSError as exc:
         raise RuntimeIdentityConflict(f"{label} path is not a safe directory") from exc
     try:
-        _check_directory_descriptor(descriptor, name=label, uid=uid)
+        if created:
+            try:
+                if gid is not None:
+                    os.fchown(descriptor, -1, gid)
+                # mkdir applies the process umask. Restore the policy's exact
+                # mode before validating a directory created by this call.
+                os.fchmod(descriptor, mode)
+            except OSError as exc:
+                raise RuntimeUnavailable(
+                    f"cannot set {label} directory metadata"
+                ) from exc
+        _check_directory_descriptor(
+            descriptor,
+            name=label,
+            uid=uid,
+            mode=mode,
+            gid=gid,
+        )
     except BaseException:
         os.close(descriptor)
         raise
@@ -149,9 +192,17 @@ def prepare_generation_filesystem(
     compiled: CompiledOpenHandsRelay,
     *,
     uid: int,
+    shared_gid: int | None = None,
 ) -> None:
     """Create or validate the exact generation directory and relay artifacts."""
-    runtime_fd = _open_trusted_root(paths.root.parents[1], name="runtime root", uid=uid)
+    shared_mode = 0o750 if shared_gid is not None else 0o700
+    runtime_fd = _open_trusted_root(
+        paths.root.parents[1],
+        name="runtime root",
+        uid=uid,
+        mode=shared_mode,
+        gid=shared_gid,
+    )
     state_fd = _open_trusted_root(paths.state.parents[1], name="state root", uid=uid)
     opened: list[int] = [runtime_fd, state_fd]
     try:
@@ -160,10 +211,17 @@ def prepare_generation_filesystem(
             paths.root.parent.name,
             label="runtime job",
             uid=uid,
+            mode=shared_mode,
+            gid=shared_gid,
         )
         opened.append(job_fd)
         generation_fd = _ensure_child(
-            job_fd, paths.root.name, label="runtime generation", uid=uid
+            job_fd,
+            paths.root.name,
+            label="runtime generation",
+            uid=uid,
+            mode=shared_mode,
+            gid=shared_gid,
         )
         opened.append(generation_fd)
         artifact_fd = _ensure_child(
@@ -171,7 +229,12 @@ def prepare_generation_filesystem(
         )
         opened.append(artifact_fd)
         socket_fd = _ensure_child(
-            generation_fd, paths.socket.name, label="relay socket", uid=uid
+            generation_fd,
+            paths.socket.name,
+            label="relay socket",
+            uid=uid,
+            mode=shared_mode,
+            gid=shared_gid,
         )
         opened.append(socket_fd)
         workspace_fd = _ensure_child(
@@ -251,15 +314,29 @@ def generation_filesystem_observation(
     return artifacts_ready, workspace_ready
 
 
-def harden_relay_socket(paths: GenerationPaths, *, uid: int) -> None:
-    """Validate the relay-created UDS and set its final owner-only mode.
+def harden_relay_socket(
+    paths: GenerationPaths,
+    *,
+    uid: int,
+    shared_gid: int | None = None,
+) -> None:
+    """Validate the relay-created UDS and set its final access mode.
 
     HAProxy cannot change metadata on a Docker Desktop bind-mounted Unix socket.
-    The socket directory is already an owner-only broker directory and is
-    mounted only into the fixed relay. Once HAProxy binds, the trusted host
-    runtime performs the metadata transition before health/access is exposed.
+    The socket directory is a non-writable broker directory, optionally
+    group-traversable for the app, and is mounted only into the fixed relay.
+    Once HAProxy binds, the trusted host runtime performs the metadata
+    transition before health/access is exposed.
     """
-    directory = _open_trusted_root(paths.socket, name="relay socket", uid=uid)
+    shared_mode = 0o750 if shared_gid is not None else 0o700
+    socket_mode = 0o660 if shared_gid is not None else 0o600
+    directory = _open_trusted_root(
+        paths.socket,
+        name="relay socket",
+        uid=uid,
+        mode=shared_mode,
+        gid=shared_gid,
+    )
     try:
         stop = time.monotonic() + 5.0
         entries = _entries(directory, label="relay socket")
@@ -275,14 +352,28 @@ def harden_relay_socket(paths: GenerationPaths, *, uid: int) -> None:
         if not stat.S_ISSOCK(before.st_mode) or before.st_uid != uid:
             raise RuntimeIdentityConflict("relay socket identity does not match")
         try:
-            os.chmod("agent.sock", 0o600, dir_fd=directory, follow_symlinks=False)
+            if shared_gid is not None:
+                os.chown(
+                    "agent.sock",
+                    -1,
+                    shared_gid,
+                    dir_fd=directory,
+                    follow_symlinks=False,
+                )
+            os.chmod(
+                "agent.sock",
+                socket_mode,
+                dir_fd=directory,
+                follow_symlinks=False,
+            )
             after = os.stat("agent.sock", dir_fd=directory, follow_symlinks=False)
         except OSError as exc:
             raise RuntimeUnavailable("relay socket mode could not be hardened") from exc
         if (
             not stat.S_ISSOCK(after.st_mode)
             or after.st_uid != uid
-            or stat.S_IMODE(after.st_mode) != 0o600
+            or (shared_gid is not None and after.st_gid != shared_gid)
+            or stat.S_IMODE(after.st_mode) != socket_mode
             or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
         ):
             raise RuntimeIdentityConflict("relay socket metadata does not match")

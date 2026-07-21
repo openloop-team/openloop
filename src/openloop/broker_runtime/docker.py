@@ -362,7 +362,11 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
         self._health_checker = health_checker or self._default_health_check
         self._workspace_materializer = workspace_materializer
         self._socket_hardener = socket_hardener or (
-            lambda paths, uid: harden_relay_socket(paths, uid=uid)
+            lambda paths, uid: harden_relay_socket(
+                paths,
+                uid=uid,
+                shared_gid=self.config.shared_gid,
+            )
         )
         self._probe_lock = asyncio.Lock()
         self._probe_complete = False
@@ -935,6 +939,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
                         policy.paths,
                         policy.compiled_relay,
                         uid=self.config.uid,
+                        shared_gid=self.config.shared_gid,
                     )
                 except RuntimeDriverError:
                     raise

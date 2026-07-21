@@ -20,6 +20,7 @@ from pydantic import SecretStr
 
 from openloop.broker_control.local_receipts import LocalCheckpointReceiptStore
 from openloop.broker_control.receipts import CheckpointReceiptIssuer
+from openloop.broker_runtime import DockerOpenHandsRuntimeDriver
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 from openloop.config import Settings
 from openloop.tools.openhands_artifacts import WorkspaceArtifactStore
@@ -299,6 +300,18 @@ async def test_external_client_round_trips_against_built_service(tmp_path, sock_
         assert replay.ticket.job_id == created.ticket.job_id
 
     assert not (sock_dir / "control.sock").exists()
+
+
+async def test_external_service_threads_shared_gid_into_docker_runtime(
+    tmp_path, sock_dir
+):
+    settings = _external_settings(tmp_path, sock_dir)
+
+    async with AsyncExitStack() as stack:
+        service = await build_broker_service(settings, stack)
+
+    assert isinstance(service.runtime, DockerOpenHandsRuntimeDriver)
+    assert service.runtime.config.shared_gid == os.getgid()
 
 
 @pytest.mark.parametrize(

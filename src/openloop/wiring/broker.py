@@ -467,6 +467,7 @@ async def build_broker_service(
     runtime_config = DockerRuntimeConfig(
         runtime_root=Path(settings.broker_runtime_root),
         state_root=Path(settings.broker_state_root),
+        shared_gid=settings.broker_shared_data_gid,
         maximum_lifetime_seconds=settings.broker_generation_deadline_seconds,
     )
 

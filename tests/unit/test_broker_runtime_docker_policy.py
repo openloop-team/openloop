@@ -89,6 +89,16 @@ def test_config_requires_disjoint_trusted_absolute_roots(tmp_path):
         DockerRuntimeConfig(tmp_path / "run,time", tmp_path / "state")
 
 
+@pytest.mark.parametrize("shared_gid", [True, -1, 2**31])
+def test_config_rejects_invalid_shared_gid(tmp_path, shared_gid):
+    with pytest.raises(ValueError, match="shared_gid is out of range"):
+        _config(tmp_path, shared_gid=shared_gid)
+
+
+def test_config_accepts_numeric_shared_gid(tmp_path):
+    assert _config(tmp_path, shared_gid=4321).shared_gid == 4321
+
+
 def test_policy_derives_names_paths_and_fixed_running_relay(tmp_path):
     policy = _policy(tmp_path)
     stem = "ol-oh-22222222222242228222222222222222-g7"

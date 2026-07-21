@@ -57,10 +57,13 @@ def _spec():
     )
 
 
-def _policy(tmp_path: Path):
+def _policy(tmp_path: Path, *, shared_gid: int | None = None):
     runtime = tmp_path / "r"
     state = tmp_path / "s"
-    runtime.mkdir(mode=0o700)
+    runtime.mkdir(mode=0o750 if shared_gid is not None else 0o700)
+    if shared_gid is not None:
+        os.chown(runtime, -1, shared_gid)
+        runtime.chmod(0o750)
     state.mkdir(mode=0o700)
     config = DockerRuntimeConfig(
         runtime,
@@ -68,6 +71,7 @@ def _policy(tmp_path: Path):
         platform="linux/arm64",
         uid=os.getuid(),
         gid=os.getgid(),
+        shared_gid=shared_gid,
     )
     return DockerGenerationPolicy.build(config, _spec())
 
@@ -111,6 +115,113 @@ def test_harden_relay_socket_validates_identity_and_sets_owner_only_mode(short_r
         harden_relay_socket(policy.paths, uid=os.getuid())
 
         assert stat.S_IMODE(policy.paths.host_socket.stat().st_mode) == 0o600
+    finally:
+        listener.close()
+
+
+def test_prepare_shared_relay_chain_keeps_private_leaves_owner_only(short_root):
+    policy = _policy(short_root, shared_gid=os.getgid())
+
+    prepare_generation_filesystem(
+        policy.paths,
+        policy.compiled_relay,
+        uid=os.getuid(),
+        shared_gid=policy.config.shared_gid,
+    )
+
+    shared_chain = (
+        policy.config.runtime_root,
+        policy.paths.root.parent,
+        policy.paths.root,
+        policy.paths.socket,
+    )
+    for path in shared_chain:
+        info = path.stat()
+        assert stat.S_IMODE(info.st_mode) == 0o750
+        assert info.st_gid == os.getgid()
+
+    private_leaves = (
+        policy.paths.artifacts,
+        policy.paths.workspace,
+        policy.config.state_root,
+        policy.paths.state.parent,
+        policy.paths.state,
+    )
+    for path in private_leaves:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("component", ["runtime", "job", "generation", "socket"])
+def test_prepare_shared_relay_chain_rejects_owner_only_component(
+    short_root, component
+):
+    policy = _policy(short_root, shared_gid=os.getgid())
+    prepare_generation_filesystem(
+        policy.paths,
+        policy.compiled_relay,
+        uid=os.getuid(),
+        shared_gid=policy.config.shared_gid,
+    )
+    selected = {
+        "runtime": policy.config.runtime_root,
+        "job": policy.paths.root.parent,
+        "generation": policy.paths.root,
+        "socket": policy.paths.socket,
+    }[component]
+    selected.chmod(0o700)
+
+    with pytest.raises(RuntimeIdentityConflict, match="mode does not match"):
+        prepare_generation_filesystem(
+            policy.paths,
+            policy.compiled_relay,
+            uid=os.getuid(),
+            shared_gid=policy.config.shared_gid,
+        )
+
+
+def test_prepare_shared_relay_chain_rejects_wrong_gid(short_root):
+    policy = _policy(short_root, shared_gid=os.getgid())
+
+    with pytest.raises(RuntimeIdentityConflict, match="group does not match"):
+        prepare_generation_filesystem(
+            policy.paths,
+            policy.compiled_relay,
+            uid=os.getuid(),
+            shared_gid=os.getgid() + 1,
+        )
+
+
+def test_prepare_owner_only_rejects_group_traversable_runtime_root(short_root):
+    policy = _policy(short_root)
+    policy.config.runtime_root.chmod(0o750)
+
+    with pytest.raises(RuntimeIdentityConflict, match="mode does not match"):
+        prepare_generation_filesystem(
+            policy.paths, policy.compiled_relay, uid=os.getuid()
+        )
+
+
+def test_harden_relay_socket_sets_shared_group_and_mode(short_root):
+    policy = _policy(short_root, shared_gid=os.getgid())
+    prepare_generation_filesystem(
+        policy.paths,
+        policy.compiled_relay,
+        uid=os.getuid(),
+        shared_gid=policy.config.shared_gid,
+    )
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(os.fspath(policy.paths.host_socket))
+
+        harden_relay_socket(
+            policy.paths,
+            uid=os.getuid(),
+            shared_gid=policy.config.shared_gid,
+        )
+
+        info = policy.paths.host_socket.stat()
+        assert stat.S_IMODE(info.st_mode) == 0o660
+        assert info.st_gid == os.getgid()
     finally:
         listener.close()
 

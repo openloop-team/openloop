@@ -124,6 +124,7 @@ class DockerRuntimeConfig:
     platform: str = ""
     uid: int = -1
     gid: int = -1
+    shared_gid: int | None = None
     maximum_lifetime_seconds: int = 86_400
     kill_after_seconds: int = 10
     reconciliation_grace_seconds: int = 30
@@ -162,6 +163,15 @@ class DockerRuntimeConfig:
             raise ValueError("gid is out of range")
         object.__setattr__(self, "uid", selected_uid)
         object.__setattr__(self, "gid", selected_gid)
+        if (
+            self.shared_gid is not None
+            and (
+                isinstance(self.shared_gid, bool)
+                or not isinstance(self.shared_gid, int)
+                or not 0 <= self.shared_gid <= 2**31 - 1
+            )
+        ):
+            raise ValueError("shared_gid is out of range")
         _bounded_positive(
             "maximum_lifetime_seconds",
             self.maximum_lifetime_seconds,
