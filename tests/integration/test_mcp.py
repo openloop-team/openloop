@@ -1,5 +1,7 @@
 """Tests for the MCP connector — discovery, policy fit, gateway, and loop."""
 
+from uuid import uuid4
+
 from openloop.agents.schema import Agent
 from openloop.models.gateway import ModelResponse
 from openloop.runtime import Runtime, Task
@@ -43,7 +45,11 @@ def _mcp_agent(permissions):
         {
             "apiVersion": "openloop.team/v1alpha1",
             "kind": "Agent",
-            "metadata": {"name": "ci", "workspace": "acme"},
+            "metadata": {
+                "name": "ci",
+                "workspace": "acme",
+                "id": uuid4().hex,
+            },
             "spec": {
                 "model_policy": {"default": "openai/gpt-4o-mini"},
                 "tools": [

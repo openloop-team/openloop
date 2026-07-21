@@ -24,8 +24,13 @@ class BudgetDecision:
 
 
 def budget_scope_key(agent: Agent) -> str:
-    """Budgets are per-agent (per-channel scoping can extend this later)."""
-    return f"ws:{agent.metadata.workspace}:agent:{agent.metadata.name}"
+    """Budgets are per-agent (per-channel scoping can extend this later).
+
+    Keyed on the durable id — the identity of record — so billing/audit
+    lineage survives renames and workspace moves, and a delete-and-recreate
+    under the same name is a different principal with a fresh scope.
+    """
+    return f"agent:{agent.metadata.id}"
 
 
 async def check_budget(agent: Agent, usage: UsageStore) -> BudgetDecision:

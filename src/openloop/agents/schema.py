@@ -94,6 +94,11 @@ class AgentSpec(BaseModel):
 class AgentMetadata(BaseModel):
     name: str
     workspace: str
+    # The durable identity of record (billing/audit scope + worker-spend reuse
+    # guard); the name stays the human handle. Minted by `openloop agents id
+    # issue`, never hand-authored. Required with no default — a default would
+    # hand an id-less file a fresh random id every load (unstable identity).
+    id: str = Field(pattern=r"^[0-9a-f]{32}$")
 
 
 class Agent(BaseModel):

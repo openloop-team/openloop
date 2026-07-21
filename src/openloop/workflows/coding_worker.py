@@ -88,8 +88,11 @@ def build_coding_worker_workflow(
                 base=s.get("base", "main"),
                 branch=_branch_for(s["job_id"]),
                 # The invoking agent, stamped into the approval args by the
-                # gateway (Phase 5) — the ledger attributes spend to it.
+                # gateway (Phase 5) — the ledger attributes spend to it. The
+                # durable id pinned beside it is what the ledger resolves
+                # first (rename-safe, recreate-fail-closed).
                 agent=s.get("agent"),
+                agent_id=s.get("agent_id"),
                 requester_id=(
                     ((s.get("events") or {}).get(APPROVAL_EVENT) or {})
                     .get("approver", "")

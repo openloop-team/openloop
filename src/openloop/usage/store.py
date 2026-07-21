@@ -11,7 +11,7 @@ from typing import Protocol, runtime_checkable
 class UsageRecord:
     """One unit of spend — the audit trail's row."""
 
-    scope_key: str  # budget scope, e.g. "ws:acme:agent:dev-platform"
+    scope_key: str  # budget scope, e.g. "agent:<32-hex durable agent id>"
     workspace: str
     agent: str
     model: str

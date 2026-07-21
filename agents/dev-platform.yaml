@@ -8,6 +8,9 @@ kind: Agent
 metadata:
   name: openloop
   workspace: openloop-team
+  # Durable identity of record (billing scope + spend guard key), issued by
+  # `openloop agents id issue` — never hand-edit or copy to another agent.
+  id: 539449f20b164402bb9e48df615c95dc
 
 spec:
   # Surfaces where this team agent is reachable

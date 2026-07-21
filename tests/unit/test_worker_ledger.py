@@ -8,13 +8,7 @@ to the boot-time default only when no identity was carried.
 
 import pytest
 
-from openloop.agents.schema import (
-    Agent,
-    AgentMetadata,
-    AgentSpec,
-    Budget,
-    ModelPolicy,
-)
+from openloop.agents.schema import Agent, Budget
 from openloop.credentials import EnvCredentialResolver
 from openloop.tools.coding_worker import (
     GitWorkspaceOrchestrator,
@@ -27,6 +21,19 @@ from openloop.usage import (
     WorkerSpendLedger,
 )
 from openloop.testing import FakeCodingWorker
+from tests.support.agents import make_agent
+
+# Deterministic identities, so scope keys stay expressible in assertions and
+# separate `_agent()` calls for the same name share one principal — the same
+# way repeated loads of one YAML file do.
+IDS = {
+    "dev-platform": "6c40afe816924a3b8f57e0f52d2a8f10",
+    "docs-bot": "b1f2a7c92f3d4f45a51f2f8f31c9dd42",
+}
+
+
+def _scope(name="dev-platform") -> str:
+    return f"agent:{IDS[name]}"
 
 
 def _agent(
@@ -37,15 +44,14 @@ def _agent(
     per_task_usd=None,
     on_exceeded="block",
 ) -> Agent:
-    return Agent(
-        metadata=AgentMetadata(name=name, workspace=workspace),
-        spec=AgentSpec(
-            model_policy=ModelPolicy(default="m"),
-            budget=Budget(
-                monthly_usd=monthly_usd,
-                per_task_usd=per_task_usd,
-                on_exceeded=on_exceeded,
-            ),
+    return make_agent(
+        name,
+        workspace,
+        id=IDS.get(name),
+        budget=Budget(
+            monthly_usd=monthly_usd,
+            per_task_usd=per_task_usd,
+            on_exceeded=on_exceeded,
         ),
     )
 
@@ -67,10 +73,10 @@ def _ledger(
     )
 
 
-def _state(job_id="j1", agent=None):
+def _state(job_id="j1", agent=None, agent_id=None):
     return WorkerState(
         job_id=job_id, repo="a/b", instruction="x", base="main",
-        branch=f"openloop/job-{job_id}", agent=agent,
+        branch=f"openloop/job-{job_id}", agent=agent, agent_id=agent_id,
     )
 
 
@@ -92,14 +98,14 @@ async def test_settle_records_spend_under_the_agent_scope():
     )
 
     (record,) = usage.records
-    assert record.scope_key == "ws:acme:agent:dev-platform"
+    assert record.scope_key == _scope()
     assert record.task_kind == "coding_worker"
     assert record.cost_usd == 0.12
     assert record.prompt_tokens == 100
     assert record.completion_tokens == 50
     assert record.outcome == "ok"
     # Worker spend lands in the same monthly total /usage reads.
-    assert await usage.monthly_total("ws:acme:agent:dev-platform") == 0.12
+    assert await usage.monthly_total(_scope()) == 0.12
 
 
 async def test_settle_records_the_attribution_envelope():
@@ -168,7 +174,7 @@ async def test_settle_with_idempotency_key_records_once():
 
     assert len(usage.records) == 1
     assert usage.records[0].idempotency_key == "analysis-attempt-1"
-    assert await usage.monthly_total("ws:acme:agent:dev-platform") == 0.12
+    assert await usage.monthly_total(_scope()) == 0.12
 
 
 async def test_segment_settle_records_delta_but_caps_cumulative_spend():
@@ -195,7 +201,7 @@ async def test_segment_settle_records_delta_but_caps_cumulative_spend():
 
     assert [record.cost_usd for record in usage.records] == [0.30, 0.25]
     assert usage.records[-1].outcome == "over_task_budget"
-    assert await usage.monthly_total("ws:acme:agent:dev-platform") == 0.55
+    assert await usage.monthly_total(_scope()) == 0.55
 
 
 async def test_settle_attributes_to_the_invoking_agent():
@@ -212,7 +218,7 @@ async def test_settle_attributes_to_the_invoking_agent():
 
     (record,) = usage.records
     assert record.agent == "docs-bot"
-    assert record.scope_key == "ws:acme:agent:docs-bot"
+    assert record.scope_key == _scope("docs-bot")
     assert record.outcome == "ok"
 
 
@@ -291,14 +297,14 @@ async def test_record_failure_propagates_fail_closed():
 async def test_check_monthly_passes_under_budget():
     usage = InMemoryUsageStore()
     ledger = _ledger(usage, monthly_usd=50.0)
-    await _spent(usage, "ws:acme:agent:dev-platform", 49.0)
+    await _spent(usage, _scope(), 49.0)
     await ledger.check_monthly("dev-platform", job_id="j1")  # no raise
 
 
 async def test_check_monthly_blocks_and_records_the_refusal():
     usage = InMemoryUsageStore()
     ledger = _ledger(usage, monthly_usd=50.0, on_exceeded="block")
-    await _spent(usage, "ws:acme:agent:dev-platform", 50.0)
+    await _spent(usage, _scope(), 50.0)
 
     with pytest.raises(WorkerBudgetExceeded, match="j1"):
         await ledger.check_monthly("dev-platform", job_id="j1")
@@ -315,7 +321,7 @@ async def test_check_monthly_refusal_carries_attribution():
     # attribution envelope (finding 4) or the trace is lost permanently.
     usage = InMemoryUsageStore()
     ledger = _ledger(usage, monthly_usd=50.0, on_exceeded="block")
-    await _spent(usage, "ws:acme:agent:dev-platform", 50.0)
+    await _spent(usage, _scope(), 50.0)
 
     with pytest.raises(WorkerBudgetExceeded):
         await ledger.check_monthly(
@@ -332,7 +338,7 @@ async def test_check_monthly_warn_mode_proceeds():
     # Budget's block|warn semantics are preserved: warn logs and proceeds.
     usage = InMemoryUsageStore()
     ledger = _ledger(usage, monthly_usd=50.0, on_exceeded="warn")
-    await _spent(usage, "ws:acme:agent:dev-platform", 50.0)
+    await _spent(usage, _scope(), 50.0)
     await ledger.check_monthly("dev-platform", job_id="j1")  # no raise
 
 
@@ -376,12 +382,86 @@ async def test_check_monthly_gates_on_the_invoking_agents_budget():
         "docs-bot": _agent("docs-bot", monthly_usd=1.0),
     }
     ledger = _ledger(usage, agents)
-    await _spent(usage, "ws:acme:agent:docs-bot", 1.0)
+    await _spent(usage, _scope("docs-bot"), 1.0)
 
     with pytest.raises(WorkerBudgetExceeded, match="docs-bot"):
         await ledger.check_monthly("docs-bot", job_id="j1")
     # The other agent's budget is untouched by docs-bot's exhaustion.
     await ledger.check_monthly("dev-platform", job_id="j2")
+
+
+# --- resolve-by-id: the reuse guard (agent stable identity) ---
+
+
+async def test_settle_resolves_by_pinned_id_even_across_a_rename():
+    # The id is the identity of record: the pinned id resolves although the
+    # name stamped at approval no longer exists in the live map.
+    usage = InMemoryUsageStore()
+    agents = {"docs-bot": _agent("docs-bot", per_task_usd=5.0)}
+    ledger = _ledger(usage, agents, default="docs-bot")
+
+    await ledger.settle(
+        agent="old-name", agent_id=IDS["docs-bot"], job_id="j1", cost_usd=0.75
+    )
+
+    (record,) = usage.records
+    assert record.agent == "docs-bot"
+    assert record.scope_key == _scope("docs-bot")
+    assert record.outcome == "ok"
+
+
+async def test_settle_unresolvable_pinned_id_fails_closed_without_record():
+    # Delete-and-recreate under the same name: the *name* still resolves, but
+    # to a different principal — the pinned identity is gone, so no settle.
+    usage = InMemoryUsageStore()
+    ledger = _ledger(usage, per_task_usd=0.50)
+
+    with pytest.raises(WorkerBudgetExceeded, match="unknown agent identity"):
+        await ledger.settle(
+            agent="dev-platform", agent_id="f" * 32, job_id="j1", cost_usd=0.10
+        )
+
+    assert usage.records == []
+
+
+async def test_check_monthly_gates_on_the_pinned_ids_budget():
+    usage = InMemoryUsageStore()
+    agents = {"docs-bot": _agent("docs-bot", monthly_usd=1.0)}
+    ledger = _ledger(usage, agents, default="docs-bot")
+    await _spent(usage, _scope("docs-bot"), 1.0)
+
+    with pytest.raises(WorkerBudgetExceeded, match="docs-bot"):
+        await ledger.check_monthly(
+            "old-name", agent_id=IDS["docs-bot"], job_id="j1"
+        )
+
+
+async def test_check_monthly_unresolvable_pinned_id_fails_closed_without_record():
+    usage = InMemoryUsageStore()
+    ledger = _ledger(usage, monthly_usd=50.0)
+
+    with pytest.raises(WorkerBudgetExceeded, match="unknown agent identity"):
+        await ledger.check_monthly(
+            "dev-platform", agent_id="f" * 32, job_id="j1"
+        )
+
+    assert usage.records == []
+
+
+async def test_per_task_usd_for_resolves_by_pinned_id_first():
+    agents = {
+        "dev-platform": _agent(per_task_usd=0.50),
+        "docs-bot": _agent("docs-bot", per_task_usd=5.0),
+    }
+    ledger = _ledger(agents=agents)
+
+    # The pinned id wins over a (stale) name.
+    assert ledger.per_task_usd_for("dev-platform", IDS["docs-bot"]) == 5.0
+    with pytest.raises(WorkerBudgetExceeded, match="unknown agent identity"):
+        ledger.per_task_usd_for("dev-platform", "f" * 32)
+    # No pinned id → the legacy name ladder, unchanged.
+    assert ledger.per_task_usd_for("dev-platform") == 0.50
+    assert ledger.per_task_usd_for(None) == 0.50
 
 
 # --- the orchestrator wiring: gates around the attempt boundary ---
@@ -424,7 +504,7 @@ async def test_orchestrator_monthly_gate_refuses_before_any_work(monkeypatch):
     command runs at all, and the refusal is recorded."""
     usage = InMemoryUsageStore()
     ledger = _ledger(usage, monthly_usd=50.0)
-    await _spent(usage, "ws:acme:agent:dev-platform", 50.0)
+    await _spent(usage, _scope(), 50.0)
     orch, commands = _orchestrator(monkeypatch, ledger)
 
     with pytest.raises(WorkerBudgetExceeded):
@@ -458,6 +538,36 @@ async def test_orchestrator_unknown_state_agent_refuses_before_any_work(monkeypa
 
     assert commands == []  # not even a clone
     assert usage.records == []  # nothing attributed to the default owner
+
+
+async def test_orchestrator_unresolvable_pinned_id_refuses_before_any_work(
+    monkeypatch,
+):
+    """A stale approved job whose pinned identity was deleted fails closed at
+    the gate — even when the stamped *name* still resolves (recreated agent)."""
+    usage = InMemoryUsageStore()
+    orch, commands = _orchestrator(monkeypatch, _ledger(usage, per_task_usd=0.50))
+
+    with pytest.raises(WorkerBudgetExceeded, match="unknown agent identity"):
+        await orch.run_attempt(_state(agent="dev-platform", agent_id="f" * 32))
+
+    assert commands == []  # not even a clone
+    assert usage.records == []  # nothing attributed to the recreated principal
+
+
+async def test_orchestrator_attributes_by_pinned_id_across_a_rename(monkeypatch):
+    usage = InMemoryUsageStore()
+    agents = {"docs-bot": _agent("docs-bot", per_task_usd=5.0)}
+    orch, commands = _orchestrator(
+        monkeypatch, _ledger(usage, agents, default="docs-bot"), cost_usd=0.75
+    )
+
+    await orch.run_attempt(_state(agent="old-name", agent_id=IDS["docs-bot"]))
+
+    # The rename neither failed the in-flight job nor split its billing.
+    assert usage.records[0].agent == "docs-bot"
+    assert usage.records[0].scope_key == _scope("docs-bot")
+    assert any("push" in cmd for cmd in commands)
 
 
 async def test_orchestrator_attributes_spend_to_state_agent(monkeypatch):

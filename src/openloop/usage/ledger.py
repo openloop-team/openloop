@@ -35,7 +35,7 @@ does not get to push.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from openloop.agents.schema import Agent
 from openloop.usage.budget import budget_scope_key, check_budget
@@ -59,9 +59,12 @@ class WorkerSpendLedger:
     ``agents`` is the live agent-config map; ``default_agent`` is the
     attribution fallback for attempts that carry **no** agent identity
     (approvals or checkpoints created before Phase 5) — the boot-time owner
-    heuristic Phase 4 used for everything. An *asserted* name missing from
-    the map (agent removed or renamed since approval) fails closed instead:
-    it is never attributed to the default.
+    heuristic Phase 4 used for everything. An *asserted* identity that no
+    longer resolves fails closed instead: it is never attributed to the
+    default. Resolution is a precedence ladder — the durable ``agent_id``
+    pinned at approval first (rename-safe; a delete-and-recreate under the
+    same name is a different principal and is caught), then the legacy name,
+    then the default.
 
     ``require_per_task_cap`` is set for agentic worker backends whose boot gate
     requires a cap. It keeps stale approved jobs fail-closed if config drifts
@@ -76,8 +79,31 @@ class WorkerSpendLedger:
     # Keep the coding-worker default for compatibility, while allowing another
     # worker type to remain distinguishable in the shared usage/audit trail.
     task_kind: str = WORKER_TASK_KIND
+    # Id-keyed view of ``agents`` (the identity of record), built once — the
+    # map is boot-time config, not a live registry.
+    _agents_by_id: dict[str, Agent] = field(init=False, repr=False)
 
-    def _agent_for(self, agent_name: str | None) -> Agent:
+    def __post_init__(self) -> None:
+        self._agents_by_id = {
+            agent.metadata.id: agent for agent in self.agents.values()
+        }
+
+    def _agent_for(
+        self, agent_name: str | None, agent_id: str | None = None
+    ) -> Agent:
+        if agent_id is not None:
+            agent = self._agents_by_id.get(agent_id)
+            if agent is None:
+                # The pinned identity is gone. Even if the *name* still
+                # resolves, it may be a recreated agent — a different
+                # principal that must not inherit the approval, the caps, or
+                # the attribution.
+                raise WorkerBudgetExceeded(
+                    f"worker attempt asserts unknown agent identity "
+                    f"{agent_id!r} — failing closed (no attempt, no push, "
+                    "no PR)"
+                )
+            return agent
         if agent_name is None:
             # Only an identity-less record (pre-Phase 5 approval/checkpoint)
             # may fall back to the boot-time owner.
@@ -93,9 +119,11 @@ class WorkerSpendLedger:
             )
         return agent
 
-    def per_task_usd_for(self, agent_name: str | None) -> float | None:
+    def per_task_usd_for(
+        self, agent_name: str | None, agent_id: str | None = None
+    ) -> float | None:
         """The per-task cap the ledger would enforce for this agent."""
-        return self._agent_for(agent_name).spec.budget.per_task_usd
+        return self._agent_for(agent_name, agent_id).spec.budget.per_task_usd
 
     def _missing_cap_reason(self, agent: Agent) -> str | None:
         if (
@@ -112,6 +140,7 @@ class WorkerSpendLedger:
         self,
         agent_name: str | None,
         *,
+        agent_id: str | None = None,
         job_id: str,
         approval_id: str | None = None,
         approver: str | None = None,
@@ -128,7 +157,7 @@ class WorkerSpendLedger:
         audit row that attempt ever writes (it then raises), so dropping the
         approval/approver/session here would lose them permanently.
         """
-        agent = self._agent_for(agent_name)
+        agent = self._agent_for(agent_name, agent_id)
         envelope = dict(
             job_id=job_id,
             approval_id=approval_id,
@@ -155,6 +184,7 @@ class WorkerSpendLedger:
         self,
         *,
         agent: str | None = None,
+        agent_id: str | None = None,
         job_id: str,
         idempotency_key: str | None = None,
         cost_usd: float | None = None,
@@ -193,7 +223,7 @@ class WorkerSpendLedger:
         cap_cost = cap_cost_usd if cap_cost_usd is not None else record_cost
         if min(record_cost, record_prompt, record_completion, cap_cost) < 0:
             raise ValueError("worker spend settlement cannot be negative")
-        attributed = self._agent_for(agent)
+        attributed = self._agent_for(agent, agent_id)
         per_task_usd = attributed.spec.budget.per_task_usd
         if reason := self._missing_cap_reason(attributed):
             await self._record(

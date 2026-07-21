@@ -1,20 +1,12 @@
 """Unit tests for the Phase 5 per-scope throughput limits."""
 
-from openloop.agents.schema import (
-    Agent,
-    AgentMetadata,
-    AgentSpec,
-    Limits,
-    ModelPolicy,
-)
+from openloop.agents.schema import Agent, Limits
 from openloop.usage import InMemoryTaskLimiter, limit_scope_key
+from tests.support.agents import make_agent
 
 
 def _agent(name="dev-platform", workspace="acme") -> Agent:
-    return Agent(
-        metadata=AgentMetadata(name=name, workspace=workspace),
-        spec=AgentSpec(model_policy=ModelPolicy(default="m")),
-    )
+    return make_agent(name, workspace)
 
 
 class FakeClock:

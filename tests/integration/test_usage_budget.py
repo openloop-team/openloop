@@ -14,12 +14,37 @@ from openloop.usage import (
     check_budget,
 )
 from openloop.testing import FakeGateway, in_memory_workflow_engine
+from tests.support.agents import make_agent
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 
 def _agent() -> Agent:
     return load_agent(AGENT_YAML)  # budget: monthly_usd=50, per_task=0.5, block
+
+
+def test_scope_key_is_the_id_alone():
+    # The id is globally unique, so workspace/name would only re-split billing
+    # history when edited.
+    agent = _agent()
+    assert budget_scope_key(agent) == f"agent:{agent.metadata.id}"
+
+
+def test_scope_key_distinguishes_same_spec_different_identity():
+    # A delete-and-recreate under the same name (even a byte-identical spec)
+    # gets a fresh minted id — a different principal, a different scope.
+    assert budget_scope_key(make_agent("twin", "acme")) != budget_scope_key(
+        make_agent("twin", "acme")
+    )
+
+
+def test_scope_key_survives_a_rename():
+    # Rename/billing continuity: the scope follows the id, not the handle.
+    agent = _agent()
+    before = budget_scope_key(agent)
+    agent.metadata.name = "renamed"
+    agent.metadata.workspace = "moved"
+    assert budget_scope_key(agent) == before
 
 
 async def test_monthly_total_sums_current_month_only():

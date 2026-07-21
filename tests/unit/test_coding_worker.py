@@ -63,23 +63,37 @@ def test_prepare_args_stamps_the_invoking_agent():
 
     conn = _connector()
     agent = load_agent(AGENT_YAML)
-    # A model-supplied "agent" arg must never redirect spend attribution —
-    # the gateway-passed identity wins unconditionally.
+    # A model-supplied "agent"/"agent_id" arg must never redirect spend
+    # attribution — the gateway-passed identity wins unconditionally.
     args = conn.prepare_args(
         "pr:write",
-        {"repo": "a/b", "instruction": "do x", "agent": "spoofed"},
+        {
+            "repo": "a/b",
+            "instruction": "do x",
+            "agent": "spoofed",
+            "agent_id": "f" * 32,
+        },
         agent,
     )
     assert args["agent"] == "dev-platform"
+    assert args["agent_id"] == agent.metadata.id
 
 
 def test_worker_state_roundtrips_agent_and_tolerates_old_checkpoints():
     state = _state()
     state.agent = "docs-bot"
-    assert WorkerState.from_dict(state.to_dict()).agent == "docs-bot"
-    # A pre-Phase 5 checkpoint has no agent key: attribution falls back.
-    old = {k: v for k, v in state.to_dict().items() if k != "agent"}
+    state.agent_id = "b1f2a7c92f3d4f45a51f2f8f31c9dd42"
+    restored = WorkerState.from_dict(state.to_dict())
+    assert restored.agent == "docs-bot"
+    assert restored.agent_id == "b1f2a7c92f3d4f45a51f2f8f31c9dd42"
+    # A pre-Phase 5 checkpoint has no agent keys: attribution falls back.
+    old = {
+        k: v
+        for k, v in state.to_dict().items()
+        if k not in {"agent", "agent_id"}
+    }
     assert WorkerState.from_dict(old).agent is None
+    assert WorkerState.from_dict(old).agent_id is None
 
 
 async def test_execute_runs_attempt_then_opens_draft_pr():

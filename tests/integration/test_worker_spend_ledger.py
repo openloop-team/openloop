@@ -26,6 +26,7 @@ from openloop.usage import (
     InMemoryUsageStore,
     UsageRecord,
     WorkerSpendLedger,
+    budget_scope_key,
 )
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from openloop.workflows.coding_worker import build_coding_worker_workflow
@@ -39,6 +40,11 @@ def _agent(per_task_usd=0.50, monthly_usd=None):
     agent.spec.budget.per_task_usd = per_task_usd
     agent.spec.budget.monthly_usd = monthly_usd
     return agent
+
+
+# Every _agent() load carries the fixture's one stamped id, so the scope is
+# stable across instances.
+_SCOPE = budget_scope_key(load_agent(AGENT_YAML))
 
 
 def _orchestrator(monkeypatch, usage, *, cost_usd, agent=None):
@@ -162,7 +168,7 @@ async def test_connector_path_monthly_gate_fails_closed(monkeypatch):
         github,
     )
     await usage.record(UsageRecord(
-        scope_key="ws:acme:agent:dev-platform", workspace="acme",
+        scope_key=_SCOPE, workspace="acme",
         agent="dev-platform", model="m", cost_usd=50.0,
     ))
 
@@ -189,7 +195,7 @@ async def test_workflow_path_monthly_gate_fails_closed(monkeypatch):
         )
     )
     await usage.record(UsageRecord(
-        scope_key="ws:acme:agent:dev-platform", workspace="acme",
+        scope_key=_SCOPE, workspace="acme",
         agent="dev-platform", model="m", cost_usd=50.0,
     ))
 
@@ -230,7 +236,7 @@ async def test_within_budget_run_is_recorded_and_ships(monkeypatch):
     # Step 5: the direct execute → WorkerState → settle leg carries session_id.
     assert record.session_id == "sess-direct"
     # Worker spend now counts against the same monthly scope /usage reports.
-    assert await usage.monthly_total("ws:acme:agent:dev-platform") == 0.25
+    assert await usage.monthly_total(_SCOPE) == 0.25
 
 
 async def test_spend_follows_the_invoking_agent_through_the_approval_hop(
@@ -245,6 +251,9 @@ async def test_spend_follows_the_invoking_agent_through_the_approval_hop(
 
     invoking = _agent(per_task_usd=5.0)
     invoking.metadata.name = "docs-bot"
+    # A distinct principal needs a distinct identity (both helpers load the
+    # same fixture file, which carries one id).
+    invoking.metadata.id = "b1f2a7c92f3d4f45a51f2f8f31c9dd42"
     default = _agent(per_task_usd=0.10)  # would refuse this run
     ledger = WorkerSpendLedger(
         usage=usage,
@@ -275,6 +284,9 @@ async def test_spend_follows_the_invoking_agent_through_the_approval_hop(
         session_id="sess-abc",
     )
     assert pending.approval.args["agent"] == "docs-bot"
+    # The durable identity is pinned at approval alongside the name, so the
+    # settle-time reuse guard can verify the principal, not just the handle.
+    assert pending.approval.args["agent_id"] == invoking.metadata.id
     # Step 5: the gateway stamps the originating session id into the approval
     # args, so it survives into the durable workflow state.
     assert pending.approval.args["session_id"] == "sess-abc"
@@ -288,7 +300,8 @@ async def test_spend_follows_the_invoking_agent_through_the_approval_hop(
     assert len(github.pulls) == 1
     (record,) = usage.records
     assert record.agent == "docs-bot"
-    assert record.scope_key == "ws:acme:agent:docs-bot"
+    # The scope is the pinned identity's — spend followed the id end to end.
+    assert record.scope_key == budget_scope_key(invoking)
     assert record.outcome == "ok"
     # Attribution envelope (finding 4): the workflow path carries the job, the
     # approval, and the approver all the way to the spend record.
@@ -298,3 +311,57 @@ async def test_spend_follows_the_invoking_agent_through_the_approval_hop(
     # Step 5: session attribution flows gateway → durable workflow → settle,
     # landing on the spend record (not derived from warm_key, which is absent).
     assert record.session_id == "sess-abc"
+
+
+async def test_recreated_same_name_agent_fails_the_approved_job_closed(
+    monkeypatch,
+):
+    """The name-reuse hole, closed end to end: spend approved under one
+    docs-bot must never settle under a recreated docs-bot (same name, fresh
+    identity). The pinned id no longer resolves at run time, so the workflow
+    fails — no push, no PR, and nothing attributed to the new principal."""
+    usage = InMemoryUsageStore()
+    github = FakeGitHub()
+
+    invoking = _agent(per_task_usd=5.0)
+    invoking.metadata.name = "docs-bot"
+    invoking.metadata.id = "b1f2a7c92f3d4f45a51f2f8f31c9dd42"
+    recreated = _agent(per_task_usd=5.0)
+    recreated.metadata.name = "docs-bot"  # same handle, different principal
+    ledger = WorkerSpendLedger(
+        usage=usage,
+        model="m",
+        agents={"docs-bot": recreated},
+        default_agent="docs-bot",
+    )
+    orch = GitWorkspaceOrchestrator(
+        FakeCodingWorker(title="t", body="b", cost_usd=0.75),
+        EnvCredentialResolver({"github": "tok"}),
+        ledger=ledger,
+    )
+
+    async def fake_run(*cmd, cwd=None, stdin=None, redact=None):
+        return ""
+
+    monkeypatch.setattr(orch, "_run", fake_run)
+
+    store = InMemoryWorkflowStore()
+    engine = WorkflowEngine(store)
+    engine.register(build_coding_worker_workflow(orch, github))
+    gateway = ToolGateway(
+        tools=[CodingWorkerConnector(orch, github)], engine=engine
+    )
+
+    pending = await gateway.invoke(
+        invoking, "coding_worker.pr:write", {"repo": "acme/x", "instruction": "x"}
+    )
+    assert pending.approval.args["agent_id"] == invoking.metadata.id
+
+    await gateway.resolve(pending.approval.id, "@maciag.artur", approve=True)
+    await engine.wait_background(pending.approval.args["job_id"])
+
+    (instance,) = await store.recent()
+    assert instance.status == "failed"
+    assert "unknown agent identity" in instance.error
+    assert github.pulls == []  # fail closed: no PR
+    assert usage.records == []  # no spend on the recreated principal's scope

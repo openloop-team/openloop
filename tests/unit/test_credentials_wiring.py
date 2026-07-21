@@ -2,6 +2,7 @@
 
 import sys
 import types
+from uuid import uuid4
 
 from openloop.agents.schema import Agent
 from openloop.wiring.builders import build_github_credentials, build_tool_gateway
@@ -118,7 +119,7 @@ def test_broken_app_config_without_token_registers_nothing(tmp_path, caplog):
 
 def _mcp_agent(tool: dict) -> Agent:
     return Agent(
-        metadata={"name": "t", "workspace": "acme"},
+        metadata={"name": "t", "workspace": "acme", "id": uuid4().hex},
         spec={"model_policy": {"default": "openai/gpt-4o-mini"}, "tools": [tool]},
     )
 

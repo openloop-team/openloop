@@ -37,11 +37,21 @@ def load_agents(directory: str | Path) -> dict[str, Agent]:
     """Load every `*.yaml` / `*.yml` agent in a directory, keyed by name."""
     directory = Path(directory)
     agents: dict[str, Agent] = {}
+    # One id = one principal. Ids are mint-only by convention (`agents id
+    # issue`); this check is the integrity guarantee when a copied template
+    # carries an id along anyway.
+    seen_ids: dict[str, Path] = {}
     for file in sorted([*directory.glob("*.yaml"), *directory.glob("*.yml")]):
         agent = load_agent(file)
         if agent.metadata.name in agents:
             raise AgentConfigError(
                 f"duplicate agent name {agent.metadata.name!r} in {file}"
             )
+        if agent.metadata.id in seen_ids:
+            raise AgentConfigError(
+                f"duplicate agent id {agent.metadata.id!r} in {file} "
+                f"(also {seen_ids[agent.metadata.id]})"
+            )
         agents[agent.metadata.name] = agent
+        seen_ids[agent.metadata.id] = file
     return agents

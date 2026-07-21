@@ -59,6 +59,56 @@ def test_example_github_mcp_exposes_ci_actions():
     assert mcp.headers.get("X-MCP-Readonly") == "true"
 
 
+VALID_ID = "9f2c1d4e8a7b4c3d9e0f1a2b3c4d5e6f"
+
+
+def _agent_yaml(name="x", id=VALID_ID):
+    return (
+        "apiVersion: openloop.team/v1alpha1\nkind: Agent\n"
+        f"metadata: {{name: {name}, workspace: y, id: {id}}}\n"
+        "spec: {model_policy: {default: openai/gpt-4o-mini}}\n"
+    )
+
+
+def test_accepts_a_well_formed_id(tmp_path):
+    file = tmp_path / "a.yaml"
+    file.write_text(_agent_yaml())
+    assert load_agent(file).metadata.id == VALID_ID
+
+
+@pytest.mark.parametrize(
+    "bad", ["nope", VALID_ID.upper(), VALID_ID[:-1], VALID_ID + "0"]
+)
+def test_rejects_a_malformed_id(tmp_path, bad):
+    file = tmp_path / "a.yaml"
+    file.write_text(_agent_yaml(id=bad))
+    with pytest.raises(AgentConfigError):
+        load_agent(file)
+
+
+def test_rejects_an_id_less_agent(tmp_path):
+    # An agent without issued identity is not loadable. The one path that
+    # reads an id-less file is `openloop agents id issue`, which reads raw
+    # YAML precisely so it can stamp the id this loader requires.
+    file = tmp_path / "a.yaml"
+    file.write_text(
+        "apiVersion: openloop.team/v1alpha1\nkind: Agent\n"
+        "metadata: {name: x, workspace: y}\n"
+        "spec: {model_policy: {default: openai/gpt-4o-mini}}\n"
+    )
+    with pytest.raises(AgentConfigError):
+        load_agent(file)
+
+
+def test_load_agents_rejects_a_duplicate_id_across_files(tmp_path):
+    # One id = one principal. Ids are mint-only by convention; this load-time
+    # check is the integrity guarantee when a copied template smuggles one in.
+    (tmp_path / "a.yaml").write_text(_agent_yaml(name="a"))
+    (tmp_path / "b.yaml").write_text(_agent_yaml(name="b"))  # same id
+    with pytest.raises(AgentConfigError, match="duplicate agent id"):
+        load_agents(tmp_path)
+
+
 def test_rejects_unsupported_api_version(tmp_path):
     bad = tmp_path / "bad.yaml"
     bad.write_text(

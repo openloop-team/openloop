@@ -10,6 +10,7 @@ kind: Agent
 metadata:
   name: dev-platform
   workspace: acme
+  id: e0aa7463dd934c4186874b02267e0992
 
 spec:
   surfaces:

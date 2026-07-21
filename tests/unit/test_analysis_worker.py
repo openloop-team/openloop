@@ -33,7 +33,12 @@ from openloop.tools.analysis_worker import (
 )
 from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import WorkerRunAborted
-from openloop.usage import InMemoryUsageStore, UsageRecord, WorkerSpendLedger
+from openloop.usage import (
+    InMemoryUsageStore,
+    UsageRecord,
+    WorkerSpendLedger,
+    budget_scope_key,
+)
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 _INPUT_REF = "staged:one"
@@ -221,7 +226,7 @@ async def test_monthly_gate_runs_before_input_provisioning():
     inputs = _TrackingInputStore()
     ledger, usage, agent = _ledger(monthly=1.0)
     await usage.record(UsageRecord(
-        scope_key="ws:acme:agent:dev-platform",
+        scope_key=budget_scope_key(agent),
         workspace="acme",
         agent="dev-platform",
         model="m",

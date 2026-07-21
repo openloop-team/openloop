@@ -149,6 +149,12 @@ class WorkerState:
     attempt — and enforces the budget — of whoever asked, on fresh runs and
     checkpoint resumes alike. ``None`` (pre-Phase 5 checkpoints) falls back to
     the ledger's default attribution.
+
+    ``agent_id`` is the invoking agent's durable identity, pinned at approval
+    beside the name. The ledger resolves it *first*, so an in-flight job
+    survives a rename, and a delete-and-recreate under the same name (a
+    different principal) fails closed instead of inheriting the approval.
+    ``None`` (pre-identity checkpoints) falls back to the name ladder.
     """
 
     job_id: str
@@ -160,6 +166,7 @@ class WorkerState:
     title: str | None = None
     body: str | None = None
     agent: str | None = None
+    agent_id: str | None = None
     # Human who approved/initiated the durable worker on its surface. Cold
     # resume uses this stable identity to authorize later action decisions.
     requester_id: str | None = None
@@ -209,8 +216,9 @@ class WorkerState:
     def from_dict(cls, data: dict) -> "WorkerState":
         fields = {
             "job_id", "repo", "instruction", "base", "branch",
-            "completed_steps", "title", "body", "agent", "warm_key",
-            "requester_id", "approval_id", "session_id", "openhands_resume",
+            "completed_steps", "title", "body", "agent", "agent_id",
+            "warm_key", "requester_id", "approval_id", "session_id",
+            "openhands_resume",
         }
         values = {k: v for k, v in data.items() if k in fields}
         resume = values.get("openhands_resume")
@@ -422,7 +430,13 @@ class CodingWorkerConnector:
         if not args.get("job_id"):
             args = {**args, "job_id": uuid.uuid4().hex[:12]}
         if agent is not None:
-            args = {**args, "agent": agent.metadata.name}
+            args = {
+                **args,
+                "agent": agent.metadata.name,
+                # The durable identity, pinned beside the name so the ledger
+                # can verify the principal (not just the handle) at settle.
+                "agent_id": agent.metadata.id,
+            }
         if warm_key:
             args = {**args, "warm_key": warm_key}
         if session_id:
@@ -465,6 +479,7 @@ class CodingWorkerConnector:
                 base=base,
                 branch=_branch_for(job_id),
                 agent=args.get("agent"),
+                agent_id=args.get("agent_id"),
                 requester_id=args.get("approved_by"),
                 approval_id=args.get("approval_id"),
                 session_id=args.get("session_id"),
@@ -895,6 +910,7 @@ class GitWorkspaceOrchestrator:
         if self._ledger is not None:
             await self._ledger.check_monthly(
                 state.agent,
+                agent_id=state.agent_id,
                 job_id=state.job_id,
                 approval_id=state.approval_id,
                 approver=state.requester_id,
@@ -903,7 +919,9 @@ class GitWorkspaceOrchestrator:
             # Stamp this agent's per-task cap so an agentic worker can stop
             # itself near the ceiling instead of running to completion and
             # failing the post-run settle (the money is already spent by then).
-            state.budget_usd = self._ledger.per_task_usd_for(state.agent)
+            state.budget_usd = self._ledger.per_task_usd_for(
+                state.agent, state.agent_id
+            )
 
         # Resolved fresh per attempt and kept local — never stored, never in a
         # URL. The auth header value still surfaces in a failed command line,
@@ -973,6 +991,7 @@ class GitWorkspaceOrchestrator:
                 if self._ledger is not None:
                     await self._ledger.settle(
                         agent=state.agent,
+                        agent_id=state.agent_id,
                         job_id=state.job_id,
                         approval_id=state.approval_id,
                         approver=state.requester_id,
@@ -1004,6 +1023,7 @@ class GitWorkspaceOrchestrator:
             elif self._ledger is not None:
                 await self._ledger.settle(
                     agent=state.agent,
+                    agent_id=state.agent_id,
                     job_id=state.job_id,
                     approval_id=state.approval_id,
                     approver=state.requester_id,
@@ -1121,12 +1141,15 @@ class GitWorkspaceOrchestrator:
         if self._ledger is not None:
             await self._ledger.check_monthly(
                 state.agent,
+                agent_id=state.agent_id,
                 job_id=state.job_id,
                 approval_id=state.approval_id,
                 approver=state.requester_id,
                 session_id=state.session_id,
             )
-            state.budget_usd = self._ledger.per_task_usd_for(state.agent)
+            state.budget_usd = self._ledger.per_task_usd_for(
+                state.agent, state.agent_id
+            )
         token = await self._credentials.resolve(self._scope)
         if self._workspace_root is not None:
             self._workspace_root.mkdir(parents=True, exist_ok=True)
@@ -1636,6 +1659,7 @@ class GitWorkspaceOrchestrator:
         if self._ledger is not None:
             await self._ledger.settle(
                 agent=state.agent,
+                agent_id=state.agent_id,
                 job_id=state.job_id,
                 approval_id=state.approval_id,
                 approver=state.requester_id,
