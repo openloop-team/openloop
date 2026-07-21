@@ -38,6 +38,7 @@ from openloop.broker.models import (
 )
 from openloop.broker_control.local_receipts import checkpoint_artifact_identity
 from openloop.broker_control.receipts import CheckpointReceiptKey
+from openloop.broker_control.workspace_ingress import WorkspaceIngressProblem
 from openloop.broker_rpc.capability import JobCapability
 from openloop.broker_rpc.client import BrokerRpcClient
 from openloop.tools.openhands_docker import ArchiveStreamResult
@@ -57,6 +58,8 @@ WorkspaceFactory = Callable[[RelayClientEndpoint], object]
 
 class WorkspaceIngress:
     def stage(self, job_id: UUID, generation: int, source: Path) -> object: ...
+
+    def prune(self, job_id: UUID, generation: int) -> None: ...
 
 
 class BrokerWorkspaceError(RuntimeError):
@@ -207,10 +210,15 @@ class BrokerWorkspaceAdapter:
             self.prepare_job(job_id)
         state = self._jobs[job_id]
 
+        # Captured at the stage call site so cleanup targets the staged seed even
+        # after later cursor bookkeeping — create leaves current_generation
+        # untouched today, but the local keeps this correct if that changes.
+        staged_generation: int | None = None
         if self._workspace_ingress is not None:
+            staged_generation = state.current_generation + 1
             self._workspace_ingress.stage(
                 state.broker_job_id,
-                state.current_generation + 1,
+                staged_generation,
                 workspace,
             )
 
@@ -238,7 +246,16 @@ class BrokerWorkspaceAdapter:
             session_api_key=access.session_api_key,
             mode=RelayMode.RUNNING,
         )
-        return self._workspace_factory(state.endpoint)
+        workspace_obj = self._workspace_factory(state.endpoint)
+
+        # The broker has consumed the seed; the producer deletes it. Cleanup must
+        # never fail a successful start.
+        if self._workspace_ingress is not None and staged_generation is not None:
+            try:
+                self._workspace_ingress.prune(state.broker_job_id, staged_generation)
+            except WorkspaceIngressProblem as exc:
+                log.warning("workspace seed prune failed after start: %s", exc)
+        return workspace_obj
 
     def generation_identity(self, job_id: str) -> BrokerGenerationIdentity:
         state = self._running(job_id)

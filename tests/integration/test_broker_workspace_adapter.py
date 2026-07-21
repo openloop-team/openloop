@@ -121,6 +121,34 @@ async def test_create_opens_running_generation_one(tmp_path, sock_dir):
     assert endpoint.conversation_id is not None
 
 
+async def test_create_prunes_staged_tree_after_start(tmp_path, sock_dir):
+    # With a real workspace ingress wired, a successful start prunes the staged
+    # seed — the producer-deletes contract leaves nothing behind.
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "file.txt").write_text("payload")
+
+    async with AsyncExitStack() as stack:
+        handle = await build_broker(
+            _settings(tmp_path, sock_dir),
+            stack,
+            runtime_driver=InMemoryRuntimeDriver(),
+        )
+        assert handle is not None
+        adapter = BrokerWorkspaceAdapter(
+            client=handle.client,
+            loop=handle.loop,
+            receipt_issuer=handle.receipt_issuer,
+            workspace_ingress=handle.workspace_ingress,
+            workspace_factory=lambda endpoint: _FakeWorkspace(endpoint),
+        )
+        await asyncio.to_thread(adapter.create, seed, "job-prune-000001")
+        state = adapter._jobs["job-prune-000001"]
+
+    ingress_root = handle.workspace_ingress.root
+    assert not (ingress_root / str(state.broker_job_id)).exists()
+
+
 def _sign_receipt(handle, adapter, job_id, *, generation, barrier, suffix):
     state = adapter._jobs[job_id]
     return handle.receipt_issuer.issue(

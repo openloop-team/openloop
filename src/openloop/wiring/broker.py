@@ -505,9 +505,27 @@ async def build_broker_service(
     ledger = BrokerLedger(repository)
 
     durable = local_durable_adapter_for_docker(runtime_config)
-    workspace_ingress = LocalWorkspaceIngress(
-        runtime_config.runtime_root / ".workspace-ingress"
-    )
+    if external:
+        # External mode: the app stages across a uid boundary into the required
+        # sibling root; the broker validates the app's ownership and keeps its
+        # consumed/discarded markers in a broker-private sibling tree.
+        if not settings.broker_ingress_root:
+            raise ValueError("broker_ingress_root is required in external broker mode")
+        if settings.broker_expected_app_uid is None:
+            raise ValueError(
+                "broker_expected_app_uid is required in external broker mode"
+            )
+        workspace_ingress = LocalWorkspaceIngress(
+            Path(settings.broker_ingress_root),
+            expected_stage_uid=settings.broker_expected_app_uid,
+            shared_gid=settings.broker_shared_data_gid,
+            marker_root=Path(settings.broker_runtime_root) / ".ingress-markers",
+        )
+    else:
+        # Co-process: one shared instance, unchanged owner-only construction.
+        workspace_ingress = LocalWorkspaceIngress(
+            runtime_config.runtime_root / ".workspace-ingress"
+        )
     # Share the whole-second clock so the driver and ledger agree on time.
     runtime = runtime_driver or DockerOpenHandsRuntimeDriver(
         runtime_config,
@@ -654,12 +672,19 @@ async def build_broker_client(
     )
 
     # --- stage-side workspace ingress ------------------------------------
+    # Injected (co-process) → the service's shared instance, unchanged. Not
+    # injected (external) → a stage-side handle on the required sibling root that
+    # writes group-shared modes for the broker to read across the boundary.
     if workspace_ingress is None:
-        if not settings.broker_ingress_root:
-            raise ValueError(
-                "broker_ingress_root is required to build the client ingress"
-            )
-        workspace_ingress = LocalWorkspaceIngress(Path(settings.broker_ingress_root))
+        ingress_root = (
+            Path(settings.broker_ingress_root)
+            if settings.broker_ingress_root
+            else Path(settings.broker_runtime_root) / ".workspace-ingress"
+        )
+        workspace_ingress = LocalWorkspaceIngress(
+            ingress_root,
+            shared_gid=settings.broker_shared_data_gid,
+        )
 
     # --- RPC client against the control socket ---------------------------
     socket_path = Path(settings.broker_control_socket_dir) / "control.sock"

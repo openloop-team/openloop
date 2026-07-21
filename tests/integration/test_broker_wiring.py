@@ -247,6 +247,9 @@ def _external_settings(tmp_path, sock_dir, **overrides):
     for path in (ingress_root, receipts_root):
         path.mkdir(exist_ok=True)
         path.chmod(0o700)
+    # The shared ingress root is provisioned group-owned by the shared gid so the
+    # broker's materialize-side ownership validation accepts it.
+    os.chown(ingress_root, -1, os.getgid())
     external = dict(
         broker_mode="external",
         broker_identity_private_key=SecretStr(
@@ -262,6 +265,7 @@ def _external_settings(tmp_path, sock_dir, **overrides):
         broker_ingress_root=str(ingress_root),
         broker_checkpoint_receipt_root=str(receipts_root),
         broker_shared_data_gid=os.getgid(),
+        broker_expected_app_uid=os.getuid(),
     )
     external.update(overrides)
     return _settings(tmp_path, sock_dir, **external)

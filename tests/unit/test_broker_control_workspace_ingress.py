@@ -1,9 +1,13 @@
+import errno
+import os
+import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from openloop.broker_control import workspace_ingress as wi_module
 from openloop.broker_control.workspace_ingress import (
     LocalWorkspaceIngress,
     WorkspaceIngressProblem,
@@ -18,6 +22,18 @@ def _identity(job_id, generation=1):
         generation=generation,
         deadline=(datetime.now(UTC) + timedelta(minutes=5)).replace(microsecond=0),
     )
+
+
+def _source_tree(base):
+    source = base / "source"
+    source.mkdir()
+    (source / "sub").mkdir()
+    (source / "sub" / "data.txt").write_text("payload")
+    executable = source / "run.sh"
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o755)
+    (source / "link").symlink_to("run.sh")
+    return source
 
 
 def test_stage_materialize_and_replay_preserve_checkout(tmp_path):
@@ -98,3 +114,234 @@ def test_discard_removes_only_one_generation(tmp_path):
     ingress.discard(_identity(job_id, 2))
 
     assert not (root / str(job_id)).exists()
+
+
+# --- Phase C: group handoff, fd-anchored traversal, markers, prune ---------
+
+
+def test_stage_shared_gid_sets_group_modes(tmp_path):
+    source = _source_tree(tmp_path)
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    gid = os.getgid()
+    ingress = LocalWorkspaceIngress(root, shared_gid=gid)
+    job_id = uuid4()
+    ingress.stage(job_id, 1, source)
+
+    gen_root = root / str(job_id) / "1"
+    tree = gen_root / "tree"
+    manifest = gen_root / "manifest.json"
+    # The final generation root is exactly setgid group-mode + the shared gid.
+    assert stat.S_IMODE(gen_root.lstat().st_mode) == 0o2750
+    assert gen_root.lstat().st_gid == gid
+    assert stat.S_IMODE(tree.lstat().st_mode) == 0o2750
+    assert stat.S_IMODE((tree / "sub").lstat().st_mode) == 0o2750
+    assert (tree / "sub").lstat().st_gid == gid
+    assert stat.S_IMODE((tree / "sub" / "data.txt").lstat().st_mode) == 0o640
+    assert (tree / "sub" / "data.txt").lstat().st_gid == gid
+    assert stat.S_IMODE((tree / "run.sh").lstat().st_mode) == 0o750
+    assert stat.S_IMODE(manifest.lstat().st_mode) == 0o440
+    assert manifest.lstat().st_gid == gid
+    assert (tree / "link").is_symlink()
+
+
+def _broker_side(root, markers):
+    return LocalWorkspaceIngress(
+        root,
+        shared_gid=os.getgid(),
+        expected_stage_uid=os.getuid(),
+        marker_root=markers,
+    )
+
+
+def test_materialize_with_expected_uid_and_marker_root(tmp_path):
+    source = _source_tree(tmp_path)
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    markers = tmp_path / "markers"
+    stage_ingress = LocalWorkspaceIngress(root, shared_gid=os.getgid())
+    job_id = uuid4()
+    stage_ingress.stage(job_id, 1, source)
+
+    broker = _broker_side(root, markers)
+    destination = tmp_path / "workspace"
+    destination.mkdir(mode=0o700)
+    identity = _identity(job_id)
+    broker.materialize(identity, destination)
+
+    assert (destination / "sub" / "data.txt").read_text() == "payload"
+    assert (destination / "link").is_symlink()
+    # The consumed marker lands under marker_root, never inside the staged tree.
+    marker = markers / str(job_id) / "1" / "consumed-operation"
+    assert marker.read_text() == str(identity.operation_id)
+    assert not (root / str(job_id) / "1" / "consumed-operation").exists()
+
+    # Replay with the same operation id → no-op.
+    broker.materialize(identity, destination)
+    # A different operation id → raises.
+    with pytest.raises(WorkspaceIngressProblem):
+        broker.materialize(_identity(job_id), destination)
+
+
+def test_marker_root_discard_is_marker_only(tmp_path):
+    source = _source_tree(tmp_path)
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    markers = tmp_path / "markers"
+    stage_ingress = LocalWorkspaceIngress(root, shared_gid=os.getgid())
+    job_id = uuid4()
+    stage_ingress.stage(job_id, 1, source)
+
+    broker = _broker_side(root, markers)
+    broker.discard(_identity(job_id, 1))
+
+    # The app-owned tree survives; only a discard marker is written.
+    assert (root / str(job_id) / "1" / "tree").exists()
+    assert (markers / str(job_id) / "1" / "discarded").exists()
+
+
+def test_marker_first_replay_survives_pruned_tree(tmp_path):
+    source = _source_tree(tmp_path)
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    markers = tmp_path / "markers"
+    stage_ingress = LocalWorkspaceIngress(root, shared_gid=os.getgid())
+    job_id = uuid4()
+    stage_ingress.stage(job_id, 1, source)
+
+    broker = _broker_side(root, markers)
+    destination = tmp_path / "workspace"
+    destination.mkdir(mode=0o700)
+    identity = _identity(job_id)
+    broker.materialize(identity, destination)
+
+    # The producer prunes the staged tree after launch.
+    stage_ingress.prune(job_id, 1)
+    assert not (root / str(job_id)).exists()
+
+    # Same operation id → marker short-circuits with no tree needed.
+    broker.materialize(identity, destination)
+    # A different operation id → raises (consumed by another operation).
+    with pytest.raises(WorkspaceIngressProblem):
+        broker.materialize(_identity(job_id), destination)
+
+
+def test_marker_root_requires_tree_when_unconsumed(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    markers = tmp_path / "markers"
+    broker = _broker_side(root, markers)
+    destination = tmp_path / "workspace"
+    destination.mkdir(mode=0o700)
+    # No marker and no staged tree → raise.
+    with pytest.raises(WorkspaceIngressProblem):
+        broker.materialize(_identity(uuid4()), destination)
+
+
+def test_prune_and_prune_stale(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "file").write_text("x")
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root)
+
+    job_id = uuid4()
+    ingress.stage(job_id, 1, source)
+    ingress.prune(job_id, 1)
+    assert not (root / str(job_id)).exists()
+
+    stale = uuid4()
+    ingress.stage(stale, 1, source)
+    assert ingress.prune_stale(max_age_seconds=0) == 1
+    assert not (root / str(stale)).exists()
+
+    fresh = uuid4()
+    ingress.stage(fresh, 1, source)
+    assert ingress.prune_stale(max_age_seconds=3600) == 0
+    assert (root / str(fresh) / "1").exists()
+
+
+def _delegating_open(real_open, name, *, divert=None):
+    """Patch os.open to sabotage a single dir_fd-relative open of *name*."""
+
+    def patched(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is not None and path == name:
+            result = divert(path, flags, mode)
+            if result is not None:
+                return result
+        if dir_fd is not None:
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+        return real_open(path, flags, mode)
+
+    return patched
+
+
+def test_traversal_preserves_symlink_but_rejects_directory_swap(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "realdir").mkdir()
+    (source / "realdir" / "inner").write_text("x")
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root)
+
+    real_open = os.open
+
+    def divert(path, flags, mode):
+        if flags & getattr(os, "O_DIRECTORY", 0):
+            raise OSError(errno.ELOOP, "directory became a symlink")
+        return None
+
+    monkeypatch.setattr(
+        wi_module.os, "open", _delegating_open(real_open, "realdir", divert=divert)
+    )
+    with pytest.raises(WorkspaceIngressProblem):
+        ingress.stage(uuid4(), 1, source)
+
+
+def test_traversal_rejects_regular_file_swapped_to_symlink(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "victim.bin").write_text("data")
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root)
+
+    real_open = os.open
+
+    def divert(path, flags, mode):
+        if not (flags & os.O_CREAT):
+            raise OSError(errno.ELOOP, "file became a symlink")
+        return None
+
+    monkeypatch.setattr(
+        wi_module.os, "open", _delegating_open(real_open, "victim.bin", divert=divert)
+    )
+    with pytest.raises(WorkspaceIngressProblem):
+        ingress.stage(uuid4(), 1, source)
+
+
+def test_traversal_rejects_inode_swap_between_scan_and_open(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "victim.bin").write_text("original")
+    decoy = tmp_path / "decoy.bin"
+    decoy.write_text("a different inode entirely")
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root)
+
+    real_open = os.open
+
+    def divert(path, flags, mode):
+        if not (flags & os.O_CREAT):
+            # Substitute a different real file → different (st_dev, st_ino).
+            return real_open(str(decoy), flags & ~getattr(os, "O_NOFOLLOW", 0))
+        return None
+
+    monkeypatch.setattr(
+        wi_module.os, "open", _delegating_open(real_open, "victim.bin", divert=divert)
+    )
+    with pytest.raises(WorkspaceIngressProblem):
+        ingress.stage(uuid4(), 1, source)
