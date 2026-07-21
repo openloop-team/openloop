@@ -250,6 +250,7 @@ def _external_settings(tmp_path, sock_dir, **overrides):
     # The shared ingress root is provisioned group-owned by the shared gid so the
     # broker's materialize-side ownership validation accepts it.
     os.chown(ingress_root, -1, os.getgid())
+    ingress_root.chmod(0o2750)
     external = dict(
         broker_mode="external",
         broker_identity_private_key=SecretStr(

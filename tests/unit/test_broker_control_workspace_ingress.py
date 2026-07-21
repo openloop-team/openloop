@@ -145,6 +145,40 @@ def test_stage_shared_gid_sets_group_modes(tmp_path):
     assert (tree / "link").is_symlink()
 
 
+def test_shared_root_symlink_is_rejected_without_mutating_target(tmp_path):
+    victim = tmp_path / "victim"
+    victim.mkdir(mode=0o700)
+    before = victim.stat()
+    root = tmp_path / "ingress"
+    root.symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(WorkspaceIngressProblem):
+        LocalWorkspaceIngress(root, shared_gid=os.getgid())
+
+    after = victim.stat()
+    assert stat.S_IMODE(after.st_mode) == stat.S_IMODE(before.st_mode)
+    assert after.st_gid == before.st_gid
+
+
+def test_stage_rejects_symlinked_job_without_mutating_target(tmp_path):
+    source = _source_tree(tmp_path)
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root, shared_gid=os.getgid())
+    victim = tmp_path / "victim"
+    victim.mkdir(mode=0o700)
+    before = victim.stat()
+    job_id = uuid4()
+    (root / str(job_id)).symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(WorkspaceIngressProblem):
+        ingress.stage(job_id, 1, source)
+
+    after = victim.stat()
+    assert stat.S_IMODE(after.st_mode) == stat.S_IMODE(before.st_mode)
+    assert after.st_gid == before.st_gid
+
+
 def _broker_side(root, markers):
     return LocalWorkspaceIngress(
         root,
@@ -229,6 +263,7 @@ def test_marker_first_replay_survives_pruned_tree(tmp_path):
 def test_marker_root_requires_tree_when_unconsumed(tmp_path):
     root = tmp_path / "ingress"
     root.mkdir(mode=0o700)
+    LocalWorkspaceIngress(root, shared_gid=os.getgid())
     markers = tmp_path / "markers"
     broker = _broker_side(root, markers)
     destination = tmp_path / "workspace"
@@ -236,6 +271,59 @@ def test_marker_root_requires_tree_when_unconsumed(tmp_path):
     # No marker and no staged tree → raise.
     with pytest.raises(WorkspaceIngressProblem):
         broker.materialize(_identity(uuid4()), destination)
+
+
+def test_broker_rejects_group_writable_stage_root(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    LocalWorkspaceIngress(root, shared_gid=os.getgid())
+    root.chmod(0o2770)
+
+    with pytest.raises(WorkspaceIngressProblem):
+        _broker_side(root, tmp_path / "markers")
+
+
+@pytest.mark.parametrize(
+    ("relative", "mode"),
+    [
+        (Path("manifest.json"), 0o640),
+        (Path("tree/sub"), 0o2770),
+        (Path("tree/sub/data.txt"), 0o660),
+    ],
+)
+def test_broker_rejects_writable_staged_entries(tmp_path, relative, mode):
+    source = _source_tree(tmp_path)
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    stage_ingress = LocalWorkspaceIngress(root, shared_gid=os.getgid())
+    job_id = uuid4()
+    stage_ingress.stage(job_id, 1, source)
+    generation_root = root / str(job_id) / "1"
+    (generation_root / relative).chmod(mode)
+
+    broker = _broker_side(root, tmp_path / "markers")
+    destination = tmp_path / "workspace"
+    destination.mkdir(mode=0o700)
+
+    with pytest.raises(WorkspaceIngressProblem):
+        broker.materialize(_identity(job_id), destination)
+
+
+def test_broker_rejects_symlinked_job_ancestor(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    LocalWorkspaceIngress(root, shared_gid=os.getgid())
+    victim = tmp_path / "victim"
+    victim.mkdir(mode=0o700)
+    job_id = uuid4()
+    (root / str(job_id)).symlink_to(victim, target_is_directory=True)
+
+    broker = _broker_side(root, tmp_path / "markers")
+    destination = tmp_path / "workspace"
+    destination.mkdir(mode=0o700)
+
+    with pytest.raises(WorkspaceIngressProblem):
+        broker.materialize(_identity(job_id), destination)
 
 
 def test_prune_and_prune_stale(tmp_path):
@@ -260,6 +348,38 @@ def test_prune_and_prune_stale(tmp_path):
     ingress.stage(fresh, 1, source)
     assert ingress.prune_stale(max_age_seconds=3600) == 0
     assert (root / str(fresh) / "1").exists()
+
+
+def test_prune_rejects_symlinked_job_without_deleting_target(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root)
+    victim = tmp_path / "victim"
+    generation = victim / "1"
+    generation.mkdir(parents=True)
+    (generation / "keep.txt").write_text("keep")
+    job_id = uuid4()
+    (root / str(job_id)).symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(WorkspaceIngressProblem):
+        ingress.prune(job_id, 1)
+
+    assert (generation / "keep.txt").read_text() == "keep"
+
+
+def test_prune_stale_skips_symlinked_job_without_deleting_target(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root)
+    victim = tmp_path / "victim"
+    generation = victim / "1"
+    generation.mkdir(parents=True)
+    (generation / "manifest.json").write_text("{}")
+    (generation / "keep.txt").write_text("keep")
+    (root / str(uuid4())).symlink_to(victim, target_is_directory=True)
+
+    assert ingress.prune_stale(max_age_seconds=0) == 0
+    assert (generation / "keep.txt").read_text() == "keep"
 
 
 def _delegating_open(real_open, name, *, divert=None):
