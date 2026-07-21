@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Literal, Self
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
@@ -180,6 +180,43 @@ class Settings(BaseSettings):
     # rejects a lease that exceeds it at construction).
     broker_execution_lease_seconds: int = 900
     broker_generation_deadline_seconds: int = 1800
+    # --- Broker process split (phase 1): mode + trust-topology surfaces -----
+    # Master switch. "coprocess" (default, unchanged today) runs the broker
+    # graph in-process; "external" talks to a separate `openloop-broker`
+    # process over the same UDS RPC boundary. A typo here must not silently
+    # boot as coprocess, so this is validator-enforced below.
+    broker_mode: str = "coprocess"  # "coprocess" | "external"
+    # --- external mode, app side ---
+    # base64 32-byte Ed25519 seed; the app signs workload-identity tokens with
+    # it in external mode. SecretStr keeps it out of Settings repr/logging.
+    broker_identity_private_key: SecretStr | None = None
+    broker_identity_key_id: str = "identity-v1"
+    # --- external mode, broker side ---
+    # key_id -> base64 Ed25519 public. The broker verifies app-issued identity
+    # tokens against these; it never holds the private half.
+    broker_identity_public_keys: dict[str, str] = Field(default_factory=dict)
+    # version -> base64 Ed25519 public. The broker verifies checkpoint-store
+    # receipts against these; it never holds a receipt private half either.
+    broker_receipt_public_keys: dict[str, str] = Field(default_factory=dict)
+    # --- shared surfaces ---
+    # Dedicated receipts subtree, BOTH sides (identical absolute path; RO
+    # mount broker-side). REQUIRED app-side in external mode too: the client
+    # dual-writes the dedicated sidecar here — without it only the legacy
+    # in-artifact sidecar exists and broker recovery cannot locate receipts.
+    # (Refines the spec's `broker_checkpoint_root`: only receipts/ crosses
+    # the boundary, so the setting names exactly what gets mounted.)
+    broker_checkpoint_receipt_root: str | None = None
+    # App-owned sibling root; external-required, coprocess derives
+    # runtime_root/.workspace-ingress when unset.
+    broker_ingress_root: str | None = None
+    # Numeric identities only — group/user *names* never cross the container
+    # boundary.
+    broker_shared_data_gid: int | None = None
+    broker_expected_app_uid: int | None = None
+    # 0/negative would busy-loop the periodic reconcile pass.
+    broker_reconcile_interval_seconds: int = Field(default=300, gt=0)
+    # Entrypoint only: in-memory repo/audit (tests/dev).
+    broker_dev_in_memory: bool = False
     # Where the worker's model-influenced execution (applying generated edits)
     # runs:
     #   "host"   (default) — a plain subprocess in this process's environment.
@@ -320,6 +357,16 @@ class Settings(BaseSettings):
     embeddings_enabled: bool = True
     embedding_model: str = "openai/text-embedding-3-small"
     embedding_dim: int = 1536
+
+    @field_validator("broker_mode")
+    @classmethod
+    def _validate_broker_mode(cls, value: str) -> str:
+        allowed = {"coprocess", "external"}
+        if value not in allowed:
+            raise ValueError(
+                f"broker_mode must be one of {sorted(allowed)}, got {value!r}"
+            )
+        return value
 
     @model_validator(mode="after")
     def _validate_postgres_pool_size(self) -> Self:
