@@ -243,6 +243,7 @@ def _decode_roots(
                 f"broker {name} root {version!r} must decode to 32 bytes"
             )
         decoded[version] = raw
+    _reject_reused_roots(decoded)
     return decoded
 
 

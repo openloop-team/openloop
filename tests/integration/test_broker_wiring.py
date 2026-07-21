@@ -323,6 +323,26 @@ async def test_external_missing_required_client_field_fails_closed(
     )
 
 
+async def test_external_reused_receipt_root_fails_closed(tmp_path, sock_dir, caplog):
+    reused = base64.b64encode(_EXTERNAL_RECEIPT_ROOT).decode()
+    settings = _external_settings(
+        tmp_path,
+        sock_dir,
+        broker_receipt_roots={
+            "receipt-key-v1": reused,
+            "receipt-key-v2": reused,
+        },
+        broker_receipt_current_version="receipt-key-v2",
+    )
+
+    async with AsyncExitStack() as stack:
+        with caplog.at_level(logging.ERROR, logger="openloop"):
+            handle = await build_broker(settings, stack)
+
+    assert handle is None
+    assert any("fake rotation" in record.message for record in caplog.records)
+
+
 async def test_external_bind_checkpoint_store_leaves_reconciler_none(
     tmp_path, sock_dir
 ):

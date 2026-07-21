@@ -25,6 +25,7 @@ from openloop.broker_rpc.identity import (
 from openloop.wiring.broker import (
     _decode_identity_seed,
     _decode_public_keys,
+    _decode_roots,
     _derive_receipt_key,
     _reject_cross_boundary_reuse,
 )
@@ -103,6 +104,17 @@ def test_decode_public_keys_rejects_malformed_base64():
 def test_decode_public_keys_rejects_wrong_length():
     with pytest.raises(ValueError, match="32 bytes"):
         _decode_public_keys("receipt", {"v1": _b64(b"short")})
+
+
+def test_decode_roots_rejects_reused_root_across_versions():
+    encoded = _b64(bytes([5]) * 32)
+
+    with pytest.raises(ValueError, match="fake rotation"):
+        _decode_roots(
+            "receipt",
+            {"receipt-v1": SecretStr(encoded), "receipt-v2": SecretStr(encoded)},
+            "receipt-v2",
+        )
 
 
 def test_cross_boundary_reuse_positive_receipt_hkdf_match():
