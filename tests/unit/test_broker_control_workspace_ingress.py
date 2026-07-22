@@ -4,6 +4,7 @@ import stat
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -63,6 +64,163 @@ def test_stage_materialize_and_replay_preserve_checkout(tmp_path):
     assert (destination / "script.sh").stat().st_mode & 0o111
     assert (destination / "link").is_symlink()
     assert (destination / "link").readlink() == Path("script.sh")
+
+
+def test_stage_builds_in_private_namespace_before_atomic_publish(
+    tmp_path, monkeypatch
+):
+    source = _source_tree(tmp_path)
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root, shared_gid=os.getgid())
+    job_id = uuid4()
+    real_copy = wi_module._copy_snapshot
+
+    def observe_copy(source, destination, **kwargs):
+        temporary = destination.parent
+        assert temporary.parent == root / ".tmp"
+        assert temporary.name.startswith(f"{job_id}.1.")
+        assert not (root / str(job_id)).exists()
+        assert stat.S_IMODE((root / ".tmp").stat().st_mode) == 0o700
+        return real_copy(source, destination, **kwargs)
+
+    monkeypatch.setattr(wi_module, "_copy_snapshot", observe_copy)
+
+    ingress.stage(job_id, 1, source)
+
+    assert (root / str(job_id) / "1" / "tree" / "sub" / "data.txt").exists()
+    assert list((root / ".tmp").iterdir()) == []
+
+
+def test_stage_fsyncs_new_job_dirent_before_publication(tmp_path, monkeypatch):
+    source = _source_tree(tmp_path)
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root)
+    job_id = uuid4()
+    root_identity = root.stat()
+    real_fsync = os.fsync
+    root_fsyncs = 0
+
+    def observe_fsync(descriptor):
+        nonlocal root_fsyncs
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (
+            root_identity.st_dev,
+            root_identity.st_ino,
+        ):
+            root_fsyncs += 1
+            assert (root / str(job_id)).is_dir()
+            assert not (root / str(job_id) / "1").exists()
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(wi_module.os, "fsync", observe_fsync)
+
+    ingress.stage(job_id, 1, source)
+
+    assert root_fsyncs == 1
+
+
+def test_private_namespace_strips_inherited_setgid_mode(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    temporary_root = root / ".tmp"
+    temporary_root.mkdir(mode=0o700)
+    temporary_root.chmod(0o2700)
+
+    LocalWorkspaceIngress(root, shared_gid=os.getgid())
+
+    assert stat.S_IMODE(temporary_root.stat().st_mode) == 0o700
+
+
+def test_private_namespace_rejects_other_preexisting_mode(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    temporary_root = root / ".tmp"
+    temporary_root.mkdir(mode=0o700)
+    temporary_root.chmod(0o755)
+
+    with pytest.raises(WorkspaceIngressProblem, match="permissions are invalid"):
+        LocalWorkspaceIngress(root, shared_gid=os.getgid())
+
+    assert stat.S_IMODE(temporary_root.stat().st_mode) == 0o755
+
+
+def test_private_namespace_symlink_is_rejected_without_mutating_target(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    victim = tmp_path / "victim"
+    victim.mkdir(mode=0o755)
+    before = victim.stat()
+    (root / ".tmp").symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(WorkspaceIngressProblem):
+        LocalWorkspaceIngress(root, shared_gid=os.getgid())
+
+    after = victim.stat()
+    assert stat.S_IMODE(after.st_mode) == stat.S_IMODE(before.st_mode)
+    assert after.st_gid == before.st_gid
+
+
+def test_private_namespace_must_share_ingress_filesystem(tmp_path, monkeypatch):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root)
+    temporary_identity = (root / ".tmp").stat()
+    real_fstat = os.fstat
+
+    def report_other_device(descriptor):
+        info = real_fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (
+            temporary_identity.st_dev,
+            temporary_identity.st_ino,
+        ):
+            return SimpleNamespace(
+                st_mode=info.st_mode,
+                st_uid=info.st_uid,
+                st_gid=info.st_gid,
+                st_dev=info.st_dev + 1,
+            )
+        return info
+
+    root_fd = ingress._open_ingress_root()
+    monkeypatch.setattr(wi_module.os, "fstat", report_other_device)
+    try:
+        with pytest.raises(WorkspaceIngressProblem, match="share its filesystem"):
+            ingress._open_temporary_root(root_fd)
+    finally:
+        os.close(root_fd)
+
+
+def test_stage_failure_cleans_private_temp_and_empty_job(tmp_path, monkeypatch):
+    source = _source_tree(tmp_path)
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root)
+    job_id = uuid4()
+
+    def fail_copy(*args, **kwargs):
+        raise WorkspaceIngressProblem("injected copy failure")
+
+    monkeypatch.setattr(wi_module, "_copy_snapshot", fail_copy)
+
+    with pytest.raises(WorkspaceIngressProblem, match="injected copy failure"):
+        ingress.stage(job_id, 1, source)
+
+    assert list((root / ".tmp").iterdir()) == []
+    assert not (root / str(job_id)).exists()
+
+
+def test_stage_rejects_source_inside_ingress(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root)
+    source = root / "source"
+    source.mkdir()
+    (source / "file").write_text("content")
+
+    with pytest.raises(WorkspaceIngressProblem):
+        ingress.stage(uuid4(), 1, source)
 
 
 def test_conflicting_stage_and_operation_fail_closed(tmp_path):
@@ -187,6 +345,17 @@ def _broker_side(root, markers):
         expected_stage_uid=os.getuid(),
         marker_root=markers,
     )
+
+
+def test_broker_side_does_not_require_or_create_private_temp_root(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    os.chown(root, -1, os.getgid())
+    root.chmod(0o2750)
+
+    _broker_side(root, tmp_path / "markers")
+
+    assert not (root / ".tmp").exists()
 
 
 def test_materialize_with_expected_uid_and_marker_root(tmp_path):
@@ -351,7 +520,49 @@ def test_prune_and_prune_stale(tmp_path):
     assert (root / str(fresh) / "1").exists()
 
 
-def test_prune_stale_reaps_interrupted_stage_temp_tree(tmp_path):
+def test_prune_stale_reaps_private_interrupted_stage_temp_tree(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root)
+    job_id = uuid4()
+    temporary = root / ".tmp" / f"{job_id}.1.abcdefgh"
+    temporary.mkdir(mode=0o755)
+    partial_tree = temporary / "tree"
+    partial_tree.mkdir(mode=0o700)
+    (partial_tree / "partial").write_text("incomplete")
+    os.utime(temporary, (0, 0))
+
+    assert ingress.prune_stale(max_age_seconds=3600) == 1
+    assert not temporary.exists()
+    assert (root / ".tmp").exists()
+
+
+def test_prune_stale_private_namespace_skips_fresh_malformed_and_symlink(
+    tmp_path,
+):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root)
+    temporary_root = root / ".tmp"
+    fresh = temporary_root / f"{uuid4()}.1.abcdefgh"
+    fresh.mkdir(mode=0o700)
+    malformed = temporary_root / "not-a-job.1.abcdefgh"
+    malformed.mkdir(mode=0o700)
+    os.utime(malformed, (0, 0))
+    victim = tmp_path / "victim"
+    victim.mkdir(mode=0o700)
+    (victim / "keep").write_text("keep")
+    symlink = temporary_root / f"{uuid4()}.1.abcdefgh"
+    symlink.symlink_to(victim, target_is_directory=True)
+
+    assert ingress.prune_stale(max_age_seconds=3600) == 0
+    assert fresh.exists()
+    assert malformed.exists()
+    assert symlink.is_symlink()
+    assert (victim / "keep").read_text() == "keep"
+
+
+def test_prune_stale_reaps_legacy_job_local_interrupted_temp_tree(tmp_path):
     root = tmp_path / "ingress"
     root.mkdir(mode=0o700)
     ingress = LocalWorkspaceIngress(root)

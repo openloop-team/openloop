@@ -8,9 +8,11 @@ network or container.
 
 The staging tree is never mounted into a generation.  Copying preserves regular
 files, directories, and symlinks without following symlinks; special files are
-rejected.  A per-generation consumed marker makes runtime ``ensure`` replay a
-no-op after launch, while a crash before the marker causes the still-containerless
-workspace to be rebuilt from the immutable snapshot.
+rejected. Incomplete builds live below an app-only ``.tmp`` directory and enter
+the broker-readable ``<job>/<generation>`` namespace only by same-filesystem
+atomic rename. A per-generation consumed marker makes runtime ``ensure`` replay
+a no-op after launch, while a crash before the marker causes the
+still-containerless workspace to be rebuilt from the immutable snapshot.
 
 When the broker runs as a *separate process* (external mode) the app stages and
 the broker materializes across a uid boundary.  Three keyword knobs carry that
@@ -59,6 +61,7 @@ _MANIFEST = "manifest.json"
 _TREE = "tree"
 _CONSUMED = "consumed-operation"
 _DISCARDED = "discarded"
+_TEMPORARY_ROOT = ".tmp"
 
 # Descriptor-anchored open flags. Directories additionally require O_DIRECTORY so
 # a swap to a symlink or file fails the open outright; both refuse to follow a
@@ -126,6 +129,32 @@ def _temporary_generation(name: str) -> int | None:
     # stage() renders the integer directly, so aliases such as `.01.*` are not
     # directories it can create and must not be treated as cleanup targets.
     return generation if generation_text == str(generation) else None
+
+
+def _temporary_stage_identity(name: str) -> tuple[UUID, int] | None:
+    """Parse ``<job UUID>.<generation>.<mkdtemp suffix>`` from private temp."""
+    job_text, job_separator, remainder = name.partition(".")
+    generation_text, generation_separator, suffix = remainder.partition(".")
+    if (
+        not job_separator
+        or not generation_separator
+        or not suffix
+        or not suffix.isascii()
+        or any(
+            not (character.isalnum() or character == "_")
+            for character in suffix
+        )
+    ):
+        return None
+    try:
+        job_id = UUID(job_text)
+        generation = int(generation_text)
+        _validate_generation(generation)
+    except (TypeError, ValueError):
+        return None
+    if job_text != str(job_id) or generation_text != str(generation):
+        return None
+    return job_id, generation
 
 
 def _safe_component(name: str) -> None:
@@ -237,7 +266,7 @@ def _owned_directory(path: Path, *, mode: int, gid: int | None) -> None:
     """Create + validate a store directory we own.
 
     Owner-only (``gid`` unset) is today's private ``0o700`` directory, validated
-    but never chmod-ed (a wrong pre-existing mode still raises).  Shared mode
+    but never chmod-ed (a wrong pre-existing mode still raises). Shared mode
     forces the setgid group-handoff bits ``mkdir`` masks off plus the shared gid,
     so children inherit the group across the process boundary.
     """
@@ -269,6 +298,45 @@ def _owned_directory(path: Path, *, mode: int, gid: int | None) -> None:
     except OSError as exc:
         raise WorkspaceIngressProblem(
             "workspace ingress directory permissions cannot be applied"
+        ) from exc
+    finally:
+        os.close(descriptor)
+
+
+def _prepare_private_temporary_root(path: Path) -> None:
+    """Create/validate ``.tmp``, stripping only Linux's inherited setgid bit."""
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor = os.open(path, _DIR_OPEN_FLAGS)
+    except OSError as exc:
+        raise WorkspaceIngressProblem(
+            "workspace ingress private temp root is not safely accessible"
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISDIR(before.st_mode) or before.st_uid != os.getuid():
+            raise WorkspaceIngressProblem(
+                "workspace ingress private temp root is not privately owned"
+            )
+        mode = stat.S_IMODE(before.st_mode)
+        if mode == 0o2700:
+            os.fchmod(descriptor, 0o700)
+        elif mode != 0o700:
+            raise WorkspaceIngressProblem(
+                "workspace ingress private temp root permissions are invalid"
+            )
+        _check_directory_descriptor(
+            descriptor,
+            label="workspace ingress private temp root",
+            uid=os.getuid(),
+            gid=None,
+            mode=0o700,
+        )
+    except WorkspaceIngressProblem:
+        raise
+    except OSError as exc:
+        raise WorkspaceIngressProblem(
+            "workspace ingress private temp root permissions cannot be applied"
         ) from exc
     finally:
         os.close(descriptor)
@@ -848,6 +916,7 @@ class LocalWorkspaceIngress:
         self.shared_gid = shared_gid
         self.expected_stage_uid = expected_stage_uid
         self.marker_root = marker_root
+        self._temporary_root = root / _TEMPORARY_ROOT
         # All generations of one job share a lock so pruning the final seed's
         # parent cannot race staging the next generation.
         self._locks: dict[UUID, threading.Lock] = {}
@@ -858,6 +927,12 @@ class LocalWorkspaceIngress:
             self._require_stage_ownership(root, directory=True)
         else:
             self._prepare_owned_directory(root)
+            # Incomplete stages never enter the broker-traversable UUID tree.
+            # This private sibling is on the same filesystem as publication, so
+            # descriptor-relative rename into <job>/<generation> stays atomic.
+            # A Linux setgid parent gives new subdirectories 02000 even when
+            # mkdir requests 0700. Normalize this app-private child explicitly.
+            _prepare_private_temporary_root(self._temporary_root)
         if marker_root is not None:
             # Broker-private consumed/discarded marker tree.
             _owned_directory(marker_root, mode=0o700, gid=None)
@@ -893,6 +968,30 @@ class LocalWorkspaceIngress:
             gid=self.shared_gid,
             mode=self._stage_directory_mode,
         )
+
+    def _open_temporary_root(self, root_fd: int) -> int:
+        """Open the app-private staging namespace relative to the trusted root."""
+        if self.expected_stage_uid is not None:
+            raise WorkspaceIngressProblem(
+                "broker-side ingress cannot access the private temp namespace"
+            )
+        descriptor = _open_validated_directory(
+            _TEMPORARY_ROOT,
+            dir_fd=root_fd,
+            label="workspace ingress private temp root",
+            uid=self._stage_uid,
+            gid=None,
+            mode=0o700,
+        )
+        try:
+            if os.fstat(descriptor).st_dev != os.fstat(root_fd).st_dev:
+                raise WorkspaceIngressProblem(
+                    "workspace ingress private temp root must share its filesystem"
+                )
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
 
     def _open_generation_descriptors(
         self, job_id: UUID, generation: int
@@ -1089,11 +1188,13 @@ class LocalWorkspaceIngress:
             os.close(descriptor)
 
     def stage(self, job_id: UUID, generation: int, source: Path) -> StagedWorkspace:
-        target = self._generation_root(job_id, generation)
+        self._generation_root(job_id, generation)
         source_resolved = source.resolve()
         root_resolved = self.root.resolve()
-        if source_resolved == root_resolved or root_resolved.is_relative_to(
-            source_resolved
+        if (
+            source_resolved == root_resolved
+            or source_resolved.is_relative_to(root_resolved)
+            or root_resolved.is_relative_to(source_resolved)
         ):
             raise WorkspaceIngressProblem(
                 "workspace seed cannot contain ingress storage"
@@ -1101,27 +1202,33 @@ class LocalWorkspaceIngress:
         shared = self.shared_gid is not None
         with self._lock(job_id, generation):
             root_fd = self._open_ingress_root()
+            job_fd = -1
+            temporary_root_fd = -1
+            temporary: Path | None = None
             try:
-                job_fd = _ensure_owned_child(
-                    root_fd,
-                    str(job_id),
-                    mode=self._stage_directory_mode,
-                    gid=self.shared_gid,
-                    label="workspace ingress job",
+                temporary_root_fd = self._open_temporary_root(root_fd)
+                temporary = Path(
+                    tempfile.mkdtemp(
+                        prefix=f"{job_id}.{generation}.",
+                        dir=self._temporary_root,
+                    )
                 )
-            finally:
-                os.close(root_fd)
-            os.close(job_fd)
-            temporary = Path(
-                tempfile.mkdtemp(prefix=f".{generation}.", dir=target.parent)
-            )
-            try:
                 if shared:
-                    # Group-handoff the temp generation root BEFORE populating and
-                    # renaming, or the renamed generation root (mkdtemp is always
-                    # 0700) would fail broker-side ownership validation.
-                    os.chown(temporary, -1, self.shared_gid)
-                    os.chmod(temporary, 0o2750)
+                    # The temp root becomes group-readable before population so
+                    # descendants inherit the shared gid, but the broker still
+                    # cannot traverse the owner-only .tmp ancestor.
+                    descriptor = _open_owned_directory(
+                        temporary.name,
+                        dir_fd=temporary_root_fd,
+                        label="workspace ingress temporary stage",
+                        uid=self._stage_uid,
+                        device=os.fstat(temporary_root_fd).st_dev,
+                    )
+                    try:
+                        os.fchown(descriptor, -1, self.shared_gid)
+                        os.fchmod(descriptor, 0o2750)
+                    finally:
+                        os.close(descriptor)
                 tree = temporary / _TREE
                 sha256, file_count, byte_count = _copy_snapshot(
                     source,
@@ -1150,23 +1257,111 @@ class LocalWorkspaceIngress:
                     manifest,
                     mode=0o440 if shared else 0o400,
                 )
-                if target.exists():
-                    existing = self._read_manifest(target)
+                # Create/open the broker-traversable job directory only after
+                # the private stage is complete and ready for publication.
+                job_fd = _ensure_owned_child(
+                    root_fd,
+                    str(job_id),
+                    mode=self._stage_directory_mode,
+                    gid=self.shared_gid,
+                    label="workspace ingress job",
+                )
+                # Persist a newly created job dirent before publishing its first
+                # generation; fsync(job_fd) cannot make the root entry durable.
+                os.fsync(root_fd)
+                try:
+                    existing_fd = _open_validated_directory(
+                        str(generation),
+                        dir_fd=job_fd,
+                        label="existing staged workspace generation",
+                        uid=self._stage_uid,
+                        gid=self.shared_gid,
+                        mode=self._stage_directory_mode,
+                    )
+                except WorkspaceIngressProblem:
+                    try:
+                        os.stat(
+                            str(generation),
+                            dir_fd=job_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        existing = None
+                    except OSError as exc:
+                        raise WorkspaceIngressProblem(
+                            "existing workspace seed cannot be inspected"
+                        ) from exc
+                    else:
+                        raise
+                else:
+                    try:
+                        existing = self._read_manifest_at(existing_fd)
+                    finally:
+                        os.close(existing_fd)
+                if existing is not None:
                     if existing != staged:
                         raise WorkspaceIngressProblem(
                             "workspace seed replay conflicts with existing content"
                         )
                     return existing
-                os.replace(temporary, target)
-                directory_fd = os.open(target.parent, os.O_RDONLY)
                 try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
+                    os.replace(
+                        temporary.name,
+                        str(generation),
+                        src_dir_fd=temporary_root_fd,
+                        dst_dir_fd=job_fd,
+                    )
+                except OSError as exc:
+                    if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                        raise WorkspaceIngressProblem(
+                            "workspace seed cannot be published atomically"
+                        ) from exc
+                    replay_fd = _open_validated_directory(
+                        str(generation),
+                        dir_fd=job_fd,
+                        label="concurrently staged workspace generation",
+                        uid=self._stage_uid,
+                        gid=self.shared_gid,
+                        mode=self._stage_directory_mode,
+                    )
+                    try:
+                        replay = self._read_manifest_at(replay_fd)
+                    finally:
+                        os.close(replay_fd)
+                    if replay != staged:
+                        raise WorkspaceIngressProblem(
+                            "workspace seed replay conflicts with existing content"
+                        )
+                    return replay
+                os.fsync(job_fd)
+                os.fsync(temporary_root_fd)
                 return staged
             finally:
-                if temporary.exists():
-                    shutil.rmtree(temporary, ignore_errors=True)
+                if temporary is not None and temporary_root_fd >= 0:
+                    try:
+                        _remove_owned_tree_at(
+                            temporary_root_fd,
+                            temporary.name,
+                            uid=self._stage_uid,
+                            device=os.fstat(temporary_root_fd).st_dev,
+                            missing_ok=True,
+                        )
+                    except (OSError, WorkspaceIngressProblem):
+                        pass
+                if job_fd >= 0:
+                    try:
+                        _remove_empty_open_directory(
+                            root_fd,
+                            str(job_id),
+                            job_fd,
+                        )
+                    except WorkspaceIngressProblem:
+                        pass
+                if temporary_root_fd >= 0:
+                    os.close(temporary_root_fd)
+                if job_fd >= 0:
+                    os.close(job_fd)
+                os.close(root_fd)
 
     def _materialize_tree(
         self, tree_fd: int, destination: Path, staged: StagedWorkspace
@@ -1325,17 +1520,17 @@ class LocalWorkspaceIngress:
 
     def _prune_stale_temporary(
         self,
-        job_fd: int,
+        parent_fd: int,
         name: str,
         *,
         cutoff: float,
     ) -> bool:
         """Reap an interrupted ``stage`` tree without mode/umask assumptions."""
         try:
-            parent = os.fstat(job_fd)
+            parent = os.fstat(parent_fd)
             descriptor = _open_owned_directory(
                 name,
-                dir_fd=job_fd,
+                dir_fd=parent_fd,
                 label="workspace ingress stale temporary stage",
                 uid=self._stage_uid,
                 device=parent.st_dev,
@@ -1354,7 +1549,7 @@ class LocalWorkspaceIngress:
 
         try:
             return _remove_owned_tree_at(
-                job_fd,
+                parent_fd,
                 name,
                 uid=self._stage_uid,
                 device=parent.st_dev,
@@ -1362,6 +1557,36 @@ class LocalWorkspaceIngress:
             )
         except WorkspaceIngressProblem:
             return False
+
+    def _prune_private_temporaries(self, root_fd: int, *, cutoff: float) -> int:
+        """Reap abandoned stages from the owner-only ``.tmp`` namespace."""
+        if self.expected_stage_uid is not None:
+            return 0
+        try:
+            temporary_root_fd = self._open_temporary_root(root_fd)
+        except WorkspaceIngressProblem:
+            return 0
+        removed = 0
+        try:
+            try:
+                names = os.listdir(temporary_root_fd)
+            except OSError:
+                return 0
+            for name in names:
+                identity = _temporary_stage_identity(name)
+                if identity is None:
+                    continue
+                job_id, generation = identity
+                with self._lock(job_id, generation):
+                    if self._prune_stale_temporary(
+                        temporary_root_fd,
+                        name,
+                        cutoff=cutoff,
+                    ):
+                        removed += 1
+        finally:
+            os.close(temporary_root_fd)
+        return removed
 
     def prune_stale(self, *, max_age_seconds: int) -> int:
         """Reap published stages and interrupted temp trees past the cutoff.
@@ -1376,6 +1601,7 @@ class LocalWorkspaceIngress:
         except WorkspaceIngressProblem:
             return removed
         try:
+            removed += self._prune_private_temporaries(root_fd, cutoff=cutoff)
             try:
                 job_names = os.listdir(root_fd)
             except OSError:
@@ -1403,6 +1629,8 @@ class LocalWorkspaceIngress:
                         except OSError:
                             continue
                         for generation_name in generation_names:
+                            # Upgrade compatibility for interrupted stages made
+                            # before the dedicated private namespace existed.
                             if _temporary_generation(generation_name) is not None:
                                 if self._prune_stale_temporary(
                                     job_fd,
