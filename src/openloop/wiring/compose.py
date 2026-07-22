@@ -330,10 +330,12 @@ async def compose(
         )
         limiter = _override_or(selected, "limiter", InMemoryTaskLimiter)
         engine = WorkflowEngine(stores.workflows)
-        # Compose the co-process broker behind its flag; build_broker owns its
-        # teardown on `stack`. Fail-closed: if the flag is on but the broker
-        # cannot be built, the handle stays None and build_coding_worker
-        # disables the worker rather than falling back to the direct launch path.
+        # Compose the configured broker client behind its flag; build_broker
+        # dispatches between the co-process graph and the external client-only
+        # graph, and owns any app-side teardown on `stack`. Fail-closed: if the
+        # flag is on but the broker cannot be built, the handle stays None and
+        # build_coding_worker disables the worker rather than falling back to the
+        # direct launch path.
         broker_handle = selected.get("broker_handle")
         if broker_handle is None and settings.coding_worker_openhands_broker_enabled:
             broker_handle = await build_broker(settings, stack, pool=pool)

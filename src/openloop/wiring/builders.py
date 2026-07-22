@@ -103,6 +103,11 @@ from openloop.workflows.postgres import PostgresWorkflowStore
 
 log = logging.getLogger("openloop")
 
+# Published ingress stages and interrupted stage temp trees can survive an app
+# crash before start_segment completes. Sweep only entries older than a full
+# generation-deadline horizon; active stages must never be reclaimed at startup.
+_INGRESS_STALE_SWEEP_SECONDS = 86_400
+
 
 def build_embedder(settings: Settings) -> Embedder | None:
     """Build an embedder only if enabled and its provider key is configured."""
@@ -539,9 +544,29 @@ def build_coding_worker(
                         workspace_ingress=broker_handle.workspace_ingress,
                         tenant_id=broker_handle.owner.tenant_id,
                     )
-                    log.info(
-                        "coding worker OpenHands runtime = broker (co-process)"
-                    )
+                    try:
+                        pruned = broker_handle.workspace_ingress.prune_stale(
+                            max_age_seconds=_INGRESS_STALE_SWEEP_SECONDS
+                        )
+                    except Exception:  # noqa: BLE001 - best-effort startup sweep
+                        log.warning(
+                            "broker workspace ingress stale sweep failed",
+                            exc_info=True,
+                        )
+                    else:
+                        if pruned:
+                            log.info(
+                                "pruned %d stale broker workspace ingress stage(s)",
+                                pruned,
+                            )
+                    if settings.broker_mode == "coprocess":
+                        log.info(
+                            "coding worker OpenHands runtime = broker (co-process)"
+                        )
+                    else:
+                        log.info(
+                            "coding worker OpenHands runtime = broker (external)"
+                        )
                 else:
                     docker_adapter = HardenedDockerWorkspace(
                         layout=layout,

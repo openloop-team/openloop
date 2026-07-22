@@ -1,6 +1,7 @@
 import errno
 import os
 import stat
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -348,6 +349,134 @@ def test_prune_and_prune_stale(tmp_path):
     ingress.stage(fresh, 1, source)
     assert ingress.prune_stale(max_age_seconds=3600) == 0
     assert (root / str(fresh) / "1").exists()
+
+
+def test_prune_stale_reaps_interrupted_stage_temp_tree(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root)
+    job_root = root / str(uuid4())
+    job_root.mkdir(mode=0o700)
+    temporary = Path(tempfile.mkdtemp(prefix=".1.", dir=job_root))
+    partial_tree = temporary / "tree"
+    partial_tree.mkdir(mode=0o700)
+    (partial_tree / "partial").write_text("incomplete")
+    os.utime(temporary, (0, 0))
+
+    assert ingress.prune_stale(max_age_seconds=3600) == 1
+    assert not job_root.exists()
+
+
+def test_prune_stale_reaps_pre_handoff_shared_temp_tree(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root, shared_gid=os.getgid())
+    job_root = root / str(uuid4())
+    job_root.mkdir(mode=0o700)
+    os.chown(job_root, -1, os.getgid())
+    job_root.chmod(0o2750)
+    temporary = Path(tempfile.mkdtemp(prefix=".1.", dir=job_root))
+    assert stat.S_IMODE(temporary.stat().st_mode) in (0o700, 0o2700)
+    os.utime(temporary, (0, 0))
+
+    assert ingress.prune_stale(max_age_seconds=3600) == 1
+    assert not job_root.exists()
+
+
+def test_prune_stale_reaps_shared_temp_with_transient_child_mode(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root, shared_gid=os.getgid())
+    job_root = root / str(uuid4())
+    job_root.mkdir(mode=0o700)
+    os.chown(job_root, -1, os.getgid())
+    job_root.chmod(0o2750)
+    temporary = Path(tempfile.mkdtemp(prefix=".1.", dir=job_root))
+    os.chown(temporary, -1, os.getgid())
+    temporary.chmod(0o2750)
+    previous_umask = os.umask(0o077)
+    try:
+        partial_tree = temporary / "tree"
+        partial_tree.mkdir(mode=0o750)
+    finally:
+        os.umask(previous_umask)
+    assert stat.S_IMODE(partial_tree.stat().st_mode) in (0o700, 0o2700)
+    (partial_tree / "partial").write_text("incomplete")
+    os.utime(temporary, (0, 0))
+
+    assert ingress.prune_stale(max_age_seconds=3600) == 1
+    assert not job_root.exists()
+
+
+def test_prune_stale_reaps_populated_temp_independent_of_mode(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root, shared_gid=os.getgid())
+    job_root = root / str(uuid4())
+    job_root.mkdir(mode=0o700)
+    os.chown(job_root, -1, os.getgid())
+    job_root.chmod(0o2750)
+    temporary = Path(tempfile.mkdtemp(prefix=".1.", dir=job_root))
+    (temporary / "unexpected").write_text("keep")
+    os.utime(temporary, (0, 0))
+
+    assert ingress.prune_stale(max_age_seconds=3600) == 1
+    assert not job_root.exists()
+
+
+def test_prune_stale_ignores_mode_but_skips_fresh_or_unsafe_entries(tmp_path):
+    root = tmp_path / "ingress"
+    root.mkdir(mode=0o700)
+    ingress = LocalWorkspaceIngress(root)
+    job_root = root / str(uuid4())
+    job_root.mkdir(mode=0o700)
+
+    fresh = Path(tempfile.mkdtemp(prefix=".1.", dir=job_root))
+    wrong_mode = job_root / ".2.abcdefgh"
+    wrong_mode.mkdir(mode=0o755)
+    wrong_mode.chmod(0o755)
+    os.utime(wrong_mode, (0, 0))
+    unrelated = job_root / ".3.not-a-temp"
+    unrelated.mkdir(mode=0o700)
+    os.utime(unrelated, (0, 0))
+    victim = tmp_path / "victim"
+    victim.mkdir(mode=0o700)
+    (victim / "keep").write_text("keep")
+    (job_root / ".4.abcdefgh").symlink_to(victim, target_is_directory=True)
+
+    assert ingress.prune_stale(max_age_seconds=3600) == 1
+    assert fresh.exists()
+    assert not wrong_mode.exists()
+    assert unrelated.exists()
+    assert (victim / "keep").read_text() == "keep"
+
+
+def test_temp_cleanup_directory_requires_app_uid_and_same_device(tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir(mode=0o700)
+    temporary = parent / ".1.abcdefgh"
+    temporary.mkdir(mode=0o700)
+    parent_fd = os.open(parent, wi_module._DIR_OPEN_FLAGS)
+    try:
+        device = os.fstat(parent_fd).st_dev
+        with pytest.raises(WorkspaceIngressProblem):
+            wi_module._open_owned_directory(
+                temporary.name,
+                dir_fd=parent_fd,
+                label="test temp",
+                uid=os.getuid() + 1,
+                device=device,
+            )
+        with pytest.raises(WorkspaceIngressProblem):
+            wi_module._open_owned_directory(
+                temporary.name,
+                dir_fd=parent_fd,
+                label="test temp",
+                uid=os.getuid(),
+                device=device + 1,
+            )
+    finally:
+        os.close(parent_fd)
 
 
 def test_prune_rejects_symlinked_job_without_deleting_target(tmp_path):

@@ -103,6 +103,31 @@ def _validate_generation(generation: int) -> None:
         raise ValueError("generation must be a positive PostgreSQL BIGINT")
 
 
+def _temporary_generation(name: str) -> int | None:
+    """Return the generation encoded by ``stage``'s mkdtemp name shape."""
+    if not name.startswith("."):
+        return None
+    generation_text, separator, suffix = name[1:].partition(".")
+    if (
+        not separator
+        or not suffix
+        or not suffix.isascii()
+        or any(
+            not (character.isalnum() or character == "_")
+            for character in suffix
+        )
+    ):
+        return None
+    try:
+        generation = int(generation_text)
+        _validate_generation(generation)
+    except (TypeError, ValueError):
+        return None
+    # stage() renders the integer directly, so aliases such as `.01.*` are not
+    # directories it can create and must not be treated as cleanup targets.
+    return generation if generation_text == str(generation) else None
+
+
 def _safe_component(name: str) -> None:
     if not name or name in {".", ".."} or "/" in name or "\0" in name:
         raise WorkspaceIngressProblem("workspace ingress path component is invalid")
@@ -154,6 +179,36 @@ def _open_validated_directory(
         _check_directory_descriptor(
             descriptor, label=label, uid=uid, gid=gid, mode=mode
         )
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_owned_directory(
+    path: str | Path,
+    *,
+    label: str,
+    uid: int,
+    device: int,
+    dir_fd: int | None = None,
+) -> int:
+    """Open an app-owned directory without interpreting mode as lifecycle state."""
+    try:
+        if dir_fd is None:
+            descriptor = os.open(path, _DIR_OPEN_FLAGS)
+        else:
+            descriptor = os.open(path, _DIR_OPEN_FLAGS, dir_fd=dir_fd)
+    except OSError as exc:
+        raise WorkspaceIngressProblem(f"{label} path is not a safe directory") from exc
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != uid
+            or info.st_dev != device
+        ):
+            raise WorkspaceIngressProblem(f"{label} directory metadata is invalid")
     except BaseException:
         os.close(descriptor)
         raise
@@ -365,6 +420,117 @@ def _remove_tree_at(
     except OSError as exc:
         raise WorkspaceIngressProblem(
             "workspace ingress cleanup cannot remove a directory"
+        ) from exc
+    return True
+
+
+def _remove_owned_tree_at(
+    parent_fd: int,
+    name: str,
+    *,
+    uid: int,
+    device: int,
+    missing_ok: bool = False,
+    expected_identity: tuple[int, int] | None = None,
+) -> bool:
+    """Remove one temp tree using ownership/confinement, independent of modes."""
+    _safe_component(name)
+    try:
+        descriptor = _open_owned_directory(
+            name,
+            dir_fd=parent_fd,
+            label="workspace ingress temp cleanup",
+            uid=uid,
+            device=device,
+        )
+    except WorkspaceIngressProblem:
+        try:
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if missing_ok:
+                return False
+        except OSError:
+            pass
+        raise
+    try:
+        before = os.fstat(descriptor)
+    except OSError as exc:
+        os.close(descriptor)
+        raise WorkspaceIngressProblem(
+            "workspace ingress temp cleanup target cannot be inspected"
+        ) from exc
+    if expected_identity is not None and (
+        before.st_dev,
+        before.st_ino,
+    ) != expected_identity:
+        os.close(descriptor)
+        raise WorkspaceIngressProblem(
+            "workspace ingress temp cleanup target changed before removal"
+        )
+    try:
+        try:
+            entries = os.listdir(descriptor)
+        except OSError as exc:
+            raise WorkspaceIngressProblem(
+                "workspace ingress temp cleanup cannot enumerate a directory"
+            ) from exc
+        for entry in entries:
+            _safe_component(entry)
+            try:
+                info = os.stat(entry, dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise WorkspaceIngressProblem(
+                    "workspace ingress temp cleanup cannot inspect an entry"
+                ) from exc
+            if info.st_uid != uid or info.st_dev != device:
+                raise WorkspaceIngressProblem(
+                    "workspace ingress temp cleanup entry metadata is invalid"
+                )
+            if stat.S_ISDIR(info.st_mode):
+                _remove_owned_tree_at(
+                    descriptor,
+                    entry,
+                    uid=uid,
+                    device=device,
+                    missing_ok=True,
+                    expected_identity=(info.st_dev, info.st_ino),
+                )
+            else:
+                try:
+                    os.unlink(entry, dir_fd=descriptor)
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise WorkspaceIngressProblem(
+                        "workspace ingress temp cleanup cannot unlink an entry"
+                    ) from exc
+    finally:
+        os.close(descriptor)
+    try:
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or current.st_uid != uid
+            or current.st_dev != device
+            or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise WorkspaceIngressProblem(
+                "workspace ingress temp cleanup target changed during removal"
+            )
+        os.rmdir(name, dir_fd=parent_fd)
+    except WorkspaceIngressProblem:
+        raise
+    except FileNotFoundError:
+        if missing_ok:
+            return False
+        raise WorkspaceIngressProblem(
+            "workspace ingress temp cleanup target vanished"
+        )
+    except OSError as exc:
+        raise WorkspaceIngressProblem(
+            "workspace ingress temp cleanup cannot remove a directory"
         ) from exc
     return True
 
@@ -1157,11 +1323,51 @@ class LocalWorkspaceIngress:
         with self._lock(job_id, generation):
             self._prune_locked(job_id, generation)
 
+    def _prune_stale_temporary(
+        self,
+        job_fd: int,
+        name: str,
+        *,
+        cutoff: float,
+    ) -> bool:
+        """Reap an interrupted ``stage`` tree without mode/umask assumptions."""
+        try:
+            parent = os.fstat(job_fd)
+            descriptor = _open_owned_directory(
+                name,
+                dir_fd=job_fd,
+                label="workspace ingress stale temporary stage",
+                uid=self._stage_uid,
+                device=parent.st_dev,
+            )
+        except (OSError, WorkspaceIngressProblem):
+            return False
+
+        try:
+            identity = os.fstat(descriptor)
+            if identity.st_mtime >= cutoff:
+                return False
+        except OSError:
+            return False
+        finally:
+            os.close(descriptor)
+
+        try:
+            return _remove_owned_tree_at(
+                job_fd,
+                name,
+                uid=self._stage_uid,
+                device=parent.st_dev,
+                expected_identity=(identity.st_dev, identity.st_ino),
+            )
+        except WorkspaceIngressProblem:
+            return False
+
     def prune_stale(self, *, max_age_seconds: int) -> int:
-        """Reap staged generations whose manifest is older than the cutoff.
+        """Reap published stages and interrupted temp trees past the cutoff.
 
         Defensive by design: entries that vanish concurrently are skipped, never
-        raised on.  Returns the number of generations removed.
+        raised on. Returns the number of stage entries removed.
         """
         cutoff = time.time() - max_age_seconds
         removed = 0
@@ -1197,6 +1403,14 @@ class LocalWorkspaceIngress:
                         except OSError:
                             continue
                         for generation_name in generation_names:
+                            if _temporary_generation(generation_name) is not None:
+                                if self._prune_stale_temporary(
+                                    job_fd,
+                                    generation_name,
+                                    cutoff=cutoff,
+                                ):
+                                    removed += 1
+                                continue
                             try:
                                 generation = int(generation_name)
                                 _validate_generation(generation)
