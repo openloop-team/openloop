@@ -10,6 +10,11 @@
 #
 # SECURITY: access to the Docker API is daemon-equivalent authority. Use this
 # only when the OpenLoop runtime and host are trusted and single-tenant.
+#
+# Coding-worker users selecting the external broker should layer
+# docker-compose.broker.yml instead: it grants the socket to the broker only.
+# This sandbox override remains necessary on `runtime` for the orthogonal
+# sealed-analysis Docker worker until that runtime is migrated to the broker.
 
 services:
   runtime:

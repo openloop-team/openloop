@@ -155,6 +155,7 @@ activemq-data/
 
 # Environments
 .env
+.env.broker
 .envrc
 .venv
 env/

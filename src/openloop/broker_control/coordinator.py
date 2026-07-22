@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+import logging
 from uuid import UUID
 
 from openloop.broker.errors import (
@@ -63,6 +64,9 @@ from .secrets import (
     RuntimeSecretAuthority,
     RuntimeSecretProblem,
 )
+
+
+log = logging.getLogger("openloop.broker")
 
 
 class BrokerSegmentCoordinator(SegmentCoordinator):
@@ -529,6 +533,11 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
                     SegmentCoordinatorCode.INTERNAL,
                     operation_id=ticket.operation_id,
                 ) from error
+            if isinstance(error, RuntimeDriverError):
+                # Runtime-driver messages contain fixed policy labels and
+                # secret-redacted command output. Keep RPC errors stable while
+                # retaining an actionable broker-local cause.
+                log.error("broker runtime start failed: %s", error)
             problem = self._problem(error, operation_id=ticket.operation_id)
             if starting or not authoritative_state_loaded:
                 await self._cleanup_starting(owner, ticket, problem, identity)

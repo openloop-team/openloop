@@ -1,0 +1,153 @@
+# External privileged broker override
+#
+# Usage:
+#   cp .env.broker.example .env.broker
+#   docker compose -f docker-compose.yml -f docker-compose.broker.yml up --build
+#
+# OPENLOOP_BROKER_ROOT must be an absolute host path. The one-shot init service
+# creates the root when absent, then provisions its five children with the exact
+# distinct-uid/shared-gid ownership matrix before either long-running service
+# starts.
+#
+# TRUST PARTITION: `.env` belongs to runtime and may contain only app-side broker
+# material (BROKER_IDENTITY_PRIVATE_KEY and BROKER_RECEIPT_ROOTS). `.env.broker`
+# belongs to broker and may contain only broker-side roots/publics
+# (BROKER_CAPABILITY_ROOTS, BROKER_RUNTIME_ROOTS,
+# BROKER_IDENTITY_PUBLIC_KEYS, BROKER_RECEIPT_PUBLIC_KEYS). The Postgres DSN is
+# intentionally present in both. Compose appends env_file values during merges,
+# so broker-side secrets must never enter `.env` in the first place.
+#
+# This override removes Docker authority from the coding-worker runtime. The
+# sealed analysis worker is orthogonal and still needs docker-compose.sandbox.yml
+# (which grants runtime the socket) until its own broker migration.
+
+x-openloop-build: &openloop-build
+  context: .
+  args:
+    OPENLOOP_BROKER_UID: ${OPENLOOP_BROKER_UID:-10002}
+    OPENLOOP_DATA_GID: ${OPENLOOP_DATA_GID:-10777}
+
+services:
+  broker-init:
+    build: *openloop-build
+    user: "0:0"
+    command: python -m openloop.broker_provision
+    environment:
+      OPENLOOP_BROKER_ROOT: ${OPENLOOP_BROKER_ROOT:?}
+      OPENLOOP_APP_UID: "1000"
+      OPENLOOP_BROKER_UID: ${OPENLOOP_BROKER_UID:-10002}
+      OPENLOOP_DATA_GID: ${OPENLOOP_DATA_GID:-10777}
+    volumes:
+      - type: bind
+        source: ${OPENLOOP_BROKER_ROOT:?}
+        target: ${OPENLOOP_BROKER_ROOT:?}
+        bind:
+          create_host_path: true
+    restart: "no"
+
+  broker:
+    build: *openloop-build
+    user: "${OPENLOOP_BROKER_UID:-10002}:${OPENLOOP_DATA_GID:-10777}"
+    group_add:
+      - ${DOCKER_GID:?}
+      - ${OPENLOOP_DATA_GID:-10777}
+    env_file: .env.broker
+    environment:
+      BROKER_MODE: external
+      BROKER_CONTROL_SOCKET_DIR: ${OPENLOOP_BROKER_ROOT:?}/control
+      BROKER_STATE_ROOT: ${OPENLOOP_BROKER_ROOT:?}/state
+      BROKER_RUNTIME_ROOT: ${OPENLOOP_BROKER_ROOT:?}/runtime
+      BROKER_INGRESS_ROOT: ${OPENLOOP_BROKER_ROOT:?}/ingress
+      BROKER_CHECKPOINT_RECEIPT_ROOT: ${OPENLOOP_BROKER_ROOT:?}/receipts
+      BROKER_SHARED_DATA_GID: ${OPENLOOP_DATA_GID:-10777}
+      BROKER_EXPECTED_APP_UID: "1000"
+      BROKER_IDENTITY_ISSUER: ${BROKER_IDENTITY_ISSUER:-openloop-app}
+      BROKER_IDENTITY_AUDIENCE: ${BROKER_IDENTITY_AUDIENCE:-openloop-broker}
+      BROKER_EXECUTION_LEASE_SECONDS: ${BROKER_EXECUTION_LEASE_SECONDS:-900}
+      BROKER_GENERATION_DEADLINE_SECONDS: ${BROKER_GENERATION_DEADLINE_SECONDS:-1800}
+      BROKER_RECONCILE_INTERVAL_SECONDS: ${BROKER_RECONCILE_INTERVAL_SECONDS:-300}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    command: openloop-broker
+    depends_on:
+      broker-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "openloop-broker", "--healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ${DOCKER_SOCKET:-/var/run/docker.sock}
+        target: /var/run/docker.sock
+      - type: bind
+        source: ${OPENLOOP_BROKER_ROOT:?}/control
+        target: ${OPENLOOP_BROKER_ROOT:?}/control
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${OPENLOOP_BROKER_ROOT:?}/state
+        target: ${OPENLOOP_BROKER_ROOT:?}/state
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${OPENLOOP_BROKER_ROOT:?}/runtime
+        target: ${OPENLOOP_BROKER_ROOT:?}/runtime
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${OPENLOOP_BROKER_ROOT:?}/ingress
+        target: ${OPENLOOP_BROKER_ROOT:?}/ingress
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${OPENLOOP_BROKER_ROOT:?}/receipts
+        target: ${OPENLOOP_BROKER_ROOT:?}/receipts
+        read_only: true
+        bind:
+          create_host_path: true
+
+  runtime:
+    build: *openloop-build
+    group_add:
+      - ${OPENLOOP_DATA_GID:-10777}
+    environment:
+      BROKER_MODE: external
+      BROKER_CONTROL_SOCKET_DIR: ${OPENLOOP_BROKER_ROOT:?}/control
+      BROKER_RUNTIME_ROOT: ${OPENLOOP_BROKER_ROOT:?}/runtime
+      BROKER_INGRESS_ROOT: ${OPENLOOP_BROKER_ROOT:?}/ingress
+      BROKER_CHECKPOINT_RECEIPT_ROOT: ${OPENLOOP_BROKER_ROOT:?}/receipts
+      BROKER_SHARED_DATA_GID: ${OPENLOOP_DATA_GID:-10777}
+      BROKER_IDENTITY_ISSUER: ${BROKER_IDENTITY_ISSUER:-openloop-app}
+      BROKER_IDENTITY_AUDIENCE: ${BROKER_IDENTITY_AUDIENCE:-openloop-broker}
+      BROKER_EXECUTION_LEASE_SECONDS: ${BROKER_EXECUTION_LEASE_SECONDS:-900}
+      BROKER_GENERATION_DEADLINE_SECONDS: ${BROKER_GENERATION_DEADLINE_SECONDS:-1800}
+      CODING_WORKER_OPENHANDS_BROKER_ENABLED: "true"
+    depends_on:
+      broker:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ${OPENLOOP_BROKER_ROOT:?}/control
+        target: ${OPENLOOP_BROKER_ROOT:?}/control
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${OPENLOOP_BROKER_ROOT:?}/runtime
+        target: ${OPENLOOP_BROKER_ROOT:?}/runtime
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${OPENLOOP_BROKER_ROOT:?}/ingress
+        target: ${OPENLOOP_BROKER_ROOT:?}/ingress
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${OPENLOOP_BROKER_ROOT:?}/receipts
+        target: ${OPENLOOP_BROKER_ROOT:?}/receipts
+        bind:
+          create_host_path: true

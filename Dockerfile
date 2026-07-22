@@ -6,9 +6,18 @@ FROM python:3.12-slim
 # guardrail against unsandboxed auto-approval). The container itself is the
 # sandbox here, so we drop to an unprivileged user to satisfy the check. uid/gid
 # 1000 is a conventional first non-system id; pin it so bind-mount ownership is
-# predictable across hosts.
+# predictable across hosts. The external broker keeps a distinct uid while one
+# pinned supplementary gid mediates only the explicitly shared filesystem
+# surfaces. Keep uid 1000 stable: existing host bind mounts rely on it.
+ARG OPENLOOP_BROKER_UID=10002
+ARG OPENLOOP_DATA_GID=10777
 RUN groupadd --gid 1000 openloop \
-    && useradd --uid 1000 --gid openloop --create-home --shell /bin/bash openloop
+    && groupadd --gid "${OPENLOOP_DATA_GID}" openloop-data \
+    && useradd --uid 1000 --gid openloop --create-home --shell /bin/bash openloop \
+    && usermod --append --groups openloop-data openloop \
+    && useradd --uid "${OPENLOOP_BROKER_UID}" --gid openloop-data \
+        --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
+        openloop-broker
 
 WORKDIR /app
 

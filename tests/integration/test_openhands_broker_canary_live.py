@@ -51,7 +51,8 @@ def _build_canary_image(workspace: Path) -> None:
     assert result.returncode == 0, result.stderr[-4000:]
 
 
-def test_phase5_checkpoint_park_resume_finalize_real_docker():
+def run_phase5_checkpoint_park_resume_finalize_real_docker():
+    """Execute the reusable real-Docker lifecycle without pytest gating."""
     workspace = Path(__file__).resolve().parents[2]
     suffix = uuid.uuid4().hex[:12]
     network = f"olp5-canary-{suffix}"
@@ -158,6 +159,12 @@ def test_phase5_checkpoint_park_resume_finalize_real_docker():
                 _CANARY_IMAGE,
                 "/workspace/openloop/tests/support/phase5_canary_runner.py",
             ]
+            topology = os.environ.get("OPENLOOP_CANARY_BROKER_MODE")
+            if topology:
+                command[command.index(_CANARY_IMAGE):command.index(_CANARY_IMAGE)] = [
+                    "--env",
+                    f"OPENLOOP_CANARY_BROKER_MODE={topology}",
+                ]
             result = subprocess.run(
                 command,
                 check=False,
@@ -174,6 +181,9 @@ def test_phase5_checkpoint_park_resume_finalize_real_docker():
         )
         payload = json.loads(proof)
         assert payload["status"] == "terminal"
+        assert payload["topology"] == os.environ.get(
+            "OPENLOOP_CANARY_BROKER_MODE", "coprocess"
+        )
         assert payload["generations"][-1] == 2
         assert "parking" in payload["statuses"]
         assert "finalizing" in payload["statuses"]
@@ -196,3 +206,7 @@ def test_phase5_checkpoint_park_resume_finalize_real_docker():
             check=False,
             capture_output=True,
         )
+
+
+def test_phase5_checkpoint_park_resume_finalize_real_docker():
+    run_phase5_checkpoint_park_resume_finalize_real_docker()
