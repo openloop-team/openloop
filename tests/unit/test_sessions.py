@@ -12,10 +12,7 @@ from pathlib import Path
 import pytest
 
 from openloop.agents import load_agent
-from openloop.agents.schema import Tool
 from openloop.approvals import ApprovalRequest
-from openloop.analysis import InMemoryArtifactStore
-from openloop.deliverable import Artifact, Prose
 from openloop.memory import InMemoryStore
 from openloop.models.gateway import ModelResponse
 from openloop.runtime import Runtime, Task
@@ -32,15 +29,12 @@ import time
 
 from openloop.sessions.runner import PROGRESS_REFRESH_SECONDS, PROGRESS_STATUS_TEXT
 from openloop.tools import Invocation, ToolGateway, ToolResult
-from openloop.tools.analysis_worker import AnalysisWorkerConnector
 from openloop.tools.coding_worker import CodingWorkerConnector
 from openloop.tools.github import GitHubConnector
 from openloop.usage import InMemoryUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowInstance
-from openloop.workflows.analysis_worker import build_analysis_worker_workflow
 from openloop.workflows.coding_worker import build_coding_worker_workflow
 from openloop.testing import (
-    FakeAnalysisOrchestrator,
     FakeGitHub,
     FakeSurfaceDelivery,
     FakeWorkerOrchestrator,
@@ -410,194 +404,6 @@ async def test_workflow_progress_is_surfaced_as_transient_status():
     assert all(a != b for a, b in zip(phrases, phrases[1:]))
     # It still delivers the final answer (the M0b model reply) after the ticks.
     assert delivery.finals[-1]["text"] == "Opened draft PR #1 🚀"
-
-
-# --- runner: artifact-ref delivery (sealed analysis, Phase 2) -------------
-
-def _analysis_runner(*, orch=None, threads=None, responses=None):
-    """A runner whose agent can start the sealed analysis workflow."""
-    agent = load_agent(AGENT_YAML)
-    agent.spec.tools.append(
-        Tool(name="analysis", type="native", permissions=["report:write"])
-    )
-    agent.spec.approvals.require_for.append("analysis.report:write")
-    orch = orch or FakeAnalysisOrchestrator()
-    engine = WorkflowEngine(InMemoryWorkflowStore())
-    engine.register(build_analysis_worker_workflow(orch))
-    tools = ToolGateway(tools=[AnalysisWorkerConnector(orch)], engine=engine)
-    sessions = InMemorySurfaceSessionStore()
-    delivery = FakeSurfaceDelivery()
-    runtime = Runtime(
-        agent,
-        gateway=ScriptedGateway(
-            responses
-            if responses is not None
-            else [
-                # ONE scripted response only: the report must be delivered from
-                # the ref, so no M0b continuation call may ever be made.
-                tool_call_response(
-                    "m",
-                    [("c1", "analysis_report_write",
-                      {"instruction": "summarize the sales data",
-                       "inputs": [
-                           {"source": "staged", "input_ref": "staged:one"}
-                       ]})],
-                ),
-            ]
-        ),
-        tools=tools,
-        usage=InMemoryUsageStore(),
-        memory=InMemoryStore(),
-        engine=engine,
-    )
-    runner = SessionRunner(
-        runtime, sessions, delivery, threads=threads, artifacts=orch.artifacts
-    )
-    return runner, sessions, delivery, engine, tools, orch
-
-
-async def test_analysis_report_is_delivered_as_artifact_from_ref_without_model_rerun():
-    runner, sessions, delivery, engine, tools, orch = _analysis_runner()
-    session = await runner.run(_task("analyze the sales data"), _target())
-    assert session.status == "waiting"
-    approval_id = session.approval_ids[0]
-    job_id = (await tools.approvals.get(approval_id)).args["job_id"]
-
-    message = await runner.resolve_approval(approval_id, "@maciag.artur", approve=True)
-
-    assert message.startswith("✅ Approved by @maciag.artur")
-    done_wf = await engine.wait_background(job_id)
-    assert done_wf.status == "completed"
-
-    done = await sessions.get(session.id)
-    assert done.status == "completed"
-    assert done.final_message_id is not None
-    # The session persists the ref + replay-safe prose — never the body.
-    assert done.result_artifact_ref == f"analysis://{job_id}/report.md"
-    assert done.result_summary == orch.prose
-    assert "FULL-REPORT-TAIL" not in done.result_summary
-
-    # The final answer is the report itself, dereferenced into an Artifact.
-    final = delivery.finals[-1]["text"]
-    assert isinstance(final, Artifact)
-    assert final.content == orch.body.decode()
-    assert final.summary == orch.prose
-    assert final.filename == "report.md"
-    assert final.snippet_type == "markdown"
-    # Bypass-M0b: exactly one model call (the original turn) was ever made.
-    assert len(runner.runtime.gateway.calls) == 1
-    # The approval card was collapsed (no buttons left).
-    assert delivery.approvals[-1]["requests"] == []
-
-
-async def test_analysis_transcript_replays_prose_never_the_report_body():
-    threads = InMemoryThreadRecordStore()
-    runner, sessions, delivery, engine, tools, orch = _analysis_runner(threads=threads)
-    session = await runner.run(_task("analyze the sales data"), _target())
-    approval_id = session.approval_ids[0]
-    job_id = (await tools.approvals.get(approval_id)).args["job_id"]
-
-    await runner.resolve_approval(approval_id, "@maciag.artur", approve=True)
-    await engine.wait_background(job_id)
-
-    frags = await threads.replayable_transcript(
-        session.target, exclude_turn_id="other", limit=10
-    )
-    assert len(frags) == 1
-    assert frags[0].answer == orch.prose
-    assert "FULL-REPORT-TAIL" not in frags[0].answer
-
-
-async def test_analysis_failure_continues_via_model_like_any_tool_failure():
-    # A failed sealed run has no artifact ref, so it takes the normal M0b
-    # continuation path: the model sees the failure and phrases the reply.
-    orch = FakeAnalysisOrchestrator(error="input upload:one was never staged")
-    runner, sessions, delivery, engine, tools, _ = _analysis_runner(
-        orch=orch,
-        responses=[
-            tool_call_response(
-                "m",
-                [("c1", "analysis_report_write",
-                  {"instruction": "summarize the sales data",
-                   "inputs": [
-                       {"source": "staged", "input_ref": "staged:one"}
-                   ]})],
-            ),
-            ModelResponse(text="The analysis could not run: no staged input.", model="m"),
-        ],
-    )
-    session = await runner.run(_task("analyze the sales data"), _target())
-    approval_id = session.approval_ids[0]
-    job_id = (await tools.approvals.get(approval_id)).args["job_id"]
-
-    await runner.resolve_approval(approval_id, "@maciag.artur", approve=True)
-    failed_wf = await engine.wait_background(job_id)
-
-    assert failed_wf.status == "failed"
-    done = await sessions.get(session.id)
-    assert done.status == "completed"
-    assert done.result_artifact_ref is None
-    assert delivery.finals[-1]["text"] == "The analysis could not run: no staged input."
-
-
-async def test_retry_rematerializes_artifact_final_from_persisted_ref():
-    # A session that flipped completed with its ref recorded but crashed before
-    # the post: _ensure_delivered rebuilds the Artifact from the store.
-    orch = FakeAnalysisOrchestrator()
-    ref = await orch.artifacts.put("job-9", orch.body)
-    runner, sessions, delivery = _runner(ScriptedGateway([]))
-    runner.artifacts = orch.artifacts
-    session = SurfaceSession(
-        id="s-art", target=_target("ev-art"), status="completed",
-        request_text="analyze", result_summary=orch.prose,
-        result_artifact_ref=ref,
-    )
-    await sessions.upsert(session)
-
-    await runner._ensure_delivered(session)
-
-    final = delivery.finals[-1]["text"]
-    assert isinstance(final, Artifact)
-    assert final.content == orch.body.decode()
-    assert final.summary == orch.prose
-    assert (await sessions.get("s-art")).final_message_id is not None
-
-
-async def test_artifact_final_degrades_to_prose_when_body_is_unavailable():
-    # The ref outlived its body (e.g. an in-memory artifact store restarted):
-    # the answer still lands as the prose summary with an explicit notice.
-    runner, sessions, delivery = _runner(ScriptedGateway([]))
-    runner.artifacts = InMemoryArtifactStore()  # empty — the ref resolves to nothing
-    session = SurfaceSession(
-        id="s-lost", target=_target("ev-lost"), status="completed",
-        request_text="analyze", result_summary="# Findings",
-        result_artifact_ref="analysis://gone/report.md",
-    )
-    await sessions.upsert(session)
-
-    await runner._ensure_delivered(session)
-
-    final = delivery.finals[-1]["text"]
-    assert isinstance(final, Prose)
-    assert "# Findings" in final.text
-    assert "could not be retrieved" in final.text
-
-
-async def test_artifact_final_degrades_to_prose_without_a_store():
-    runner, sessions, delivery = _runner(ScriptedGateway([]))
-    assert runner.artifacts is None
-    session = SurfaceSession(
-        id="s-nostore", target=_target("ev-nostore"), status="completed",
-        request_text="analyze", result_summary="# Findings",
-        result_artifact_ref="analysis://job/report.md",
-    )
-    await sessions.upsert(session)
-
-    await runner._ensure_delivered(session)
-
-    final = delivery.finals[-1]["text"]
-    assert isinstance(final, Prose)
-    assert "could not be retrieved" in final.text
 
 
 async def test_progress_status_is_reasserted_after_refresh_interval():

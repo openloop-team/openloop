@@ -25,10 +25,9 @@ class _SpyEngine:
 
 
 class _SpyTools:
-    def __init__(self, engine, *, analysis_sandbox_enabled=False) -> None:
+    def __init__(self, engine) -> None:
         self.engine = engine
         self._tools: dict = {}  # _resume_worker_jobs looks up "coding_worker" here
-        self.analysis_sandbox_enabled = analysis_sandbox_enabled
 
 
 class _SpyRunner:
@@ -175,22 +174,6 @@ async def test_recovery_pass_converges_broker_before_app_recovery():
 
     assert led is True
     assert order == ["broker", "engine", "runner"]
-
-
-async def test_recovery_pass_sweeps_expired_sealed_analysis_containers(monkeypatch):
-    engine, runner = _SpyEngine(), _SpyRunner()
-    tools = _SpyTools(engine, analysis_sandbox_enabled=True)
-    calls = 0
-
-    async def sweep():
-        nonlocal calls
-        calls += 1
-        return ["openloop-expired"]
-
-    monkeypatch.setattr(builders, "sweep_expired_sandboxes", sweep)
-
-    assert await builders.run_recovery_pass(InProcessLock(), tools, runner) is True
-    assert calls == 1
 
 
 async def test_recovery_pass_skips_when_contended_but_retries_after_release():

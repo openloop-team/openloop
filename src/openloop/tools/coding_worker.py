@@ -1709,9 +1709,8 @@ class BuiltinCodingWorker:
 
     Isolation (hardening Phase 3): the model-influenced execution — applying
     the generated diff — runs through a :class:`~openloop.sandbox.Sandbox`.
-    The model *call* stays in this (controller) process, so the LLM key is
-    never in the sandbox's reach; with :class:`~openloop.sandbox.DockerSandbox`
-    the apply runs in a throwaway container with no network and no env.
+    The model *call* and diff application stay in this process. Containerized
+    execution belongs exclusively to the external OpenHands broker.
     """
 
     def __init__(

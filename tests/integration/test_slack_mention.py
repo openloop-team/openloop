@@ -12,7 +12,6 @@ import types
 
 import pytest
 
-from openloop.analysis import InMemoryUploadStore
 from openloop.agents import load_agent
 from openloop.models.gateway import ModelResponse
 from openloop.runtime import Task
@@ -64,12 +63,10 @@ class RecordingRuntime:
         return self._response
 
 
-def _runner(response, *, tools=None, uploads=None):
+def _runner(response, *, tools=None):
     runtime = RecordingRuntime(response, tools=tools)
     delivery = FakeSurfaceDelivery()
-    runner = SessionRunner(
-        runtime, InMemorySurfaceSessionStore(), delivery, uploads=uploads
-    )
+    runner = SessionRunner(runtime, InMemorySurfaceSessionStore(), delivery)
     return runner, runtime, delivery
 
 
@@ -133,40 +130,6 @@ async def test_reply_threads_under_existing_thread_ts():
     assert delivery.finals[-1]["target"].thread == "1700000000.000050"
 
 
-async def test_shared_file_metadata_is_recorded_and_exposed_without_its_bytes():
-    uploads = InMemoryUploadStore()
-    runner, runtime, _ = _runner(_reply(), uploads=uploads)
-
-    await handle_mention(
-        runner,
-        _event(
-            "<@U0BOT> analyze this",
-            files=[
-                {
-                    "id": "F123",
-                    "name": "sales.csv",
-                    "size": 1234,
-                    # Surface payloads can contain private URLs, but upload
-                    # inventory must retain metadata only.
-                    "url_private_download": "https://secret.invalid/file",
-                }
-            ],
-        ),
-        FakeSay(),
-    )
-
-    (record,) = await uploads.for_scope(runtime.tasks[0].thread_key)
-    assert (record.upload_ref, record.name, record.size) == (
-        "F123",
-        "sales.csv",
-        1234,
-    )
-    assert not hasattr(record, "url_private_download")
-    notes = "\n".join(runtime.tasks[0].context_notes)
-    assert "sales.csv" in notes and "upload_ref F123" in notes
-    assert "secret.invalid" not in notes
-
-
 async def test_runtime_failure_posts_error_not_crash():
     runner, runtime, delivery = _runner(RuntimeError("boom"))
     say = FakeSay()
@@ -186,7 +149,7 @@ async def test_handoff_failure_before_delivery_posts_error_in_thread():
         def __init__(self):
             self.runtime = types.SimpleNamespace(agent=load_agent(AGENT_YAML))
 
-        async def run(self, task, target):
+        async def run_threaded(self, task, target):
             raise RuntimeError("session store down")
 
     say = FakeSay()

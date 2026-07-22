@@ -20,11 +20,11 @@ import pytest
 from openloop.broker.models import JobState, VerifiedCheckpointReceipt
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 from openloop.config import Settings
+from openloop.openhands.workspace_protocol import ArchiveStreamResult
 from openloop.tools.openhands_broker_workspace import (
     BrokerWorkspaceAdapter,
     BrokerWorkspaceError,
 )
-from openloop.tools.openhands_docker import ArchiveStreamResult
 from openloop.tools.openhands_resume import ResumeDecision, WorkerPaused
 from openloop.tools.openhands_state import OpenHandsKeyDeriver, OpenHandsStateLayout
 from openloop.tools.openhands_artifacts import (
@@ -339,42 +339,6 @@ def test_probe_is_noop_with_injected_factory():
         workspace_factory=lambda endpoint: None,
     )
     adapter.probe()
-
-
-async def test_build_coding_worker_selects_broker_adapter(tmp_path, sock_dir):
-    # End-to-end wiring: flag on + openhands + docker + a composed handle makes
-    # build_coding_worker construct the OpenHands worker over the broker adapter
-    # (not the direct HardenedDockerWorkspace).
-    from openloop.tools.openhands_relay import OpenHandsRelayError, probe_relay_compatibility
-
-    try:
-        probe_relay_compatibility()
-    except OpenHandsRelayError:
-        pytest.skip("pinned OpenHands relay SDK is unavailable/incompatible")
-
-    from openloop.wiring.builders import build_coding_worker
-
-    ohstate = tmp_path / "ohstate"
-    ohstate.mkdir()
-    settings = _settings(
-        tmp_path,
-        sock_dir,
-        coding_worker_backend="openhands",
-        coding_worker_sandbox="docker",
-        coding_worker_openhands_state_dir=str(ohstate),
-        coding_worker_openhands_state_master_key=base64.b64encode(b"y" * 32).decode(),
-    )
-    async with AsyncExitStack() as stack:
-        handle = await build_broker(
-            settings, stack, runtime_driver=InMemoryRuntimeDriver()
-        )
-        worker = build_coding_worker(settings, broker_handle=handle)
-
-    assert worker is not None
-    assert isinstance(worker._docker_adapter, BrokerWorkspaceAdapter)
-    assert worker._docker_adapter.runs_containers_locally is False
-    assert worker._docker_adapter._checkpoint_store is handle.checkpoint_store
-    assert handle.reconciler is not None
 
 
 class _LifecycleWorkspace:

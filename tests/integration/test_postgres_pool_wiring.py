@@ -6,12 +6,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from openloop import app as appmod
-from openloop.analysis import (
-    InMemoryAnalysisAttemptStore,
-    InMemoryArtifactStore,
-    InMemoryInputStore,
-    InMemoryUploadStore,
-)
 from openloop.config import Settings
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
@@ -100,10 +94,6 @@ def test_lifespan_creates_and_closes_one_shared_pool(monkeypatch, tmp_path):
                 ctx.checkpoints,
                 ctx.sessions,
                 ctx.threads,
-                ctx.analysis_inputs,
-                ctx.analysis_artifacts,
-                ctx.analysis_attempts,
-                ctx.analysis_uploads,
                 ctx.engine.store,
             ]
             assert all(store._pool is pool for store in ordinary_stores)
@@ -140,9 +130,3 @@ def test_pool_creation_failure_uses_fallbacks_without_store_pool_attempts(
         assert isinstance(ctx.workflows, InMemoryWorkflowStore)
         assert isinstance(ctx.sessions, InMemorySurfaceSessionStore)
         assert isinstance(ctx.threads, InMemoryThreadRecordStore)
-        assert isinstance(ctx.analysis_inputs, InMemoryInputStore)
-        assert isinstance(ctx.analysis_artifacts, InMemoryArtifactStore)
-        assert isinstance(
-            ctx.analysis_attempts, InMemoryAnalysisAttemptStore
-        )
-        assert isinstance(ctx.analysis_uploads, InMemoryUploadStore)

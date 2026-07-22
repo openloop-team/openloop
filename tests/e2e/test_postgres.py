@@ -20,7 +20,6 @@ import pytest
 
 from openloop.agents import load_agent
 from openloop.approvals.postgres import PostgresApprovalStore
-from openloop.analysis.postgres import PostgresAnalysisAttemptStore
 from openloop.memory.postgres import PostgresMemoryStore
 from openloop.memory.store import MemoryRecord, scope_key_for
 from openloop.runtime import Runtime, Task
@@ -210,94 +209,6 @@ async def test_happy_path_end_to_end(stores):
     assert any("open an issue to track" in t for t in texts)
 
 
-async def test_analysis_attempt_and_usage_idempotency_survive_a_new_store(
-    postgres_pool,
-):
-    """The accounting checkpoints remain safe across a controller restart."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
-
-    attempt_id = f"analysis-attempt-{uuid.uuid4().hex}"
-    scope_key = f"ws:e2e:agent:{attempt_id}"
-    attempts = PostgresAnalysisAttemptStore()
-    usage = PostgresUsageStore()
-    await attempts.setup(postgres_pool)
-    await usage.setup(postgres_pool)
-    try:
-        attempt, created = await attempts.begin(attempt_id, "job-1")
-        assert created and attempt.status == "started"
-        await attempts.charge(
-            attempt_id,
-            cost_usd=0.12,
-            prompt_tokens=100,
-            completion_tokens=20,
-        )
-        # Iterative runs re-charge growing cumulative totals; an equal replay
-        # is a safe crash retry; a decrease means lost track of spend.
-        grown = await attempts.charge(
-            attempt_id, cost_usd=0.24, prompt_tokens=200, completion_tokens=40
-        )
-        assert grown.status == "charged" and grown.cost_usd == 0.24
-        await attempts.charge(
-            attempt_id, cost_usd=0.24, prompt_tokens=200, completion_tokens=40
-        )
-        with pytest.raises(RuntimeError, match="decrease"):
-            await attempts.charge(
-                attempt_id, cost_usd=0.12, prompt_tokens=200, completion_tokens=40
-            )
-        assert await usage.record(UsageRecord(
-            scope_key=scope_key,
-            workspace="e2e",
-            agent="e2e",
-            model="analysis-model",
-            task_kind="analysis_worker",
-            idempotency_key=attempt_id,
-            cost_usd=0.24,
-            prompt_tokens=200,
-            completion_tokens=40,
-        ))
-        # The durable usage key turns replayed settlement into a no-op.
-        assert not await usage.record(UsageRecord(
-            scope_key=scope_key,
-            workspace="e2e",
-            agent="e2e",
-            model="analysis-model",
-            task_kind="analysis_worker",
-            idempotency_key=attempt_id,
-            cost_usd=0.24,
-            prompt_tokens=200,
-            completion_tokens=40,
-        ))
-        await attempts.settle(attempt_id)
-
-        restarted_attempts = PostgresAnalysisAttemptStore()
-        await restarted_attempts.setup(postgres_pool)
-        try:
-            restored = await restarted_attempts.get(attempt_id)
-            assert restored is not None
-            assert restored.status == "settled"
-            assert restored.cost_usd == 0.24
-        finally:
-            await restarted_attempts.close()
-    finally:
-        try:
-            pool = attempts._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM analysis_attempts WHERE attempt_id = $1", attempt_id
-                )
-        finally:
-            await attempts.close()
-        try:
-            pool = usage._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM usage WHERE idempotency_key = $1", attempt_id
-                )
-        finally:
-            await usage.close()
-
-
 async def test_worker_checkpoint_resume_across_real_postgres(postgres_pool):
     """A worker job persisted to Postgres resumes on a fresh store instance."""
     if not await _reachable():
@@ -450,9 +361,7 @@ async def test_surface_session_roundtrip_across_real_postgres(postgres_pool):
             progress_message_id="ts-1",
             approval_ids=[approval_id],
             request_text="please do the thing",
-            # Phase 2 (sealed analysis): only the ref is persisted, so a
-            # re-delivery after restart can re-materialize the report.
-            result_artifact_ref="analysis://job-1/report.md",
+            result_artifact_ref="artifact://job-1/report.md",
         ))
 
         # A fresh store (a restart) reads it back by all three keys.
@@ -464,7 +373,7 @@ async def test_surface_session_roundtrip_across_real_postgres(postgres_pool):
             assert by_id.target.thread == "100.1"
             assert by_id.approval_ids == [approval_id]
             assert by_id.request_text == "please do the thing"
-            assert by_id.result_artifact_ref == "analysis://job-1/report.md"
+            assert by_id.result_artifact_ref == "artifact://job-1/report.md"
             assert (await store2.get_by_event(event_id)).id == session_id
             # The `@>` containment lookup (button → session) resolves the owner.
             assert (await store2.get_by_approval(approval_id)).id == session_id

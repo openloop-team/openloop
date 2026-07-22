@@ -14,12 +14,6 @@ from slack_bolt.async_app import AsyncApp
 
 from openloop.agents import load_agents
 from openloop.agents.schema import Agent
-from openloop.analysis import (
-    InMemoryAnalysisAttemptStore,
-    InMemoryArtifactStore,
-    InMemoryInputStore,
-    InMemoryUploadStore,
-)
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.config import Settings
@@ -43,10 +37,6 @@ _STORE_KEYS = {
     "workflows",
     "sessions",
     "threads",
-    "analysis_inputs",
-    "analysis_artifacts",
-    "analysis_attempts",
-    "analysis_uploads",
 }
 _LEAF_KEYS = _STORE_KEYS | {
     "embedder",
@@ -254,54 +244,6 @@ async def compose(
             label="thread-record",
             post_setup=_reset_thread_claims,
         )
-        analysis_inputs = await _settle_store(
-            stack,
-            _override_or(
-                selected,
-                "analysis_inputs",
-                lambda: builders.build_analysis_input_store(settings),
-            ),
-            InMemoryInputStore,
-            pool=pool,
-            mode=mode,
-            label="analysis input",
-        )
-        analysis_artifacts = await _settle_store(
-            stack,
-            _override_or(
-                selected,
-                "analysis_artifacts",
-                lambda: builders.build_analysis_artifact_store(settings),
-            ),
-            InMemoryArtifactStore,
-            pool=pool,
-            mode=mode,
-            label="analysis artifact",
-        )
-        analysis_attempts = await _settle_store(
-            stack,
-            _override_or(
-                selected,
-                "analysis_attempts",
-                lambda: builders.build_analysis_attempt_store(settings),
-            ),
-            InMemoryAnalysisAttemptStore,
-            pool=pool,
-            mode=mode,
-            label="analysis attempt",
-        )
-        analysis_uploads = await _settle_store(
-            stack,
-            _override_or(
-                selected,
-                "analysis_uploads",
-                lambda: builders.build_analysis_upload_store(settings),
-            ),
-            InMemoryUploadStore,
-            pool=pool,
-            mode=mode,
-            label="analysis upload",
-        )
         stores = SettledStores(
             memory=memory,
             usage=usage,
@@ -310,10 +252,6 @@ async def compose(
             workflows=workflows,
             sessions=sessions,
             threads=threads,
-            analysis_inputs=analysis_inputs,
-            analysis_artifacts=analysis_artifacts,
-            analysis_attempts=analysis_attempts,
-            analysis_uploads=analysis_uploads,
         )
 
         coordinator_candidate = _override_or(
@@ -330,15 +268,19 @@ async def compose(
         )
         limiter = _override_or(selected, "limiter", InMemoryTaskLimiter)
         engine = WorkflowEngine(stores.workflows)
-        # Compose the configured broker client behind its flag; build_broker
-        # dispatches between the co-process graph and the external client-only
-        # graph, and owns any app-side teardown on `stack`. Fail-closed: if the
-        # flag is on but the broker cannot be built, the handle stays None and
-        # build_coding_worker disables the worker rather than falling back to the
-        # direct launch path.
+        # Application composition accepts only the external client topology.
+        # The co-process graph remains constructible for isolated broker tests,
+        # but privileged lifecycle ownership must never return to the app.
         broker_handle = selected.get("broker_handle")
-        if broker_handle is None and settings.coding_worker_openhands_broker_enabled:
-            broker_handle = await build_broker(settings, stack, pool=pool)
+        if settings.coding_worker_openhands_broker_enabled:
+            if settings.broker_mode != "external":
+                log.error(
+                    "containerized OpenHands requires BROKER_MODE=external; "
+                    "the app will not compose a co-process broker"
+                )
+                broker_handle = None
+            elif broker_handle is None:
+                broker_handle = await build_broker(settings, stack, pool=pool)
 
         tools_factory = selected.get("tools_factory")
         if tools_factory is None:
@@ -349,10 +291,6 @@ async def compose(
                 stores.checkpoints,
                 engine,
                 usage=stores.usage,
-                analysis_inputs=stores.analysis_inputs,
-                analysis_artifacts=stores.analysis_artifacts,
-                analysis_attempts=stores.analysis_attempts,
-                analysis_uploads=stores.analysis_uploads,
                 broker_handle=broker_handle,
             )
         else:
@@ -388,8 +326,6 @@ async def compose(
                 bot_token=settings.slack_bot_token,
                 signing_secret=settings.slack_signing_secret or None,
                 threads=stores.threads,
-                artifacts=stores.analysis_artifacts,
-                uploads=stores.analysis_uploads,
             )
             session_runner = getattr(slack_app, "_session_runner", None)
             if settings.slack_signing_secret:

@@ -88,12 +88,6 @@ spec:
       type: native
       # Runs the worker (clone → model-edit → commit → push) and opens a draft PR.
       permissions: ["pr:write"]
-    - name: analysis
-      type: native
-      # Runs model-authored analysis over approved staged, thread-upload, or
-      # GitHub-archive inputs inside the sealed, network-disabled sandbox.
-      permissions: ["report:write"]
-
   # Risky / write actions require a human
   approvals:
     require_for:
@@ -101,9 +95,6 @@ spec:
       - github.pulls:write
       # Gates the worker STARTING + opening a draft PR — not a diff review.
       - coding_worker.pr:write
-      # Gates data provisioning and analysis-model spend. The connector also
-      # enforces this approval unconditionally as defense in depth.
-      - analysis.report:write
     approvers: ["@maciag.artur"]
 
   # Spend guardrails

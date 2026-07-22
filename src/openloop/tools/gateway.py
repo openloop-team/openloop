@@ -197,9 +197,8 @@ class ToolGateway:
                     message=f"invalid arguments for {action}: {problem}",
                 )
 
-        # Some actions are intrinsically high-risk regardless of an accidental
-        # omission in an agent's config. Phase 1 sealed analysis is one: it can
-        # process provisioned sensitive data and spend model budget.
+        # Connectors may require approval intrinsically regardless of an
+        # accidental omission in an agent's config.
         if (
             agent.spec.approvals.requires_approval(action)
             or getattr(tool, "requires_approval", False)
@@ -654,40 +653,4 @@ def _summarize(action: str, args: dict) -> str:
             f"run coding worker + open draft PR in {args.get('repo', '?')}: "
             f"{args.get('instruction', '')}"
         ).strip()
-    if action == "analysis.report:write":
-        # The sealed worker has no external write. Approval covers spend and
-        # the data scope that will be provisioned into its isolated sandbox,
-        # so the copy names each source concretely. Upload names come from the
-        # trusted display metadata the pre-approval resolution stamped
-        # (`upload_meta`) — the model only supplies an opaque upload_ref, so
-        # without the stamp this card could not truthfully name the file. Repo
-        # names are model-supplied by design: naming the repo to the approver
-        # IS the gate.
-        return (
-            f"run sealed analysis over {_describe_analysis_inputs(args)} "
-            f"(subject to configured spend limits): "
-            f"{args.get('instruction', '')}"
-        ).strip()
     return f"{action} {args}"
-
-
-def _describe_analysis_inputs(args: dict) -> str:
-    upload_meta = args.get("upload_meta") or {}
-    parts = []
-    for entry in args.get("inputs") or []:
-        if not isinstance(entry, dict):
-            continue
-        source = entry.get("source")
-        if source == "staged":
-            parts.append(f"staged input {entry.get('input_ref', '?')}")
-        elif source == "upload":
-            ref = entry.get("upload_ref", "?")
-            meta = upload_meta.get(ref) or {}
-            name = meta.get("name") or ref
-            parts.append(f"the file `{name}` shared in this thread")
-        elif source == "github":
-            ref = entry.get("ref") or "default branch"
-            parts.append(f"repo {entry.get('repo', '?')}@{ref}")
-        else:
-            parts.append(f"{source or '?'} input")
-    return ", ".join(parts) or "?"

@@ -37,7 +37,7 @@ def _state_master_key():
     return base64.urlsafe_b64encode(b"k" * 32).decode("ascii")
 
 
-def _gateway(settings, agents=None, usage=None):
+def _gateway(settings, agents=None, usage=None, broker_handle=None):
     return appmod.build_tool_gateway(
         settings,
         agents if agents is not None else {"dev-platform": load_agent(AGENT_YAML)},
@@ -45,6 +45,7 @@ def _gateway(settings, agents=None, usage=None):
         InMemoryCheckpointStore(),
         WorkflowEngine(InMemoryWorkflowStore()),
         usage=usage if usage is not None else InMemoryUsageStore(),
+        broker_handle=broker_handle,
     )
 
 
@@ -87,35 +88,44 @@ def test_unknown_backend_fails_closed(caplog):
     assert "CODING WORKER DISABLED" in caplog.text
 
 
-def test_openhands_registers_with_cap_and_probe(monkeypatch, tmp_path):
+def test_openhands_docker_requires_external_broker(monkeypatch, tmp_path, caplog):
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
-    gateway = _gateway(
-        _settings(
-            coding_worker_backend="openhands",
-            coding_worker_sandbox="docker",
-            coding_worker_openhands_network="egress-proxy",
-            coding_worker_openhands_state_dir=str(tmp_path / "openhands-state"),
-            coding_worker_openhands_state_master_key=_state_master_key(),
-            anthropic_api_key="sk-test",
+    with caplog.at_level("ERROR"):
+        gateway = _gateway(
+            _settings(
+                coding_worker_backend="openhands",
+                coding_worker_sandbox="docker",
+                coding_worker_openhands_network="egress-proxy",
+                coding_worker_openhands_state_dir=str(tmp_path / "openhands-state"),
+                coding_worker_openhands_state_master_key=_state_master_key(),
+                anthropic_api_key="sk-test",
+            )
         )
-    )
 
-    worker = gateway._tools["coding_worker"].orchestrator.worker
-    assert isinstance(worker, OpenHandsCodingWorker)
-    # CODING_WORKER_SANDBOX=docker maps to the mounted DockerWorkspace mode.
-    assert worker.docker is True
-    assert worker.network == "egress-proxy"
-    # The provider key for the worker model is threaded from settings.
-    assert worker._api_key == "sk-test"
-    assert worker._docker_adapter is not None
-    assert worker.artifact_store is not None
-    assert worker.cold_resume_enabled is True
-    assert worker._docker_adapter.layout.root == (
-        tmp_path / "openhands-state"
-    ).resolve()
+    assert "coding_worker" not in gateway._tools
+    assert "external broker" in caplog.text
 
 
-def test_openhands_docker_without_dedicated_state_secret_fails_closed(
+def test_openhands_docker_rejects_coprocess_broker_handle(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    with caplog.at_level("ERROR"):
+        gateway = _gateway(
+            _settings(
+                coding_worker_backend="openhands",
+                coding_worker_sandbox="docker",
+                coding_worker_openhands_broker_enabled=True,
+                broker_mode="coprocess",
+                coding_worker_openhands_state_dir=str(tmp_path / "openhands-state"),
+                coding_worker_openhands_state_master_key=_state_master_key(),
+            ),
+            broker_handle=object(),
+        )
+
+    assert "coding_worker" not in gateway._tools
+    assert "BROKER_MODE=external" in caplog.text
+
+
+def test_openhands_docker_without_external_broker_fails_before_state_setup(
     monkeypatch, caplog
 ):
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
@@ -128,10 +138,10 @@ def test_openhands_docker_without_dedicated_state_secret_fails_closed(
         )
 
     assert "coding_worker" not in gateway._tools
-    assert "STATE_MASTER_KEY" in caplog.text
+    assert "external broker" in caplog.text
 
 
-def test_openhands_invalid_state_secret_is_not_logged(monkeypatch, caplog, tmp_path):
+def test_rejected_docker_topology_does_not_log_state_secret(monkeypatch, caplog, tmp_path):
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
     invalid_secret = "not-valid-base64!!"
     with caplog.at_level("ERROR"):
@@ -145,7 +155,7 @@ def test_openhands_invalid_state_secret_is_not_logged(monkeypatch, caplog, tmp_p
         )
 
     assert "coding_worker" not in gateway._tools
-    assert "state configuration is invalid" in caplog.text
+    assert "external broker" in caplog.text
     assert invalid_secret not in caplog.text
 
 

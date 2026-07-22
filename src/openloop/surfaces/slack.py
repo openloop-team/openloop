@@ -13,12 +13,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import TYPE_CHECKING
 
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 from slack_bolt.async_app import AsyncApp
 
-from openloop.analysis.uploads import UploadRecord
 from openloop.runtime import Runtime, Task
 from openloop.sessions import (
     SessionRunner,
@@ -27,16 +25,12 @@ from openloop.sessions import (
     SurfaceTarget,
     ThreadRecordStore,
 )
-from openloop.sessions.threads import thread_scope_key
 from openloop.surfaces.approvals import (
     APPROVE_ACTION,
     DENY_ACTION,
     OPENHANDS_ACCEPT_ACTION,
     OPENHANDS_REJECT_ACTION,
 )
-
-if TYPE_CHECKING:
-    from openloop.analysis import ArtifactStore, UploadStore
 
 logger = logging.getLogger(__name__)
 
@@ -78,41 +72,6 @@ def _target_from_event(runtime: Runtime, event: dict, thread_ts: str | None) -> 
     )
 
 
-async def record_shared_files(runner: SessionRunner, event: dict) -> None:
-    """Record any files riding this event as thread-scoped upload metadata.
-
-    Phase 4 lazy staging: metadata only — no bytes are copied at arrival;
-    nothing a user posts is retained unless an approved analysis later asks
-    for it. The scope is the full thread-ownership tuple key, so an upload is
-    provisionable only from the exact thread it was shared in. Best-effort:
-    a recording failure must never break mention handling.
-    """
-    uploads = getattr(runner, "uploads", None)
-    if uploads is None or event.get("bot_id"):
-        return
-    files = event.get("files") or []
-    if not files:
-        return
-    thread_ts = event.get("thread_ts") or event.get("ts")
-    scope = thread_scope_key(_target_from_event(runner.runtime, event, thread_ts))
-    for file in files:
-        file_id = file.get("id") if isinstance(file, dict) else None
-        if not file_id:
-            continue
-        try:
-            await uploads.record(
-                UploadRecord(
-                    upload_ref=file_id,
-                    scope_key=scope,
-                    name=file.get("name") or file_id,
-                    size=int(file.get("size") or 0),
-                    user=event.get("user"),
-                )
-            )
-        except Exception:  # noqa: BLE001 — metadata is an inventory, not the turn
-            logger.warning("failed to record shared file %s", file_id, exc_info=True)
-
-
 async def handle_mention(runner: SessionRunner, event: dict, say) -> None:  # type: ignore[no-untyped-def]
     """Core ``app_mention`` logic: mention → session → background runner.
 
@@ -121,7 +80,6 @@ async def handle_mention(runner: SessionRunner, event: dict, say) -> None:  # ty
     mention path without a live Slack connection. The runner owns progress/final
     delivery; only the empty-mention help reply uses ``say`` directly.
     """
-    await record_shared_files(runner, event)
     text = _strip_mentions(event.get("text", ""))
     thread_ts = event.get("thread_ts") or event.get("ts")
     if not text:
@@ -153,9 +111,6 @@ async def handle_message(
     user is a perfectly valid follow-up and is handled here. The reply runs as a
     fresh turn in the same thread; ``run`` dedupes on the message ts.
     """
-    # A file share arrives as a `message` event with subtype "file_share" —
-    # record its metadata before the subtype filter below skips the message.
-    await record_shared_files(runner, event)
     if event.get("bot_id") or event.get("subtype"):
         return  # bot message, or an edit/delete/join subtype — not a user reply
     thread_ts = event.get("thread_ts")
@@ -187,8 +142,6 @@ def build_slack_app(
     bot_token: str,
     signing_secret: str | None = None,
     threads: ThreadRecordStore | None = None,
-    artifacts: "ArtifactStore | None" = None,
-    uploads: "UploadStore | None" = None,
 ) -> AsyncApp:
     """Build the Bolt app (mention + approval handlers) bound to a runtime.
 
@@ -203,8 +156,7 @@ def build_slack_app(
         app = AsyncApp(token=bot_token, request_verification_enabled=False)
 
     runner = SessionRunner(
-        runtime, sessions, SlackSurfaceDelivery(app.client), threads=threads,
-        artifacts=artifacts, uploads=uploads,
+        runtime, sessions, SlackSurfaceDelivery(app.client), threads=threads
     )
     # Exposed so the composition root and approval handler can reach the runner.
     app._session_runner = runner  # type: ignore[attr-defined]

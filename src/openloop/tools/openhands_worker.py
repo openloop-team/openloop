@@ -16,14 +16,9 @@ Two execution modes, following ``CODING_WORKER_SANDBOX``:
 - ``host`` — the OpenHands agent loop *and* its tool actions run in this
   (controller) process over the workspace directory. No isolation; same trust
   level as the light worker's :class:`~openloop.sandbox.HostSandbox`.
-- ``docker`` — the **mounted-workspace pattern** the roadmap calls for: the
-  agent server runs in its own container with the workspace bind-mounted at
-  ``/workspace`` (``DockerWorkspace``), no host environment forwarded. The
-  container edits files through the mount; the host keeps filesystem access
-  and pushes. Unlike the light worker's ``--network none`` sandbox, this
-  container needs egress to the model provider — point
-  ``CODING_WORKER_OPENHANDS_NETWORK`` at an egress-proxy network to allowlist
-  it.
+- ``docker`` — an external broker owns the container and exposes only an
+  authenticated workspace protocol to this process. The app never launches or
+  probes containers directly.
 
 Spend control: the OpenHands SDK v1 dropped the old ``max_budget_per_task``
 in-run cap, so the in-run knob passed here is ``max_iteration_per_run``; the
@@ -33,11 +28,9 @@ records this worker's metrics and fails the attempt closed — before any
 push/PR — when the per-task budget is exceeded. Wiring therefore refuses to
 register this backend without a per-task budget.
 
-The SDK import is lazy (``openhands`` extra); :meth:`probe` checks SDK/tool
-imports and, in docker mode, daemon reachability so common missing prerequisites
-disable the coding worker loudly before approval. The real
-``DockerWorkspace`` is still constructed per attempt because starting the
-agent-server image is comparatively expensive.
+The SDK import is lazy (``openhands`` extra); :meth:`probe` checks SDK/tool and
+broker-adapter compatibility so common missing prerequisites disable the coding
+worker loudly before approval.
 """
 
 from __future__ import annotations
@@ -54,13 +47,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from openloop.openhands.runtime_profile import (
+    DEFAULT_OPENHANDS_SERVER_IMAGE,
+    OpenHandsRuntimeProfileError,
+)
+from openloop.openhands.workspace_protocol import OpenHandsWorkspace
 from openloop.tools.coding_worker import StepCallback, WorkerEdit, WorkerRunAborted
 from openloop.tools.openhands_broker_workspace import BrokerWorkspaceError
-from openloop.tools.openhands_docker import (
-    DEFAULT_OPENHANDS_SERVER_IMAGE,
-    HardenedDockerWorkspace,
-    HardenedDockerWorkspaceError,
-)
 from openloop.tools.openhands_resume import (
     OPENHANDS_REJECTION_REASON,
     OpenHandsResumeError,
@@ -150,7 +143,7 @@ class OpenHandsCodingWorker:
         docker: bool = False,
         server_image: str = _DEFAULT_SERVER_IMAGE,
         network: str | None = None,
-        docker_adapter: HardenedDockerWorkspace | None = None,
+        docker_adapter: OpenHandsWorkspace | None = None,
         artifact_store: "WorkspaceArtifactStore | None" = None,
         cold_resume_enabled: bool = False,
         conversation_factory: ConversationFactory | None = None,
@@ -176,10 +169,9 @@ class OpenHandsCodingWorker:
         """Check cheap backend prerequisites at boot.
 
         Raises :class:`OpenHandsUnavailable` when the ``openhands`` extra is
-        missing (or, in docker mode, when the workspace package or the docker
-        daemon is unusable), so wiring can fail closed for common setup
-        mistakes. Docker image pull/start and provider auth are still validated
-        by the real per-attempt conversation.
+        missing (or, in broker mode, when the workspace adapter is unusable),
+        so wiring can fail closed for common setup mistakes. Runtime image and
+        provider auth are validated by the broker-owned attempt.
         """
         try:
             import openhands.sdk  # noqa: F401
@@ -195,22 +187,9 @@ class OpenHandsCodingWorker:
                 raise OpenHandsUnavailable(
                     "the OpenHands Docker adapter is not configured"
                 )
-            # The broker adapter owns Docker out-of-process, so the local-daemon
-            # and docker-mounted-SDK checks do not apply to it.
-            local_runtime = getattr(
-                self._docker_adapter, "runs_containers_locally", True
-            )
-            if local_runtime:
-                try:
-                    import openhands.workspace  # noqa: F401
-                except ImportError as exc:
-                    raise OpenHandsUnavailable(
-                        "openhands-workspace is not installed — required for the "
-                        f"docker-mounted OpenHands runtime ({exc})"
-                    ) from exc
             try:
                 self._docker_adapter.probe()
-            except (HardenedDockerWorkspaceError, BrokerWorkspaceError) as exc:
+            except (OpenHandsRuntimeProfileError, BrokerWorkspaceError) as exc:
                 raise OpenHandsUnavailable(str(exc)) from exc
             try:
                 probe_relay_compatibility()
@@ -218,19 +197,6 @@ class OpenHandsCodingWorker:
                 raise OpenHandsUnavailable(
                     f"native OpenHands relay compatibility check failed: {exc}"
                 ) from exc
-            if local_runtime:
-                import subprocess
-
-                try:
-                    subprocess.run(
-                        ["docker", "version", "--format", "{{.Server.Version}}"],
-                        check=True, capture_output=True, timeout=10,
-                    )
-                except Exception as exc:
-                    raise OpenHandsUnavailable(
-                        f"docker is not usable ({exc}); the OpenHands docker "
-                        "runtime cannot start"
-                    ) from exc
 
     async def run(
         self,

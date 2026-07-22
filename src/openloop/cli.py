@@ -3,14 +3,6 @@
 First slice supports validating/inspecting agent config-as-code. `apply` simply
 validates for now — registering against a live control plane lands with the
 durable runtime (see roadmap).
-
-`analysis stage` is the sealed-analysis worker's operator staging path: input
-bytes are staged out-of-band by a trusted operator/harness under a freshly
-generated high-entropy ``input_ref`` — a capability token whose possession is
-the authorization (job-agnostic lookup; job_id is purely run identity and is
-never carried in args). The model references it as a ``staged`` entry in the
-``inputs`` list (docs/sealed-analysis-worker.md §7; the full rehearsal
-walkthrough lives in docs/analysis-rehearsal.md).
 """
 
 from __future__ import annotations
@@ -227,126 +219,6 @@ def _insert_metadata_id(text: str, minted: str) -> tuple[str, str] | None:
     return "".join(new_lines), preview
 
 
-def _cmd_analysis_stage(args: argparse.Namespace) -> int:
-    """Stage operator-provided input bytes under a fresh capability ref.
-
-    Filenames are restricted to one path component (the flat input contract),
-    so a directory tree rides as a single ``git archive`` tarball the
-    generated program extracts inside the sandbox. The ``input_ref`` is
-    generated here with high entropy — possession of the printed ref is the
-    authorization, so operator-chosen (guessable) refs are deliberately not
-    accepted.
-    """
-    import asyncio
-    import secrets
-    import subprocess
-    from pathlib import Path
-
-    from openloop.analysis import InputFile, InputManifest
-    from openloop.config import get_settings
-
-    input_ref = f"staged:{secrets.token_urlsafe(24)}"
-    staged: list[InputFile] = []
-    try:
-        if args.archive:
-            directory = Path(args.archive).resolve()
-            archive = subprocess.run(
-                ["git", "archive", "--format=tar", "HEAD"],
-                cwd=directory,
-                check=True,
-                capture_output=True,
-            )
-            staged.append(InputFile(f"{directory.name}.tar", archive.stdout))
-        for name in args.files:
-            path = Path(name)
-            staged.append(InputFile(path.name, path.read_bytes()))
-        if not staged:
-            print(
-                "error: nothing to stage — pass files and/or --archive DIR",
-                file=sys.stderr,
-            )
-            return 1
-        manifest = InputManifest(input_ref=input_ref, files=tuple(staged))
-    except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or b"").decode(errors="replace").strip()
-        print(f"error: git archive failed: {detail}", file=sys.stderr)
-        return 1
-    except (OSError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-
-    # Only the durable store makes sense here: staging into a process-local
-    # in-memory store would be invisible to the runtime that later materializes
-    # the inputs.
-    settings = get_settings()
-    if settings.effective_storage_mode == "memory":
-        print(
-            "error: cross-process staging needs the durable input store. Set "
-            "STORAGE_MODE=postgres and DATABASE_URL so the CLI and the "
-            "runtime share it.",
-            file=sys.stderr,
-        )
-        return 1
-    from openloop.analysis.postgres import PostgresInputStore
-
-    store = PostgresInputStore()
-    try:
-        asyncio.run(
-            _stage_manifest(
-                store,
-                manifest,
-                dsn=settings.database_url,
-                min_size=settings.postgres_pool_min_size,
-                max_size=settings.postgres_pool_max_size,
-            )
-        )
-    except Exception as exc:  # noqa: BLE001 — operator-facing tool, no traceback spam
-        print(f"error: staging failed: {exc}", file=sys.stderr)
-        return 1
-
-    total = sum(len(file.content) for file in manifest.files)
-    print(
-        f"staged {len(manifest.files)} file(s), {total} bytes, "
-        f"as input_ref {input_ref!r}"
-    )
-    for file in manifest.files:
-        print(f"  - {file.name} ({len(file.content)} bytes)")
-    print(
-        "\ninvoke it through the tools API (human approval still applies; the "
-        "ref is a capability token — anyone holding it can request an "
-        "analysis over the staged bytes):\n"
-        "\n"
-        "  curl -sX POST http://localhost:8000/tools/invoke \\\n"
-        "    -H 'content-type: application/json' \\\n"
-        '    -d \'{"action": "analysis.report:write", "requested_by": "cli",\n'
-        '         "args": {"instruction": "<the analysis question>",\n'
-        '                  "inputs": [{"source": "staged", '
-        f'"input_ref": "{input_ref}"}}]}}}}\'\n'
-        "\n"
-        "then approve the returned approval_id:\n"
-        "\n"
-        "  curl -sX POST http://localhost:8000/approvals/<approval_id>/resolve \\\n"
-        "    -H 'content-type: application/json' \\\n"
-        '    -d \'{"approver": "<an approver from the agent yaml>", "approve": true}\''
-    )
-    return 0
-
-
-async def _stage_manifest(
-    store, manifest, *, dsn: str, min_size: int, max_size: int
-) -> None:
-    """Stage through a durable store, owning one process-scoped pool."""
-    from openloop.postgres import create_pool
-
-    pool = await create_pool(dsn, min_size=min_size, max_size=max_size)
-    try:
-        await store.setup(pool)
-        await store.stage(manifest)
-    finally:
-        await store.close()
-        await pool.close()
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="openloop")
     sub = parser.add_subparsers(dest="group", required=True)
@@ -376,28 +248,6 @@ def main(argv: list[str] | None = None) -> int:
         "socket", help="run Slack over Socket Mode (no public URL)"
     )
     socket.set_defaults(func=_cmd_slack_socket)
-
-    analysis = sub.add_parser("analysis", help="sealed analysis worker utilities")
-    analysis_sub = analysis.add_subparsers(dest="action", required=True)
-    stage = analysis_sub.add_parser(
-        "stage",
-        help=(
-            "stage input bytes under a generated capability ref "
-            "(trusted operator path)"
-        ),
-    )
-    stage.add_argument(
-        "--archive",
-        metavar="DIR",
-        help=(
-            "stage `git archive HEAD` of DIR as one <dirname>.tar "
-            "(committed content only)"
-        ),
-    )
-    stage.add_argument(
-        "files", nargs="*", help="individual files, staged under their bare names"
-    )
-    stage.set_defaults(func=_cmd_analysis_stage)
 
     args = parser.parse_args(argv)
     return args.func(args)

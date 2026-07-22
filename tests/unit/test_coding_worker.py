@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from openloop.credentials import EnvCredentialResolver
+from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
 from openloop.tools.coding_worker import (
     STEPS,
     CodingWorkerConnector,
@@ -21,7 +22,6 @@ from openloop.tools.openhands_artifacts import (
     WorkspaceArtifact,
     WorkspaceArtifactIdentity,
 )
-from openloop.tools.openhands_docker import DEFAULT_OPENHANDS_SERVER_IMAGE
 from openloop.tools.openhands_resume import (
     OpenHandsResumeState,
     WorkerPaused,

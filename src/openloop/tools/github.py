@@ -12,7 +12,6 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from openloop.analysis.provision import ProvisionError
 from openloop.credentials import CredentialResolver, CredentialScope
 from openloop.tools.base import ActionSpec, ToolResult
 
@@ -128,10 +127,6 @@ class GitHubClient(Protocol):
 
     async def find_pull(self, repo: str, head: str) -> dict | None: ...
 
-    async def get_tarball(
-        self, repo: str, ref: str | None, *, max_bytes: int
-    ) -> bytes: ...
-
 
 class HttpGitHubClient:
     """Thin httpx-backed client against the GitHub REST API.
@@ -212,51 +207,6 @@ class HttpGitHubClient:
             params={"head": f"{owner}:{head}", "state": "all"},
         )
         return pulls[0] if pulls else None
-
-    async def get_tarball(
-        self, repo: str, ref: str | None, *, max_bytes: int
-    ) -> bytes:
-        """Stream a repository archive, capped IN FLIGHT at ``max_bytes``.
-
-        The cap fires during the download — a huge repo must not buy unbounded
-        controller memory before failing. Failure copy is sanitized for
-        approval-adjacent surfaces: the repo name is fine (it came from args),
-        token material and raw URLs are not.
-        """
-        import httpx
-
-        path = f"/repos/{repo}/tarball" + (f"/{ref}" if ref else "")
-        headers = await self._headers()
-        received = bytearray()
-        try:
-            # GitHub answers with a redirect to codeload; httpx must follow it.
-            async with httpx.AsyncClient(
-                timeout=60, follow_redirects=True
-            ) as client:
-                async with client.stream(
-                    "GET", f"{self.base_url}{path}", headers=headers
-                ) as resp:
-                    resp.raise_for_status()
-                    async for chunk in resp.aiter_bytes():
-                        if len(received) + len(chunk) > max_bytes:
-                            raise ProvisionError(
-                                f"repository archive of {repo} exceeds the "
-                                f"{max_bytes}-byte cap"
-                            )
-                        received.extend(chunk)
-        except ProvisionError:
-            raise
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            raise ProvisionError(
-                f"GitHub returned {status} for the {repo} archive "
-                "(unknown repo/ref, or the credential lacks access)"
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise ProvisionError(
-                f"fetching the {repo} archive failed: {type(exc).__name__}"
-            ) from exc
-        return bytes(received)
 
 
 class GitHubConnector:

@@ -14,16 +14,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
 
 
-# Temporary smoke-test default: the official multi-platform Python 3.12 slim
-# image pinned by registry digest. It satisfies the sealed runtime contract
-# (python + GNU timeout), but not the richer pandas/numpy/matplotlib contract of
-# docker/analysis.Dockerfile; production deployments should override it with
-# the purpose-built image's immutable digest.
-DEFAULT_ANALYSIS_SANDBOX_IMAGE = (
-    "python@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf"
-)
-
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -131,8 +121,7 @@ class Settings(BaseSettings):
     coding_worker_openhands_cold_resume_enabled: bool = True
     # --- Container broker (architecture step 4, first wiring slice) ----------
     # Master flag. When true, docker-mode OpenHands routes container lifecycle
-    # through the co-process broker over its UDS RPC boundary instead of the
-    # in-process HardenedDockerWorkspace. FAIL-CLOSED: when true but the broker
+    # through the broker over its UDS RPC boundary. FAIL-CLOSED: when true but the broker
     # cannot be built (missing/invalid setting below), the coding worker is
     # DISABLED loudly — it never falls back to the direct launch path.
     coding_worker_openhands_broker_enabled: bool = False
@@ -220,24 +209,12 @@ class Settings(BaseSettings):
     broker_reconcile_interval_seconds: int = Field(default=300, gt=0)
     # Entrypoint only: in-memory repo/audit (tests/dev).
     broker_dev_in_memory: bool = False
-    # Where the worker's model-influenced execution (applying generated edits)
-    # runs:
-    #   "host"   (default) — a plain subprocess in this process's environment.
-    #   "docker" — a throwaway container per command: default-deny egress
-    #              (network none), no env forwarded, capabilities dropped.
-    # FAIL-CLOSED: if "docker" is requested but docker can't run, the coding
-    # worker is DISABLED (loudly) — it never silently falls back to the host.
+    # Execution authority marker. ``host`` uses the app's plain subprocess
+    # executor. ``docker`` is accepted only by containerized OpenHands and means
+    # the external broker owns execution; the app never launches containers.
     coding_worker_sandbox: str = "host"
-    # Image for the docker sandbox; needs a `git` binary on PATH.
-    coding_worker_sandbox_image: str = "alpine/git"
-    # Container network. "none" = default-deny (the worker needs no egress —
-    # the model call happens in the controller). Point at a user-defined
-    # docker network fronted by an egress proxy for an allowlist model.
-    coding_worker_sandbox_network: str = "none"
-    # Where attempt workspaces are created (default: system tempdir). Required
-    # when the runtime itself runs in a container with the docker sandbox:
-    # sibling sandbox containers resolve bind-mount paths on the HOST, so this
-    # must be a host path mounted into the runtime at the same location.
+    # Where attempt workspaces are created (default: system tempdir). External
+    # broker deployments set this to storage visible to the ingress handoff.
     coding_worker_workspace_dir: str | None = None
     # Phase B — warm execution context. When on, a coding worker keeps its git
     # checkout alive between turns in the same thread so a follow-up reuses it
@@ -251,70 +228,6 @@ class Settings(BaseSettings):
     coding_worker_warm_idle_seconds: float = 900.0
     # Cap on concurrently-kept warm checkouts (LRU-evicted past it).
     coding_worker_warm_capacity: int = 8
-
-    # Sealed analysis worker (Phase 1). It executes model-authored Python over
-    # controller-provisioned data, so unlike the coding worker it NEVER permits
-    # host execution. The worker remains off by default; when enabled, it uses
-    # a digest-pinned Python smoke image unless the operator supplies the richer
-    # purpose-built image from docker/analysis.Dockerfile.
-    analysis_worker_enabled: bool = False
-    analysis_worker_backend: str = "builtin"
-    analysis_worker_model: str = "anthropic/claude-sonnet-4-6"
-    # Only ``docker`` is accepted. ``host`` is an explicit unsafe value and
-    # disables the worker rather than weakening the execution boundary.
-    analysis_worker_sandbox: str = "docker"
-    # Must be a digest reference (contains ``@sha256:``); no mutable image tag
-    # is allowed for arbitrary model-authored execution.
-    analysis_worker_sandbox_image: str = DEFAULT_ANALYSIS_SANDBOX_IMAGE
-    # This worker has no adaptive access: its sandbox always stays fully sealed.
-    analysis_worker_sandbox_network: str = "none"
-    # Host path visible to the Docker daemon; required in a containerized deploy
-    # for the same sibling-container bind-mount reason as coding workspaces.
-    analysis_worker_workspace_dir: str | None = None
-    analysis_worker_timeout_seconds: float = 120.0
-    analysis_worker_kill_after_seconds: float = 10.0
-    analysis_worker_memory: str = "512m"
-    analysis_worker_memory_swap: str | None = None
-    analysis_worker_cpus: float = 1.0
-    analysis_worker_pids_limit: int = 128
-    analysis_worker_tmp_size: str = "64m"
-    # Each stdout/stderr stream is retained to this cap (but drained to EOF).
-    analysis_worker_stream_cap_bytes: int = 262_144
-    # Both the best-effort outputs-dir watchdog and the hard report read-out
-    # boundary use this cap. The watchdog only limits overshoot; read-out is the
-    # exfiltration guarantee.
-    analysis_worker_report_max_bytes: int = 1_000_000
-    analysis_worker_output_watch_interval_seconds: float = 2.0
-    analysis_worker_summary_lines: int = 12
-    # Strategy inside the one builtin backend (strategies never become sibling
-    # backends): "iterative" (default) = generate → run → feed capped
-    # stdout/stderr back to the model → refine (Phase 3); "single" = one
-    # completion + one sealed run (Phase 1). Iterative spend is structurally
-    # bounded even without a dollar cap: at most max_iterations completions
-    # per attempt, prompt growth hard-capped by the exec-feedback limit, and
-    # every run is human-approved.
-    analysis_worker_strategy: str = "iterative"
-    # Optional hard boot gate (the openhands-style posture): when set, every
-    # agent exposing the analysis tool must carry spec.budget.per_task_usd or
-    # the worker is disabled, and stale approved jobs are refused if caps
-    # drift after approval. Off by default — agents that do carry a cap still
-    # get the in-run spend abort and the fail-closed settle either way.
-    analysis_worker_require_per_task_cap: bool = False
-    # Iterative only: model completions (each followed by one sealed run)
-    # allowed per attempt.
-    analysis_worker_max_iterations: int = 4
-    # Iterative only: per-stream cap on the exec_feedback (stdout/stderr) the
-    # in-controller model sees each round. Feedback never posts to a surface.
-    analysis_worker_exec_feedback_max_chars: int = 16_384
-    # Phase 4 provisioning caps. The merged cap is a decrementing budget the
-    # orchestrator checks before every per-source fetch (once spent, no further
-    # fetch starts); the per-source caps additionally bound each download in
-    # flight. Repo-shaped inputs extract into tmpfs inside the sandbox, which
-    # counts against container memory — raise ANALYSIS_WORKER_TMP_SIZE (and
-    # memory) alongside these when provisioning repos.
-    analysis_worker_max_input_bytes: int = 33_554_432  # 32 MiB merged manifest
-    analysis_worker_github_max_bytes: int = 33_554_432  # 32 MiB per tarball
-    analysis_worker_upload_max_bytes: int = 16_777_216  # 16 MiB per upload
 
     # Storage / queue
     database_url: str = (

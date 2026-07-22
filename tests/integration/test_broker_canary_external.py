@@ -15,7 +15,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import yaml
 
-from tests.integration.test_openhands_cold_resume_live import _fake_openai
+from tests.support.fake_openai import fake_openai
 from tests.integration.test_openhands_broker_canary_live import (
     run_phase5_checkpoint_park_resume_finalize_real_docker as _run_phase5_canary,
 )
@@ -407,7 +407,7 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
                     )
                 )
 
-            with _fake_openai() as fake:
+            with fake_openai() as fake:
                 result = _compose(
                     project,
                     files,

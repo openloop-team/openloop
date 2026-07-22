@@ -109,11 +109,8 @@ class SurfaceSession:
     # the durable sessions, without re-fetching the surface's own transcript.
     request_text: str | None = None
     result_summary: str | None = None
-    # When the outcome is a report artifact (the analysis worker), the body
-    # lives in the job-keyed artifact store and only this reference is
-    # persisted — result_summary stays the replay-safe prose summary, so
-    # thread-history replay never pulls the artifact body. The runner
-    # dereferences the ref at (re-)delivery time.
+    # Generic reference reserved for durable artifact-backed outcomes. The
+    # session schema keeps it even when no current product path writes it.
     result_artifact_ref: str | None = None
     error: str | None = None
     created_at: datetime = field(default_factory=_now)

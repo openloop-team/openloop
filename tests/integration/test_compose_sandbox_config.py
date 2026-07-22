@@ -1,4 +1,4 @@
-"""Static contract for the opt-in sibling-container Compose override."""
+"""Static Docker-authority contract for Compose deployment files."""
 
 from pathlib import Path
 
@@ -6,75 +6,43 @@ import yaml
 
 
 ROOT = Path(__file__).parents[2]
-OVERRIDE = ROOT / "docker-compose.sandbox.yml"
-SANDBOX_ROOT = (
-    "${OPENLOOP_SANDBOX_ROOT:?Set OPENLOOP_SANDBOX_ROOT to a pre-created "
-    "absolute host path}"
-)
+COMPOSE_FILES = tuple(sorted(ROOT.glob("docker-compose*.yml")))
+SOCKET = "/var/run/docker.sock"
 
 
 def _compose(path: Path) -> dict:
-    return yaml.safe_load(path.read_text())
+    return yaml.safe_load(path.read_text()) or {}
 
 
-def test_sandbox_override_exposes_docker_and_preserves_same_path_root():
-    runtime = _compose(OVERRIDE)["services"]["runtime"]
-
-    assert runtime["group_add"] == ["${DOCKER_GID:-0}"]
-
-    mounts = {mount["target"]: mount for mount in runtime["volumes"]}
-    socket = mounts["/var/run/docker.sock"]
-    assert socket == {
-        "type": "bind",
-        "source": "${DOCKER_SOCKET:-/var/run/docker.sock}",
-        "target": "/var/run/docker.sock",
-    }
-
-    workspace = mounts[SANDBOX_ROOT]
-    assert workspace["type"] == "bind"
-    assert workspace["source"] == workspace["target"] == SANDBOX_ROOT
+def _mounts(service: dict) -> list:
+    return service.get("volumes", []) or []
 
 
-def test_both_worker_roots_are_isolated_children_of_the_shared_mount():
-    environment = _compose(OVERRIDE)["services"]["runtime"]["environment"]
-
-    assert environment["CODING_WORKER_WORKSPACE_DIR"] == f"{SANDBOX_ROOT}/coding"
-    assert environment["ANALYSIS_WORKER_WORKSPACE_DIR"] == f"{SANDBOX_ROOT}/analysis"
-    assert environment["CODING_WORKER_OPENHANDS_STATE_DIR"] == (
-        f"{SANDBOX_ROOT}/openhands-state"
-    )
-
-
-def test_runtime_reaches_sibling_agents_by_name_on_a_dedicated_network():
-    compose = _compose(OVERRIDE)
-    runtime = compose["services"]["runtime"]
-    environment = runtime["environment"]
-
-    assert environment["CODING_WORKER_OPENHANDS_CONNECT"] == "network"
-    assert environment["CODING_WORKER_OPENHANDS_NETWORK"] == "openloop-agents"
-    # The runtime must keep the stack network (postgres) and join the agents
-    # network; the raw `docker run --network` launch needs the fixed name.
-    assert set(runtime["networks"]) == {"default", "openloop-agents"}
-    assert compose["networks"]["openloop-agents"]["name"] == "openloop-agents"
+def _targets(service: dict) -> set[str]:
+    targets = set()
+    for mount in _mounts(service):
+        if isinstance(mount, dict):
+            targets.add(str(mount.get("target", "")))
+        elif isinstance(mount, str):
+            targets.add(mount.split(":", 1)[-1])
+    return targets
 
 
-def test_base_stacks_remain_safe_and_document_the_opt_in_override():
-    for filename in ("docker-compose.yml", "docker-compose.deploy.yml"):
-        path = ROOT / filename
-        text = path.read_text()
-        runtime = _compose(path)["services"]["runtime"]
-
-        assert all(
-            mount.get("target") != "/var/run/docker.sock"
-            if isinstance(mount, dict)
-            else "/var/run/docker.sock" not in mount
-            for mount in runtime.get("volumes", [])
-        )
-        assert "docker-compose.sandbox.yml" in text
+def test_legacy_runtime_socket_override_is_absent() -> None:
+    assert not (ROOT / "docker-compose.sandbox.yml").exists()
 
 
-def test_example_environment_does_not_enable_a_worker_without_the_override():
-    example = (ROOT / ".env.example").read_text()
+def test_only_broker_service_receives_docker_socket() -> None:
+    socket_owners = []
+    for path in COMPOSE_FILES:
+        for service_name, service in (_compose(path).get("services") or {}).items():
+            if SOCKET in _targets(service):
+                socket_owners.append((path.name, service_name))
 
-    assert "CODING_WORKER_ENABLED=false" in example
-    assert "ANALYSIS_WORKER_ENABLED=false" in example
+    assert socket_owners == [("docker-compose.broker.yml", "broker")]
+
+
+def test_runtime_services_never_receive_docker_socket() -> None:
+    for path in COMPOSE_FILES:
+        runtime = (_compose(path).get("services") or {}).get("runtime", {})
+        assert SOCKET not in _targets(runtime), path.name

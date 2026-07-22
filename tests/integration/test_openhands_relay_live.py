@@ -30,7 +30,7 @@ if importlib.util.find_spec("openhands.workspace") is None:
         "OpenHands optional dependency is not installed", allow_module_level=True
     )
 
-from openloop.tools.openhands_docker import (
+from openloop.openhands.runtime_profile import (
     CONVERSATION_LEASE_TTL_SECONDS,
     DEFAULT_OPENHANDS_SERVER_IMAGE,
     PINNED_OPENHANDS_VERSION,

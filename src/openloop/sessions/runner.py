@@ -30,7 +30,6 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from typing import TYPE_CHECKING
 
 from openloop.deliverable import Artifact, Deliverable, Prose
 from openloop.runtime import Runtime, Task
@@ -49,9 +48,6 @@ from openloop.sessions.threads import (
 )
 from openloop.workflows.store import TERMINAL as _WORKFLOW_TERMINAL
 
-if TYPE_CHECKING:
-    from openloop.analysis import ArtifactStore, UploadStore
-
 logger = logging.getLogger(__name__)
 
 PROGRESS_STATUS_TEXT = "is thinking..."
@@ -68,17 +64,6 @@ ERROR_TEXT = "⚠️ This task was interrupted and could not be completed."
 # on context size, not a correctness limit — older turns fall back to recall.
 HISTORY_TURN_LIMIT = 20
 
-# How many of the thread's shared files to list in task context. A bound on
-# context size; the most recent shares win.
-UPLOAD_INVENTORY_LIMIT = 10
-
-# Re-materialization defaults for an artifact final: only the ref is persisted
-# on the session, so a recovery post rebuilds the artifact's naming from these.
-ARTIFACT_TITLE_DEFAULT = "Analysis report"
-ARTIFACT_FILENAME_DEFAULT = "report.md"
-ARTIFACT_SNIPPET_TYPE_DEFAULT = "markdown"
-
-
 def _is_non_terminal_invocation(inv) -> bool:
     if inv.status in ("started", "approved"):
         # "approved" = a durable decision with no result yet (a losing
@@ -88,24 +73,6 @@ def _is_non_terminal_invocation(inv) -> bool:
         return True
     data = getattr(getattr(inv, "result", None), "data", {}) or {}
     return data.get("status") in {"running", "waiting"}
-
-
-def _artifact_outcome(inv) -> dict | None:
-    """The result data of a successful artifact-ref outcome, else ``None``.
-
-    A workflow whose terminal result carries ``deliverable="artifact"`` plus an
-    ``artifact_ref`` (the analysis worker's ``store_result``) asks the runner to
-    dereference the ref and deliver the body as an :class:`Artifact` — with no
-    model continuation (the locked bypass-M0b decision: the report is the
-    answer; a second model call would only spend and could distort it).
-    """
-    result = getattr(inv, "result", None)
-    if result is None or not getattr(result, "ok", False):
-        return None
-    data = getattr(result, "data", None) or {}
-    if data.get("deliverable") == "artifact" and data.get("artifact_ref"):
-        return data
-    return None
 
 
 def _prose_of(result: "Deliverable | str") -> str:
@@ -164,28 +131,15 @@ class SessionRunner:
         sessions: SurfaceSessionStore,
         delivery: SurfaceDelivery,
         threads: "ThreadRecordStore | None" = None,
-        artifacts: "ArtifactStore | None" = None,
-        uploads: "UploadStore | None" = None,
     ) -> None:
         self.runtime = runtime
         self.sessions = sessions
         self.delivery = delivery
-        # Phase 2 (sealed analysis): report bodies live in a job-keyed artifact
-        # store and sessions/workflows carry only a ref. The runner is the one
-        # place that dereferences a ref into an Artifact deliverable at delivery
-        # time — SurfaceDelivery stays store-unaware; a missing store degrades
-        # to delivering the prose summary.
-        self.artifacts = artifacts
         # Phase A: the thread-scoped delivered-transcript store. When present, a
         # follow-up turn's history is the real conversation (request→answer per
         # delivered turn) rather than the per-session summary scan; when absent the
         # runner falls back to SurfaceSessionStore.thread_history (old path).
         self.threads = threads
-        # Phase 4 (sealed analysis): thread-scoped upload metadata. Two jobs —
-        # the surface records file shares into it, and the runner injects a
-        # bounded shared-file inventory line into task context so the model can
-        # name an upload_ref (without it the upload source is invisible).
-        self.uploads = uploads
         # (phrase, last-sent monotonic) per session: collapse identical bursts,
         # but still re-assert periodically so Slack's transient status doesn't
         # lapse during a long single-phase run.
@@ -254,9 +208,6 @@ class SessionRunner:
         # context, not just semantic recall. Done before handle() so the history
         # is baked into the workflow's persisted turn state (resume-safe).
         await self._apply_thread_history(task, session)
-        # List the thread's shared files so the model can reference them as
-        # analysis upload inputs; also pre-handle() so it persists with the turn.
-        await self._apply_upload_inventory(task, target)
         # TEMP DEBUG (thread-isolation diagnosis): show exactly which thread this
         # turn resolved to and how many prior turns were replayed as history.
         logger.debug(
@@ -478,39 +429,6 @@ class SessionRunner:
         if turns:
             task.history = turns
 
-    async def _apply_upload_inventory(
-        self, task: Task, target: SurfaceTarget
-    ) -> None:
-        """Add a bounded shared-file inventory to the task's context notes.
-
-        Names and refs only — never contents (staging is lazy; bytes are
-        fetched from the surface exclusively by the post-approval provisioner).
-        Best-effort: an inventory failure must never block the turn.
-        """
-        if self.uploads is None or target.thread is None:
-            return
-        try:
-            records = await self.uploads.for_scope(
-                thread_scope_key(target), limit=UPLOAD_INVENTORY_LIMIT
-            )
-        except Exception:  # noqa: BLE001 — inventory is context garnish
-            logger.warning(
-                "failed to list shared files for %s", target.thread, exc_info=True
-            )
-            return
-        if not records:
-            return
-        lines = "\n".join(
-            f"- {u.name} (upload_ref {u.upload_ref}, {u.size} bytes)"
-            for u in records
-        )
-        task.context_notes.append(
-            "Files shared in this conversation thread (usable as sealed-"
-            'analysis inputs via {"source": "upload", "upload_ref": ...}; '
-            "names and sizes only, contents are provisioned after approval):\n"
-            + lines
-        )
-
     async def _recover(self, session: SurfaceSession) -> tuple[bool, object]:
         """``(found, response)`` for a session's workflow — see
         :meth:`Runtime.recover_response`."""
@@ -545,13 +463,6 @@ class SessionRunner:
             return
         if inv.status == "executed":
             if session.final_message_id is not None:
-                return
-            # An artifact-ref outcome (the analysis report) is delivered straight
-            # from the ref, bypassing the M0b model continuation by design: the
-            # report is the answer, and re-invoking the model would only spend.
-            outcome = _artifact_outcome(inv)
-            if outcome is not None:
-                await self._deliver_artifact_outcome(session, outcome, message)
                 return
             # M0b: re-run the model with the approved result folded in, so the reply
             # is a fresh model answer — not the raw tool summary. Falls back to the
@@ -650,86 +561,9 @@ class SessionRunner:
             )
         return True
 
-    async def _deliver_artifact_outcome(
-        self, session: SurfaceSession, data: dict, message: str
-    ) -> None:
-        """Deliver a workflow's report straight from its artifact ref (no M0b).
-
-        The prose summary and the ref are persisted FIRST so a failed post is
-        repairable — every retry path re-materializes from
-        ``result_artifact_ref``. Then the answer is delivered; the approval-card
-        collapse stays best-effort cosmetics, exactly like the text path.
-        """
-        prose = (
-            data.get("prose_summary")
-            or data.get("summary")
-            or "The analysis report is ready."
-        )
-        session.status = "completed"
-        session.result_summary = prose
-        session.result_artifact_ref = data["artifact_ref"]
-        await self.sessions.upsert(session)
-        deliverable = await self._materialize_artifact(
-            data["artifact_ref"],
-            prose,
-            title=data.get("artifact_title") or ARTIFACT_TITLE_DEFAULT,
-            filename=data.get("artifact_filename") or ARTIFACT_FILENAME_DEFAULT,
-            snippet_type=data.get("snippet_type") or ARTIFACT_SNIPPET_TYPE_DEFAULT,
-        )
-        await self._post_final(session, deliverable)
-        try:
-            await self._update_approval(session, message, [])
-        except Exception:  # noqa: BLE001 — buttons going stale is cosmetic
-            logger.exception(
-                "failed to collapse approval card for session %s", session.id
-            )
-
-    async def _materialize_artifact(
-        self, ref: str, prose: str, *, title: str, filename: str, snippet_type: str
-    ) -> Deliverable:
-        """Dereference an artifact ref into a deliverable, degrading to prose.
-
-        The body was written once, by the analysis orchestrator; if no store is
-        wired or it no longer holds the ref (e.g. an in-memory store across a
-        restart), the prose summary still delivers — the answer must never be
-        lost to a hosting failure.
-        """
-        body: bytes | None = None
-        if self.artifacts is not None:
-            try:
-                artifact = await self.artifacts.get(ref)
-            except Exception:  # noqa: BLE001 — degrade to prose, keep the answer
-                logger.warning(
-                    "artifact store lookup failed for %s", ref, exc_info=True
-                )
-                artifact = None
-            if artifact is not None:
-                body = artifact.body
-        if body is None:
-            logger.warning("report artifact %s unavailable; delivering prose", ref)
-            return Prose(
-                text=f"{prose}\n\n_(The full report `{ref}` could not be retrieved.)_"
-            )
-        return Artifact(
-            content=body.decode("utf-8", errors="replace"),
-            title=title,
-            filename=filename,
-            summary=prose,
-            snippet_type=snippet_type,
-        )
-
     async def _final_deliverable(self, session: SurfaceSession) -> "Deliverable | str":
         """What a (re-)delivery of this session's final answer should post."""
-        prose = session.result_summary or "(no response)"
-        if session.result_artifact_ref is None:
-            return prose
-        return await self._materialize_artifact(
-            session.result_artifact_ref,
-            prose,
-            title=ARTIFACT_TITLE_DEFAULT,
-            filename=ARTIFACT_FILENAME_DEFAULT,
-            snippet_type=ARTIFACT_SNIPPET_TYPE_DEFAULT,
-        )
+        return session.result_summary or "(no response)"
 
     async def _on_workflow_terminal(self, instance) -> None:
         approval_id = _approval_id_for_instance(instance)

@@ -17,9 +17,7 @@
 # intentionally present in both. Compose appends env_file values during merges,
 # so broker-side secrets must never enter `.env` in the first place.
 #
-# This override removes Docker authority from the coding-worker runtime. The
-# sealed analysis worker is orthogonal and still needs docker-compose.sandbox.yml
-# (which grants runtime the socket) until its own broker migration.
+# This override keeps Docker authority in the broker service only.
 
 x-openloop-build: &openloop-build
   context: .

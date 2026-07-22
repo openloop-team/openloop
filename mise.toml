@@ -27,7 +27,7 @@ description = "Bring up Postgres and run Postgres E2E tests"
 run = """
 docker compose up -d postgres
 until [ "$(docker inspect --format '{% raw %}{{.State.Health.Status}}{% endraw %}' "$(docker compose ps -q postgres)")" = healthy ]; do sleep 2; done
-python -m pytest tests/e2e/test_postgres.py -v
+python -m pytest tests/e2e/test_postgres.py tests/e2e/test_analysis_retirement.py -v
 """
 
 [tasks.test-e2e-runtime-github-live]

@@ -12,7 +12,6 @@ from openloop.openhands.runtime_profile import (
     require_immutable_server_image,
     runtime_server_image,
 )
-from openloop.tools import openhands_docker as legacy_docker
 from openloop.tools import openhands_relay
 
 
@@ -75,23 +74,6 @@ def test_runtime_profile_rejects_mutable_or_malformed_images(image):
 def test_runtime_profile_preserves_custom_immutable_image():
     image = "example.invalid/agent@sha256:" + "a" * 64
     assert runtime_server_image(image, "linux/amd64") == image
-
-
-def test_legacy_adapter_reexports_the_runtime_profile():
-    assert legacy_docker.HardenedDockerWorkspaceError is OpenHandsRuntimeProfileError
-    assert legacy_docker.PINNED_OPENHANDS_VERSION == PINNED_OPENHANDS_VERSION
-    assert (
-        legacy_docker.DEFAULT_OPENHANDS_SERVER_IMAGE
-        == DEFAULT_OPENHANDS_SERVER_IMAGE
-    )
-    assert (
-        legacy_docker.CONVERSATION_LEASE_TTL_SECONDS
-        == CONVERSATION_LEASE_TTL_SECONDS
-    )
-    assert legacy_docker.SUPPORTED_DOCKER_PLATFORMS is SUPPORTED_DOCKER_PLATFORMS
-    assert legacy_docker.native_docker_platform is native_docker_platform
-    assert legacy_docker.require_immutable_server_image is require_immutable_server_image
-    assert legacy_docker.runtime_server_image is runtime_server_image
 
 
 def test_relay_facade_uses_the_shared_version_pin():

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.integration.test_openhands_cold_resume_live import _fake_openai
+from tests.support.fake_openai import fake_openai
 
 
 pytestmark = [
@@ -133,7 +133,7 @@ def run_phase5_checkpoint_park_resume_finalize_real_docker():
         else:
             raise AssertionError((logs.stderr + logs.stdout)[-4000:])
 
-        with _fake_openai() as fake:
+        with fake_openai() as fake:
             command = [
                 "docker",
                 "run",

@@ -684,7 +684,7 @@ def _task_to_dict(task: Task) -> dict:
         "history": task.history,
         # thread_key must survive the durable round-trip: the workflow path
         # re-hydrates the task before running the tool loop, and the gateway's
-        # warm-context reuse AND the analysis upload scope stamp both ride it.
+        # Warm-context reuse rides the thread-scoped key.
         "thread_key": task.thread_key,
         # session_id must survive the durable round-trip too: the workflow-backed
         # tool loop stamps it into the approval args so worker spend traces to it.
@@ -705,4 +705,3 @@ def _task_from_dict(data: dict) -> Task:
         session_id=data.get("session_id"),
         context_notes=data.get("context_notes", []),
     )
-

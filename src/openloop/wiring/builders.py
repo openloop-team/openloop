@@ -12,25 +12,6 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from openloop.analysis import (
-    AnalysisAttemptStore,
-    ArtifactStore,
-    GithubProvisioner,
-    InMemoryAnalysisAttemptStore,
-    InMemoryArtifactStore,
-    InMemoryInputStore,
-    InMemoryUploadStore,
-    InputStore,
-    StagedProvisioner,
-    UploadProvisioner,
-    UploadStore,
-)
-from openloop.analysis.postgres import (
-    PostgresAnalysisAttemptStore,
-    PostgresArtifactStore,
-    PostgresInputStore,
-    PostgresUploadStore,
-)
 from openloop.agents.schema import Agent
 from openloop.approvals import ApprovalStore, InMemoryApprovalStore
 from openloop.approvals.postgres import PostgresApprovalStore
@@ -62,19 +43,8 @@ from openloop.sessions.postgres import PostgresSurfaceSessionStore
 from openloop.sessions.threads import PostgresThreadRecordStore
 from openloop.tools import ToolGateway
 from openloop.sandbox import (
-    DockerSandbox,
     HostSandbox,
     Sandbox,
-    SandboxLimits,
-    SandboxUnavailable,
-    sweep_expired_sandboxes,
-)
-from openloop.tools.analysis_worker import (
-    ANALYSIS_REPORT_WRITE,
-    AnalysisWorker,
-    AnalysisWorkerConnector,
-    BuiltinAnalysisWorker,
-    SealedAnalysisOrchestrator,
 )
 from openloop.tools.coding_worker import (
     CodingWorker,
@@ -97,7 +67,6 @@ from openloop.tools.openhands_worker import (
 from openloop.usage import InMemoryUsageStore, UsageStore, WorkerSpendLedger
 from openloop.usage.postgres import PostgresUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowStore
-from openloop.workflows.analysis_worker import build_analysis_worker_workflow
 from openloop.workflows.coding_worker import build_coding_worker_workflow
 from openloop.workflows.postgres import PostgresWorkflowStore
 
@@ -170,34 +139,6 @@ def build_thread_record_store(settings: Settings) -> ThreadRecordStore:
     if settings.effective_storage_mode in ("auto", "postgres"):
         return PostgresThreadRecordStore()
     return InMemoryThreadRecordStore()
-
-
-def build_analysis_input_store(settings: Settings) -> InputStore:
-    """Pick the capability-ref-keyed sealed-analysis staging store."""
-    if settings.effective_storage_mode in ("auto", "postgres"):
-        return PostgresInputStore()
-    return InMemoryInputStore()
-
-
-def build_analysis_artifact_store(settings: Settings) -> ArtifactStore:
-    """Pick the job-keyed sealed-analysis artifact store."""
-    if settings.effective_storage_mode in ("auto", "postgres"):
-        return PostgresArtifactStore()
-    return InMemoryArtifactStore()
-
-
-def build_analysis_attempt_store(settings: Settings) -> AnalysisAttemptStore:
-    """Pick the durable spend-attempt state store for sealed analysis."""
-    if settings.effective_storage_mode in ("auto", "postgres"):
-        return PostgresAnalysisAttemptStore()
-    return InMemoryAnalysisAttemptStore()
-
-
-def build_analysis_upload_store(settings: Settings) -> UploadStore:
-    """Pick the thread-scoped surface-upload metadata store (Phase 4)."""
-    if settings.effective_storage_mode in ("auto", "postgres"):
-        return PostgresUploadStore()
-    return InMemoryUploadStore()
 
 
 def _resolve_lock_backend(settings: Settings) -> str:
@@ -333,81 +274,25 @@ def _worker_workspace_root(settings: Settings) -> Path | None:
     return None
 
 
-def _analysis_workspace_root(settings: Settings) -> Path | None:
-    """The host-visible root used for sealed analysis workspaces and its probe."""
-    if settings.analysis_worker_workspace_dir:
-        return Path(settings.analysis_worker_workspace_dir)
-    return None
-
-
 def build_worker_sandbox(settings: Settings) -> "Sandbox | None":
-    """Pick where the coding worker's model-influenced execution runs.
+    """Build the builtin worker's host-only command executor.
 
-    ``host`` returns the no-isolation default. ``docker`` runs a full-fidelity
-    probe at boot — a real container run with the configured image, network,
-    and a bind mount under the configured workspace root — and returns
-    ``None`` when any of it can't work; the caller then disables the coding
-    worker entirely (fail-closed) rather than silently running model-generated
-    edits on the host, or registering a worker that would only fail after a
-    human approved a job. An unknown value also returns ``None``: a typo in a
-    security setting must not select a weaker boundary.
+    ``docker`` remains a marker for broker-hosted OpenHands, not an
+    application-owned sandbox. A builtin worker requesting it fails closed.
     """
     if settings.coding_worker_sandbox == "host":
         return HostSandbox()
     if settings.coding_worker_sandbox == "docker":
-        sandbox = DockerSandbox(
-            settings.coding_worker_sandbox_image,
-            network=settings.coding_worker_sandbox_network,
+        log.error(
+            "builtin coding worker is host-only; CODING_WORKER_SANDBOX=docker "
+            "is reserved for externally brokered OpenHands"
         )
-        try:
-            sandbox.probe(workspace_root=_worker_workspace_root(settings))
-        except SandboxUnavailable:
-            log.error("docker sandbox probe failed", exc_info=True)
-            return None
-        return sandbox
+        return None
     log.error(
         "unknown CODING_WORKER_SANDBOX=%r (expected host|docker)",
         settings.coding_worker_sandbox,
     )
     return None
-
-
-def build_analysis_sandbox(settings: Settings) -> "DockerSandbox | None":
-    """Build the analysis sandbox, rejecting every weaker or mutable variant.
-
-    Model-authored analysis is arbitrary Python, so a host fallback would be
-    controller RCE. The image must be digest-pinned and the only network mode is
-    ``none``; all other configuration failures disable the worker before anyone
-    can approve a job.
-    """
-    if settings.analysis_worker_sandbox != "docker":
-        log.error(
-            "ANALYSIS WORKER DISABLED: ANALYSIS_WORKER_SANDBOX=%r; only docker "
-            "is allowed for model-authored analysis (host is forbidden)",
-            settings.analysis_worker_sandbox,
-        )
-        return None
-    if settings.analysis_worker_sandbox_network != "none":
-        log.error(
-            "ANALYSIS WORKER DISABLED: ANALYSIS_WORKER_SANDBOX_NETWORK=%r; "
-            "sealed analysis requires network=none",
-            settings.analysis_worker_sandbox_network,
-        )
-        return None
-    image = settings.analysis_worker_sandbox_image
-    if not image or "@sha256:" not in image:
-        log.error(
-            "ANALYSIS WORKER DISABLED: ANALYSIS_WORKER_SANDBOX_IMAGE must be "
-            "a digest-pinned image reference (…@sha256:…)",
-        )
-        return None
-    sandbox = DockerSandbox(image, network="none", kind="analysis")
-    try:
-        sandbox.probe_sealed(workspace_root=_analysis_workspace_root(settings))
-    except SandboxUnavailable:
-        log.error("sealed analysis sandbox probe failed", exc_info=True)
-        return None
-    return sandbox
 
 
 def build_warm_workspace_pool(settings: Settings) -> "WarmWorkspacePool | None":
@@ -493,6 +378,18 @@ def build_coding_worker(
             return None
 
         docker = settings.coding_worker_sandbox == "docker"
+        if docker and (
+            not broker_enabled
+            or settings.broker_mode != "external"
+            or broker_handle is None
+        ):
+            log.error(
+                "containerized OpenHands requires the external broker: set "
+                "CODING_WORKER_OPENHANDS_BROKER_ENABLED=1, "
+                "BROKER_MODE=external, and provide a live broker client — "
+                "coding worker DISABLED"
+            )
+            return None
         docker_adapter = None
         artifact_store = None
         if docker:
@@ -504,17 +401,11 @@ def build_coding_worker(
                     "base64-encoded 32-byte secret)"
                 )
                 return None
-            if broker_enabled and broker_handle is None:
-                # Flag on but the broker could not be composed: disable loudly
-                # rather than fall back to the direct in-process launch path.
-                log.error(
-                    "CODING_WORKER_OPENHANDS_BROKER_ENABLED is set but the "
-                    "broker is unavailable — coding worker DISABLED"
-                )
-                return None
             try:
                 from openloop.tools.openhands_artifacts import WorkspaceArtifactStore
-                from openloop.tools.openhands_docker import HardenedDockerWorkspace
+                from openloop.tools.openhands_broker_workspace import (
+                    BrokerWorkspaceAdapter,
+                )
                 from openloop.tools.openhands_state import (
                     OpenHandsKeyDeriver,
                     OpenHandsStateLayout,
@@ -528,56 +419,34 @@ def build_coding_worker(
                     master_key_id=settings.coding_worker_openhands_master_key_id,
                 )
                 artifact_store = WorkspaceArtifactStore(layout, keys)
-                if broker_enabled:
-                    from openloop.tools.openhands_broker_workspace import (
-                        BrokerWorkspaceAdapter,
+                checkpoint_store = broker_handle.bind_checkpoint_store(artifact_store)
+                docker_adapter = BrokerWorkspaceAdapter(
+                    client=broker_handle.client,
+                    loop=broker_handle.loop,
+                    receipt_issuer=broker_handle.receipt_issuer,
+                    checkpoint_store=checkpoint_store,
+                    workspace_ingress=broker_handle.workspace_ingress,
+                    tenant_id=broker_handle.owner.tenant_id,
+                )
+                try:
+                    pruned = broker_handle.workspace_ingress.prune_stale(
+                        max_age_seconds=_INGRESS_STALE_SWEEP_SECONDS
                     )
-
-                    checkpoint_store = broker_handle.bind_checkpoint_store(
-                        artifact_store
+                except Exception:  # noqa: BLE001 - best-effort startup sweep
+                    log.warning(
+                        "broker workspace ingress stale sweep failed",
+                        exc_info=True,
                     )
-                    docker_adapter = BrokerWorkspaceAdapter(
-                        client=broker_handle.client,
-                        loop=broker_handle.loop,
-                        receipt_issuer=broker_handle.receipt_issuer,
-                        checkpoint_store=checkpoint_store,
-                        workspace_ingress=broker_handle.workspace_ingress,
-                        tenant_id=broker_handle.owner.tenant_id,
-                    )
-                    try:
-                        pruned = broker_handle.workspace_ingress.prune_stale(
-                            max_age_seconds=_INGRESS_STALE_SWEEP_SECONDS
-                        )
-                    except Exception:  # noqa: BLE001 - best-effort startup sweep
-                        log.warning(
-                            "broker workspace ingress stale sweep failed",
-                            exc_info=True,
-                        )
-                    else:
-                        if pruned:
-                            log.info(
-                                "pruned %d stale broker workspace ingress stage(s)",
-                                pruned,
-                            )
-                    if settings.broker_mode == "coprocess":
-                        log.info(
-                            "coding worker OpenHands runtime = broker (co-process)"
-                        )
-                    else:
-                        log.info(
-                            "coding worker OpenHands runtime = broker (external)"
-                        )
                 else:
-                    docker_adapter = HardenedDockerWorkspace(
-                        layout=layout,
-                        keys=keys,
-                        server_image=settings.coding_worker_openhands_image,
-                        network=settings.coding_worker_openhands_network,
-                        connect=settings.coding_worker_openhands_connect,
-                    )
+                    if pruned:
+                        log.info(
+                            "pruned %d stale broker workspace ingress stage(s)",
+                            pruned,
+                        )
+                log.info("coding worker OpenHands runtime = broker (external)")
             except Exception as exc:  # noqa: BLE001 — boot gate normalizes errors
                 log.error(
-                    "OpenHands hardened Docker state configuration is invalid: %s",
+                    "OpenHands brokered state configuration is invalid: %s",
                     exc,
                 )
                 return None
@@ -645,75 +514,10 @@ def build_coding_worker(
     return None
 
 
-def build_analysis_worker(settings: Settings) -> "AnalysisWorker | None":
-    """Build the one builtin analysis backend, fail-closed on every mismatch."""
-    if settings.analysis_worker_backend != "builtin":
-        log.error(
-            "unknown ANALYSIS_WORKER_BACKEND=%r (expected builtin)",
-            settings.analysis_worker_backend,
-        )
-        return None
-    if settings.analysis_worker_strategy not in ("single", "iterative"):
-        log.error(
-            "unknown ANALYSIS_WORKER_STRATEGY=%r (expected single|iterative)",
-            settings.analysis_worker_strategy,
-        )
-        return None
-    if (
-        settings.analysis_worker_timeout_seconds <= 0
-        or settings.analysis_worker_kill_after_seconds <= 0
-        or settings.analysis_worker_report_max_bytes <= 0
-        or settings.analysis_worker_stream_cap_bytes <= 0
-        or settings.analysis_worker_output_watch_interval_seconds <= 0
-        or settings.analysis_worker_summary_lines <= 0
-        or settings.analysis_worker_pids_limit <= 0
-        or settings.analysis_worker_cpus <= 0
-        or settings.analysis_worker_max_iterations <= 0
-        or settings.analysis_worker_exec_feedback_max_chars <= 0
-        or settings.analysis_worker_max_input_bytes <= 0
-        or settings.analysis_worker_github_max_bytes <= 0
-        or settings.analysis_worker_upload_max_bytes <= 0
-        or not settings.analysis_worker_memory
-        or not settings.analysis_worker_tmp_size
-    ):
-        log.error("ANALYSIS WORKER DISABLED: sealed resource limits must be positive")
-        return None
-    sandbox = build_analysis_sandbox(settings)
-    if sandbox is None:
-        return None
-    return BuiltinAnalysisWorker(
-        settings.analysis_worker_model,
-        sandbox,
-        limits=SandboxLimits(
-            timeout_seconds=settings.analysis_worker_timeout_seconds,
-            kill_after_seconds=settings.analysis_worker_kill_after_seconds,
-            memory=settings.analysis_worker_memory,
-            memory_swap=settings.analysis_worker_memory_swap,
-            cpus=settings.analysis_worker_cpus,
-            pids_limit=settings.analysis_worker_pids_limit,
-            tmp_size=settings.analysis_worker_tmp_size,
-            stream_cap_bytes=settings.analysis_worker_stream_cap_bytes,
-        ),
-        output_cap_bytes=settings.analysis_worker_report_max_bytes,
-        output_watch_interval_seconds=settings.analysis_worker_output_watch_interval_seconds,
-        strategy=settings.analysis_worker_strategy,
-        max_iterations=settings.analysis_worker_max_iterations,
-        exec_feedback_max_chars=settings.analysis_worker_exec_feedback_max_chars,
-    )
-
-
 def _exposes_coding_worker(agent: Agent) -> bool:
     return any(
         t.name == CodingWorkerConnector.name
         and CODING_WORKER_PR_WRITE in t.permissions
-        for t in agent.spec.tools
-    )
-
-
-def _exposes_analysis_worker(agent: Agent) -> bool:
-    return any(
-        t.name == AnalysisWorkerConnector.name
-        and ANALYSIS_REPORT_WRITE in t.permissions
         for t in agent.spec.tools
     )
 
@@ -746,32 +550,6 @@ def _build_worker_ledger(
     )
 
 
-def _build_analysis_ledger(
-    settings: Settings, agents: dict[str, Agent], usage: UsageStore
-) -> WorkerSpendLedger | None:
-    """A separate audit kind, with the same budget gates as other workers."""
-    owner = next(
-        (a for a in agents.values() if _exposes_analysis_worker(a)),
-        next(iter(agents.values()), None),
-    )
-    if owner is None:
-        return None
-    return WorkerSpendLedger(
-        usage=usage,
-        model=settings.analysis_worker_model,
-        agents=agents,
-        default_agent=owner.metadata.name,
-        task_kind="analysis_worker",
-        # Opt-in hard posture (mirrors openhands when enabled): refuse any
-        # attempt for a capless agent, keeping stale approved jobs fail-closed
-        # even if config drifts between approval and recovery. Off by default:
-        # iterative spend is structurally bounded (max_iterations completions,
-        # capped feedback growth) and every run is human-approved; capped
-        # agents keep the in-run abort and settle enforcement regardless.
-        require_per_task_cap=settings.analysis_worker_require_per_task_cap,
-    )
-
-
 def _uncapped_worker_agents(
     agents: dict[str, Agent],
     ledger: WorkerSpendLedger,
@@ -799,10 +577,6 @@ def build_tool_gateway(
     checkpoints: CheckpointStore,
     engine: WorkflowEngine,
     usage: UsageStore | None = None,
-    analysis_inputs: InputStore | None = None,
-    analysis_artifacts: ArtifactStore | None = None,
-    analysis_attempts: AnalysisAttemptStore | None = None,
-    analysis_uploads: UploadStore | None = None,
     broker_handle: object | None = None,
 ) -> ToolGateway:
     """Register native connectors plus an MCP connector per configured server.
@@ -905,106 +679,6 @@ def build_tool_gateway(
         log.warning(
             "github tool not registered: set GITHUB_TOKEN or GITHUB_APP_*"
         )
-
-    # Phase 1 sealed analysis is independent of GitHub credentials. It stays
-    # disabled until the operator explicitly enables it and the digest-pinned
-    # image + real sealed probe succeed; it never falls back to host execution.
-    if settings.analysis_worker_enabled:
-        worker = build_analysis_worker(settings)
-        ledger = (
-            _build_analysis_ledger(settings, agents, usage)
-            if usage is not None
-            else None
-        )
-        if worker is None or ledger is None:
-            log.error(
-                "ANALYSIS WORKER DISABLED: a usable sealed Docker backend and "
-                "usage ledger are required; it will not run unsandboxed or "
-                "without spend gates."
-            )
-        elif settings.analysis_worker_require_per_task_cap and (
-            uncapped := _uncapped_worker_agents(
-                agents, ledger, exposes=_exposes_analysis_worker
-            )
-        ):
-            # Opt-in fail-closed gate (the openhands posture): the operator
-            # demanded per-task caps, so the worker must not run for any agent
-            # whose attempts would be uncapped.
-            log.error(
-                "ANALYSIS WORKER DISABLED: "
-                "ANALYSIS_WORKER_REQUIRE_PER_TASK_CAP is set, so every agent "
-                "exposing the analysis tool needs spec.budget.per_task_usd "
-                "(missing on: %s).",
-                ", ".join(uncapped),
-            )
-        else:
-            inputs = analysis_inputs or build_analysis_input_store(settings)
-            artifacts = analysis_artifacts or build_analysis_artifact_store(settings)
-            attempts = analysis_attempts or build_analysis_attempt_store(settings)
-            uploads = analysis_uploads or build_analysis_upload_store(settings)
-            # Phase 4: one provisioner per available source. Sources whose
-            # dependency isn't configured are simply not registered — the
-            # connector's invoke-time resolution refuses them before a human
-            # is ever asked to approve.
-            provisioners = [StagedProvisioner(inputs)]
-            available_sources = {"staged"}
-            if settings.slack_bot_token:
-                from openloop.surfaces.slack_files import SlackUploadFetcher
-
-                provisioners.append(
-                    UploadProvisioner(
-                        uploads,
-                        SlackUploadFetcher(settings.slack_bot_token),
-                        max_bytes=settings.analysis_worker_upload_max_bytes,
-                    )
-                )
-                available_sources.add("upload")
-            if github_client is not None:
-                provisioners.append(
-                    GithubProvisioner(
-                        github_client,
-                        max_bytes=settings.analysis_worker_github_max_bytes,
-                    )
-                )
-                available_sources.add("github")
-            orchestrator = SealedAnalysisOrchestrator(
-                worker,
-                provisioners,
-                artifacts,
-                attempts=attempts,
-                ledger=ledger,
-                workspace_root=_analysis_workspace_root(settings),
-                report_max_bytes=settings.analysis_worker_report_max_bytes,
-                summary_lines=settings.analysis_worker_summary_lines,
-                max_input_bytes=settings.analysis_worker_max_input_bytes,
-            )
-            gateway.analysis_input_store = inputs  # type: ignore[attr-defined]
-            gateway.analysis_artifact_store = artifacts  # type: ignore[attr-defined]
-            gateway.analysis_attempt_store = attempts  # type: ignore[attr-defined]
-            gateway.analysis_upload_store = uploads  # type: ignore[attr-defined]
-            gateway.analysis_sandbox_enabled = True  # type: ignore[attr-defined]
-            gateway.register(
-                AnalysisWorkerConnector(
-                    orchestrator,
-                    uploads=uploads,
-                    available_sources=available_sources,
-                )
-            )
-            # Register the sealed run as a durable workflow (approval = wait
-            # node; store_result persists the {artifact_ref, prose_summary}
-            # the session runner delivers from).
-            engine.register(build_analysis_worker_workflow(orchestrator))
-            log.info(
-                "registered native tool: analysis "
-                "(backend=builtin, strategy=%s, model=%s, sandbox=docker, "
-                "sources=%s, default_per_task_cap=%s)",
-                settings.analysis_worker_strategy,
-                settings.analysis_worker_model,
-                ",".join(sorted(available_sources)),
-                ledger.per_task_usd_for(None),
-            )
-    else:
-        log.info("analysis tool not registered: set ANALYSIS_WORKER_ENABLED=1")
 
     mcp_connectors: list[MCPConnector] = []
     seen: set[str] = set()
@@ -1123,15 +797,6 @@ async def run_recovery_pass(
                 log.info("reconciled %d approval decision(s)", healed)
         except Exception:
             log.exception("approval decision reconcile failed")
-
-        # Phase 0's layer-3 cleanup is relevant only once sealed analysis is
-        # actually configured. It is safe under any replica count because the
-        # helper reaps only OpenLoop analysis containers past their own stamped
-        # deadline; Docker failures are contained inside the best-effort helper.
-        if getattr(tools, "analysis_sandbox_enabled", False):
-            reaped = await sweep_expired_sandboxes()
-            if reaped:
-                log.info("reaped %d expired sealed analysis sandbox(es)", len(reaped))
 
         # Repair surface-session delivery left mid-flight by a crash — after the
         # engine resume above so each session's workflow is already terminal.

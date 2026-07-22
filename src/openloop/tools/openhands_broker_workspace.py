@@ -1,9 +1,7 @@
 """Broker-backed OpenHands workspace adapter (architecture step 4, phase 3).
 
-Drop-in for the ``docker_adapter`` surface :class:`OpenHandsCodingWorker`
-consumes from
-:class:`~openloop.tools.openhands_docker.HardenedDockerWorkspace`, but instead
-of launching a container itself it drives the reviewed broker RPC intents
+Implements the neutral workspace surface :class:`OpenHandsCodingWorker`
+consumes. It drives the reviewed broker RPC intents
 (``create_job`` → ``start_segment`` → …) and serves the agent over the
 per-generation relay UDS.
 
@@ -41,7 +39,7 @@ from openloop.broker_control.receipts import CheckpointReceiptKey
 from openloop.broker_control.workspace_ingress import WorkspaceIngressProblem
 from openloop.broker_rpc.capability import JobCapability
 from openloop.broker_rpc.client import BrokerRpcClient
-from openloop.tools.openhands_docker import ArchiveStreamResult
+from openloop.openhands.workspace_protocol import ArchiveStreamResult
 from openloop.tools.openhands_relay_client import (
     RelayClientEndpoint,
     RelayMode,
@@ -116,11 +114,6 @@ def _finalize_idempotency_key(job_id: str, generation: int) -> str:
 
 class BrokerWorkspaceAdapter:
     """Serve an OpenHands agent over broker-owned generations, not a container."""
-
-    # The broker owns the Docker socket; this process never runs containers or
-    # dials a local daemon. The worker's probe reads this to skip local-Docker
-    # checks (``docker version`` / ``import openhands.workspace``).
-    runs_containers_locally = False
 
     def __init__(
         self,

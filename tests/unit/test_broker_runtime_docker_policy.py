@@ -5,6 +5,7 @@ from uuid import UUID
 import pytest
 
 from openloop.broker_runtime import OpenHandsGenerationSpec, RuntimeUnavailable
+from openloop.openhands.runtime_profile import runtime_server_image
 from openloop.broker_runtime.docker_policy import (
     AGENT_COMMAND,
     AGENT_MEMORY_BYTES,
@@ -22,7 +23,6 @@ from openloop.broker_runtime.docker_policy import (
     RUNTIME_SCHEMA,
     image_contract_commands,
 )
-from openloop.tools.openhands_docker import runtime_server_image
 from openloop.tools.openhands_relay import (
     CONTAINER_RELAY_CAPABILITY_FILE,
     CONTAINER_RELAY_CONFIG_FILE,

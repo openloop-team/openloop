@@ -6,12 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from openloop.agents.schema import Agent
-from openloop.analysis import (
-    AnalysisAttemptStore,
-    ArtifactStore,
-    InputStore,
-    UploadStore,
-)
 from openloop.approvals import ApprovalStore
 from openloop.checkpoints import CheckpointStore
 from openloop.config import Settings
@@ -35,10 +29,6 @@ class SettledStores:
     workflows: WorkflowStore
     sessions: SurfaceSessionStore
     threads: ThreadRecordStore
-    analysis_inputs: InputStore
-    analysis_artifacts: ArtifactStore
-    analysis_attempts: AnalysisAttemptStore
-    analysis_uploads: UploadStore
 
 
 @dataclass(slots=True)
@@ -131,19 +121,3 @@ class AppContext:
     @property
     def threads(self) -> ThreadRecordStore:
         return self.stores.threads
-
-    @property
-    def analysis_inputs(self) -> InputStore:
-        return self.stores.analysis_inputs
-
-    @property
-    def analysis_artifacts(self) -> ArtifactStore:
-        return self.stores.analysis_artifacts
-
-    @property
-    def analysis_attempts(self) -> AnalysisAttemptStore:
-        return self.stores.analysis_attempts
-
-    @property
-    def analysis_uploads(self) -> UploadStore:
-        return self.stores.analysis_uploads

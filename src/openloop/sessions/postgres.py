@@ -47,8 +47,7 @@ class PostgresSurfaceSessionStore(BorrowedPostgresStore):
                 "ALTER TABLE surface_sessions "
                 "ADD COLUMN IF NOT EXISTS request_text TEXT"
             )
-            # Migration for tables created before artifact-ref delivery (Phase 2
-            # of the sealed analysis worker).
+            # Migration for tables created before generic artifact references.
             await conn.execute(
                 "ALTER TABLE surface_sessions "
                 "ADD COLUMN IF NOT EXISTS result_artifact_ref TEXT"

@@ -11,10 +11,8 @@
 #   docker compose -f docker-compose.deploy.yml up -d --build
 #   docker compose -f docker-compose.deploy.yml logs -f runtime
 #
-# The base deployment intentionally has no Docker-daemon authority. On a
-# trusted, single-tenant host, enable sibling-container sandboxes explicitly:
-#   docker compose -f docker-compose.deploy.yml -f docker-compose.sandbox.yml up -d --build
-# Then enable the desired sandbox-backed worker settings in .env.
+# The runtime intentionally has no Docker-daemon authority. Containerized
+# OpenHands requires the external broker override.
 
 services:
   postgres:

@@ -8,6 +8,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from openloop.agents import load_agent
+from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
 from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import CodingWorkerConnector
 from openloop.tools.coding_worker import WorkerOutcome
@@ -15,7 +16,6 @@ from openloop.tools.openhands_artifacts import (
     WorkspaceArtifact,
     WorkspaceArtifactIdentity,
 )
-from openloop.tools.openhands_docker import DEFAULT_OPENHANDS_SERVER_IMAGE
 from openloop.tools.openhands_resume import (
     OpenHandsResumeState,
     WorkerPaused,
