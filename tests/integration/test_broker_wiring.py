@@ -248,10 +248,12 @@ def _external_settings(tmp_path, sock_dir, **overrides):
     for path in (ingress_root, receipts_root):
         path.mkdir(exist_ok=True)
         path.chmod(0o700)
-    # The shared ingress root is provisioned group-owned by the shared gid so the
-    # broker's materialize-side ownership validation accepts it.
+    # Both app-owned shared roots are provisioned with the cross-process GID and
+    # exact setgid mode expected by their broker-side readers.
     os.chown(ingress_root, -1, os.getgid())
     ingress_root.chmod(0o2750)
+    os.chown(receipts_root, -1, os.getgid())
+    receipts_root.chmod(0o2750)
     external = dict(
         broker_mode="external",
         broker_identity_private_key=SecretStr(
@@ -372,8 +374,37 @@ async def test_external_bind_checkpoint_store_leaves_reconciler_none(
     )
     store = handle.bind_checkpoint_store(artifacts)
     assert isinstance(store, LocalCheckpointReceiptStore)
+    assert store._receipt_root == tmp_path / "receipts"
+    assert store._shared_gid == os.getgid()
     # External mode has no app-side ledger/coordinator, so no reconciler is wired.
     assert handle.reconciler is None
+
+
+async def test_coprocess_receipt_root_without_shared_gid_fails_closed(
+    tmp_path, sock_dir, caplog
+):
+    receipt_root = tmp_path / "misconfigured-receipts"
+    receipt_root.mkdir()
+    settings = _settings(
+        tmp_path,
+        sock_dir,
+        broker_checkpoint_receipt_root=str(receipt_root),
+        broker_shared_data_gid=None,
+    )
+
+    async with AsyncExitStack() as stack:
+        with caplog.at_level(logging.ERROR, logger="openloop"):
+            handle = await build_broker(
+                settings, stack, runtime_driver=InMemoryRuntimeDriver()
+            )
+
+    assert handle is None
+    assert not (sock_dir / "control.sock").exists()
+    assert any(
+        "broker_shared_data_gid is required when "
+        "broker_checkpoint_receipt_root is set" in record.message
+        for record in caplog.records
+    )
 
 
 async def test_coprocess_client_failure_returns_none_and_no_listener(

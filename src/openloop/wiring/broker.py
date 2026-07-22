@@ -146,10 +146,11 @@ class BrokerClientHandle:
     coding-worker thread can bridge into the async client via
     ``run_coroutine_threadsafe``.
 
-    ``shared_data_gid``/``receipt_root`` describe the dedicated cross-boundary
-    receipts tree (external mode); they are carried here so the phase-E pass can
-    hand them to :class:`LocalCheckpointReceiptStore` without another settings
-    read. In coprocess they stay ``None`` (nothing crosses a process boundary).
+    ``shared_data_gid``/``receipt_root`` describe the dedicated receipt tree
+    (required in external mode, optional in coprocess); binding the checkpoint
+    store hands both to :class:`LocalCheckpointReceiptStore` without another
+    settings read. Explicitly configuring a receipt root always requires the
+    shared GID.
     """
 
     client: BrokerRpcClient
@@ -173,13 +174,15 @@ class BrokerClientHandle:
             return self.checkpoint_store
         # expected_uid/expected_gid validate the *in-artifact* tree, which stays
         # owned by the app's primary gid at 0700; shared_data_gid governs only the
-        # dedicated cross-boundary receipts tree (wired in a later phase).
+        # dedicated cross-boundary receipts tree.
         checkpoint_store = LocalCheckpointReceiptStore(
             artifact_store=artifact_store,
             issuer=self.receipt_issuer,
             historical_verifier=self.receipt_verifier,
             expected_uid=os.getuid(),
             expected_gid=os.getgid(),
+            receipt_root=self.receipt_root,
+            shared_gid=self.shared_data_gid,
         )
         self.checkpoint_store = checkpoint_store
         # External mode: the broker process owns lifecycle recovery, so the app
@@ -615,6 +618,14 @@ async def build_broker_client(
     if not settings.broker_control_socket_dir:
         raise ValueError(
             "broker_control_socket_dir is required when the broker is enabled"
+        )
+    if (
+        settings.broker_checkpoint_receipt_root is not None
+        and settings.broker_shared_data_gid is None
+    ):
+        raise ValueError(
+            "broker_shared_data_gid is required when "
+            "broker_checkpoint_receipt_root is set"
         )
     if external:
         missing = [
