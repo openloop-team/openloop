@@ -1,8 +1,6 @@
 import os
-import shutil
 import socket
 import stat
-import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
@@ -34,14 +32,8 @@ JOB_ID = UUID("22222222-2222-4222-8222-222222222222")
 
 
 @pytest.fixture
-def short_root():
-    # UDS paths have a 100-byte profile budget; pytest's macOS temp path is
-    # intentionally much longer than any supported broker runtime root.
-    root = Path(tempfile.mkdtemp(prefix="olrt-", dir="/private/tmp"))
-    try:
-        yield root
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+def short_root(short_socket_root):
+    return short_socket_root
 
 
 def _spec():

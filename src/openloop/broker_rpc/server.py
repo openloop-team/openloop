@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable
 from dataclasses import dataclass
+import errno
 import math
 import os
 from pathlib import Path
@@ -23,11 +24,92 @@ from .peer import PeerCredentialProblem, PeerCredentialProvider
 
 
 _T = TypeVar("_T")
+MAX_UNIX_SOCKET_PATH_BYTES = 100
 
 
 class SocketPathProblem(Exception):
     def __init__(self) -> None:
         super().__init__("broker RPC socket path rejected")
+
+
+def take_over_stale_socket(
+    path: Path,
+    *,
+    expected_uid: int,
+    connect_timeout: float = 1.0,
+) -> None:
+    """Remove an unambiguously stale broker socket owned by ``expected_uid``.
+
+    An existing listener is never displaced.  Only ``ECONNREFUSED`` proves that
+    the socket inode has no listener; timeouts and every other connect failure
+    remain ambiguous and fail closed.  The inode is re-read immediately before
+    unlink to narrow the path-replacement window; the trusted, broker-owned
+    parent directory is what excludes an untrusted replacer during the
+    irreducible interval before unlink.
+    """
+    if not isinstance(path, Path):
+        raise TypeError("path must be pathlib.Path")
+    if not path.is_absolute():
+        raise ValueError("socket path must be absolute")
+    if (
+        isinstance(expected_uid, bool)
+        or not isinstance(expected_uid, int)
+        or expected_uid < 0
+    ):
+        raise ValueError("expected_uid must be a nonnegative integer")
+    try:
+        timeout = float(connect_timeout)
+    except (OverflowError, TypeError, ValueError) as error:
+        raise ValueError(
+            "connect_timeout must be a positive finite number"
+        ) from error
+    if (
+        isinstance(connect_timeout, bool)
+        or not isinstance(connect_timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        raise ValueError("connect_timeout must be a positive finite number")
+
+    try:
+        observed = os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise SocketPathProblem() from error
+
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.settimeout(timeout)
+        try:
+            probe.connect(os.fspath(path))
+        except TimeoutError as error:
+            raise SocketPathProblem() from error
+        except OSError as error:
+            if error.errno != errno.ECONNREFUSED:
+                raise SocketPathProblem() from error
+        else:
+            # A successful connect proves that another broker is listening.
+            raise SocketPathProblem()
+    finally:
+        probe.close()
+
+    if not stat.S_ISSOCK(observed.st_mode) or observed.st_uid != expected_uid:
+        raise SocketPathProblem()
+    try:
+        current = os.lstat(path)
+    except OSError as error:
+        raise SocketPathProblem() from error
+    if (
+        not stat.S_ISSOCK(current.st_mode)
+        or current.st_uid != expected_uid
+        or (current.st_dev, current.st_ino) != (observed.st_dev, observed.st_ino)
+    ):
+        raise SocketPathProblem()
+    try:
+        os.unlink(path)
+    except OSError as error:
+        raise SocketPathProblem() from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +127,11 @@ class UnixSocketPolicy:
             encoded = os.fsencode(self.path)
         except (TypeError, UnicodeError) as error:
             raise ValueError("socket path is not encodable") from error
-        if not encoded or b"\x00" in encoded or len(encoded) > 100:
+        if (
+            not encoded
+            or b"\x00" in encoded
+            or len(encoded) > MAX_UNIX_SOCKET_PATH_BYTES
+        ):
             raise ValueError("socket path is invalid or too long")
         if isinstance(self.mode, bool) or not isinstance(self.mode, int):
             raise TypeError("socket mode must be an integer")

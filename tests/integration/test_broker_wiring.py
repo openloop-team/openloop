@@ -9,8 +9,6 @@ receipt private key kept out of the broker graph, and clean teardown.
 import base64
 import logging
 import os
-import shutil
-import tempfile
 from contextlib import AsyncExitStack
 from pathlib import Path
 
@@ -51,15 +49,8 @@ async def _postgres_reachable() -> bool:
 
 
 @pytest.fixture
-def sock_dir():
-    # A short base dir keeps the control.sock path under the ~100-byte sun_path
-    # limit (pytest's tmp_path is too deep for a Unix socket).
-    directory = Path(tempfile.mkdtemp(prefix="olbrk-", dir="/private/tmp"))
-    try:
-        directory.chmod(0o700)
-        yield directory
-    finally:
-        shutil.rmtree(directory, ignore_errors=True)
+def sock_dir(short_socket_root):
+    return short_socket_root
 
 
 def _root(seed: int) -> str:

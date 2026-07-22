@@ -11,7 +11,6 @@ from pathlib import Path
 import secrets
 import shutil
 import subprocess
-import tempfile
 import time
 from uuid import UUID, uuid4
 
@@ -29,6 +28,7 @@ from openloop.broker_rpc.capability import (
     JobCapabilityAuthority,
 )
 from openloop.broker_rpc.identity import WorkloadIdentityIssuer, WorkloadIntent
+from tests.support.socket_paths import create_short_socket_root
 
 
 pytestmark = [
@@ -409,9 +409,7 @@ def _assert_networkless_client(container: str) -> None:
 @pytest.mark.skipif(not _docker_usable(), reason="no usable Docker daemon")
 def test_hardened_linux_broker_rpc_has_no_docker_or_tcp_authority() -> None:
     _cleanup_labeled()
-    parent = Path("/private/tmp") if Path("/private/tmp").is_dir() else Path("/tmp")
-    root = Path(tempfile.mkdtemp(prefix="olbroker-rpc-", dir=parent))
-    root.chmod(0o700)
+    root = create_short_socket_root()
     suffix = uuid4().hex[:10]
     network = f"olbroker-rpc-{suffix}"
     volume = f"olbroker-rpc-{suffix}"

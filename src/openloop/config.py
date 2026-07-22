@@ -26,7 +26,10 @@ DEFAULT_ANALYSIS_SANDBOX_IMAGE = (
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        hide_input_in_errors=True,
     )
 
     # Model providers — LiteLLM reads these from the environment directly, but we

@@ -1,7 +1,5 @@
 import os
 from pathlib import Path
-import shutil
-import tempfile
 
 import pytest
 
@@ -16,12 +14,8 @@ from tests.support.broker_rpc import broker_rpc_test_fixture
 
 
 @pytest.fixture
-def socket_path():
-    directory = Path(tempfile.mkdtemp(prefix="olrpc-", dir="/private/tmp"))
-    try:
-        yield directory / "broker.sock"
-    finally:
-        shutil.rmtree(directory)
+def socket_path(short_socket_root):
+    return short_socket_root / "broker.sock"
 
 
 def _server(path):

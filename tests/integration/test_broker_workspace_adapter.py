@@ -9,9 +9,7 @@ with fakes so no OpenHands SDK, Docker, or relay is needed.
 import asyncio
 import base64
 import io
-import shutil
 import subprocess
-import tempfile
 import uuid
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -43,13 +41,8 @@ from openloop.wiring.broker import build_broker
 
 
 @pytest.fixture
-def sock_dir():
-    directory = Path(tempfile.mkdtemp(prefix="olbrk-", dir="/private/tmp"))
-    try:
-        directory.chmod(0o700)
-        yield directory
-    finally:
-        shutil.rmtree(directory, ignore_errors=True)
+def sock_dir(short_socket_root):
+    return short_socket_root
 
 
 def _root(seed: int) -> str:

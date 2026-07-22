@@ -1,8 +1,6 @@
 import asyncio
 import json
 import os
-import shutil
-import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
@@ -39,12 +37,8 @@ CONVERSATION_ID = UUID("33333333-3333-4333-8333-333333333333")
 
 
 @pytest.fixture
-def short_root():
-    root = Path(tempfile.mkdtemp(prefix="olrd-", dir="/private/tmp"))
-    try:
-        yield root
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+def short_root(short_socket_root):
+    return short_socket_root
 
 
 def _spec(**changes):

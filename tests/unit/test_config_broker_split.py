@@ -7,7 +7,7 @@ the app. See `.superpowers/sdd/phase-A-brief.md`.
 """
 
 import pytest
-from pydantic import ValidationError
+from pydantic import ValidationError, field_validator
 
 from openloop.config import Settings
 
@@ -31,6 +31,31 @@ def test_defaults_are_coprocess_with_all_split_fields_unset():
 def test_broker_mode_rejects_unknown_value():
     with pytest.raises(ValidationError):
         Settings(_env_file=None, broker_mode="banana")
+
+
+def test_settings_validation_errors_hide_all_input_values():
+    database_secret = "postgresql://operator:database-secret@db/openloop"
+    provider_secret = "provider-secret-value"
+
+    class SettingsWithDatabaseValidation(Settings):
+        @field_validator("database_url")
+        @classmethod
+        def reject_database_url(cls, _value):
+            raise ValueError("database URL rejected")
+
+    with pytest.raises(ValidationError) as captured:
+        SettingsWithDatabaseValidation(
+            _env_file=None,
+            broker_mode="banana",
+            database_url=database_secret,
+            gemini_api_key=provider_secret,
+        )
+
+    rendered = str(captured.value)
+    assert database_secret not in rendered
+    assert provider_secret not in rendered
+    assert "input_value" not in rendered
+    assert "broker_mode" in rendered
 
 
 @pytest.mark.parametrize("value", [0, -5])

@@ -9,7 +9,7 @@ SOURCE_ROOT = Path(__file__).parents[2] / "src"
 OPENLOOP_ROOT = SOURCE_ROOT / "openloop"
 BROKER_ROOT = OPENLOOP_ROOT / "broker"
 BROKER_RPC_ROOT = OPENLOOP_ROOT / "broker_rpc"
-APP_MODULE = OPENLOOP_ROOT / "app.py"
+BROKER_MAIN_MODULE = OPENLOOP_ROOT / "broker_main.py"
 WIRING_ROOT = OPENLOOP_ROOT / "wiring"
 CODING_WORKER_MODULES = (
     OPENLOOP_ROOT / "tools" / "coding_worker.py",
@@ -182,20 +182,22 @@ def test_broker_rpc_imports_core_one_way_and_no_runtime_layers():
     assert violations == []
 
 
-def test_privileged_broker_runtime_is_confined_to_wiring_broker():
+def test_privileged_broker_runtime_is_confined_to_reviewed_composition_seams():
     # Step 4 wires the privileged broker runtime through a single reviewed
-    # composition seam, `wiring/broker.py`. Every other wiring module and the
-    # app shell must reach it only via that seam (`openloop.wiring.broker`),
-    # never by importing `broker_control`/`broker_runtime` directly.
+    # composition seam, `wiring/broker.py`; the split-process entrypoint is the
+    # only other reviewed importer. Every other top-level or wiring module must
+    # reach the privileged layers through one of those seams.
     seam = WIRING_ROOT / "broker.py"
     assert seam.exists(), "wiring/broker.py is the required broker composition seam"
-    other_modules = [
-        path
-        for path in sorted(WIRING_ROOT.glob("*.py"))
-        if path != seam
-    ]
+    assert BROKER_MAIN_MODULE.exists(), "broker_main.py is the process seam"
+    reviewed = {seam, BROKER_MAIN_MODULE}
+    candidate_modules = {
+        *OPENLOOP_ROOT.glob("*.py"),
+        *WIRING_ROOT.glob("*.py"),
+    }
+    other_modules = sorted(candidate_modules - reviewed)
     imports = []
-    for path in (APP_MODULE, *other_modules):
+    for path in other_modules:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

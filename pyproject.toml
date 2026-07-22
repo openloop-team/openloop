@@ -60,6 +60,7 @@ openhands = [
 
 [project.scripts]
 openloop = "openloop.cli:main"
+openloop-broker = "openloop.broker_main:main"
 
 [build-system]
 requires = ["hatchling"]

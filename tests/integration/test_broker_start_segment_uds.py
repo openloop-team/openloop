@@ -2,9 +2,7 @@ import asyncio
 from datetime import UTC, datetime
 import os
 from pathlib import Path
-import shutil
 import struct
-import tempfile
 from uuid import UUID
 
 import pytest
@@ -64,16 +62,12 @@ class ControlledRuntime(InMemoryRuntimeDriver):
 
 
 @pytest.fixture
-def private_paths():
-    directory = Path(tempfile.mkdtemp(prefix="olstart-", dir="/private/tmp"))
-    state_root = directory / "state"
+def private_paths(short_socket_root):
+    state_root = short_socket_root / "state"
     state_root.mkdir(mode=0o700)
     os.chown(state_root, os.getuid(), os.getgid())
     state_root.chmod(0o700)
-    try:
-        yield directory / "broker.sock", state_root
-    finally:
-        shutil.rmtree(directory)
+    return short_socket_root / "broker.sock", state_root
 
 
 def _server(path, fixture):

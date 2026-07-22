@@ -14,7 +14,6 @@ import os
 import secrets
 import shutil
 import subprocess
-import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -48,6 +47,7 @@ from openloop.tools.openhands_relay import (
     compile_openhands_relay,
     install_relay_artifacts,
 )
+from tests.support.socket_paths import create_short_socket_root
 
 
 pytestmark = [
@@ -165,10 +165,7 @@ class _Resources:
 
 
 def _short_root() -> Path:
-    parent = Path("/private/tmp") if Path("/private/tmp").is_dir() else Path("/tmp")
-    root = Path(tempfile.mkdtemp(prefix="olrelay-", dir=parent))
-    root.chmod(0o700)
-    return root
+    return create_short_socket_root()
 
 
 def _new_network(resources: _Resources, name: str) -> str:
