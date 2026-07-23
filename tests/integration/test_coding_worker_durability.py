@@ -81,6 +81,14 @@ async def test_reinvoke_after_open_is_idempotent_noop():
     assert runner.runs == 1
     assert len(github.pulls) == 1
 
+    # Verify the outcome block on the resumed path is correctly reconstructed.
+    outcome = second.data["outcome"]
+    assert outcome["kind"] == "pull_request"
+    assert outcome["pr_number"] == second.data["pr_number"]
+    assert outcome["pr_url"] == second.data["pr_url"]
+    assert outcome["repo"] == "acme/x"
+    assert outcome["branch"] == f"openloop/job-{_args()['job_id']}"
+
 
 async def test_resume_after_crash_between_push_and_pr_open():
     class FlakyGitHub(FakeGitHub):
