@@ -4,7 +4,9 @@ These helpers are intentionally network-free and database-free. They are used
 by OpenLoop's own tests and can also support downstream integration tests.
 """
 
+import tempfile
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from openloop.config import Settings
@@ -181,6 +183,7 @@ class FakeWorkerOrchestrator:
         cost_usd: float = 0.0,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        seed_files: dict[str, str] | None = None,
     ) -> None:
         self.title = title
         self.body = body
@@ -188,6 +191,10 @@ class FakeWorkerOrchestrator:
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
         self.runs: list = []
+        # Files written into every workspace returned by provision_readonly,
+        # so a fake investigation has something to read without a real clone.
+        self.seed_files = seed_files
+        self.readonly_provisions: list[tuple[str, str | None]] = []
 
     async def run_attempt(self, state, on_step=None):
         from openloop.tools.coding_worker import STEPS, WorkerOutcome
@@ -206,6 +213,18 @@ class FakeWorkerOrchestrator:
             prompt_tokens=self.prompt_tokens,
             completion_tokens=self.completion_tokens,
         )
+
+    async def provision_readonly(self, repo: str, ref: str | None = None) -> Path:
+        """A network-free stand-in for GitWorkspaceOrchestrator.provision_readonly.
+
+        Returns a fresh tmp dir (optionally seeded with files) instead of
+        cloning — no git, no credential, no network.
+        """
+        workspace = Path(tempfile.mkdtemp(prefix="openloop-investigate-fake-"))
+        self.readonly_provisions.append((repo, ref))
+        for name, content in (self.seed_files or {}).items():
+            (workspace / name).write_text(content)
+        return workspace
 
 
 class FakeSurfaceDelivery:

@@ -56,6 +56,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from openloop.checkpoints.store import CheckpointStore, WorkerCheckpoint
 from openloop.credentials import CredentialResolver, CredentialScope
+from openloop.tasks.investigation import (
+    INVESTIGATE_ARGS_VERSION,
+    InvestigateArgs,
+    RepoInvestigator,
+)
 from openloop.tools.base import ActionSpec, ToolResult
 from openloop.tools.github import GitHubClient
 from openloop.tools.openhands_resume import (
@@ -107,6 +112,10 @@ CODING_WORKER_CODE_WRITE = "code:write"
 # Back-compat alias for internal references and pre-migration tests.
 CODING_WORKER_PR_WRITE = CODING_WORKER_CODE_WRITE
 CODING_WORKER_ARGS_VERSION = 1
+# Read-only investigation profile (Stage 1, gate=Gate.NONE — see
+# openloop.tasks.contract). Offered by the connector only when it is
+# constructed with a RepoInvestigator.
+CODING_WORKER_INVESTIGATE_READ = "investigate:read"
 
 
 class CodingWorkerPrArgs(BaseModel):
@@ -392,7 +401,16 @@ def _pull_request_outcome(state: "WorkerState", pull: dict, summary: str) -> dic
 
 
 class CodingWorkerConnector:
-    """Maps ``workspace_task.code:write`` onto an attempt runner + :class:`GitHubClient`."""
+    """Maps ``workspace_task.code:write`` onto an attempt runner + :class:`GitHubClient`.
+
+    When constructed with a :class:`RepoInvestigator`, it also serves
+    ``workspace_task.investigate:read`` — a read-only, ungated repository
+    investigation (Stage 1 profile #2). That profile has ``gate=Gate.NONE``
+    (see :mod:`openloop.tasks.contract`), so the gateway never creates an
+    approval for it and always falls straight through to :meth:`execute`: the
+    investigation runs synchronously in the connector, never as a durable
+    workflow, and its result flows back through the model tool-loop.
+    """
 
     name = CODING_WORKER_TOOL_NAME
     # When the gateway has a WorkflowEngine, this action runs as a durable
@@ -406,6 +424,7 @@ class CodingWorkerConnector:
         orchestrator: AttemptRunner,
         github: GitHubClient,
         checkpoints: "CheckpointStore | None" = None,
+        investigator: "RepoInvestigator | None" = None,
     ) -> None:
         # The orchestrator owns provision → worker → commit → push (and the git
         # credential); this connector never sees a worker that could push.
@@ -413,9 +432,15 @@ class CodingWorkerConnector:
         self.github = github
         # Optional: when set, jobs are checkpointed per step and resume on crash.
         self.checkpoints = checkpoints
+        # Optional: when set, investigate:read is offered (see
+        # supported_permissions) and served by this same connector.
+        self.investigator = investigator
 
     def supported_permissions(self) -> set[str]:
-        return {CODING_WORKER_CODE_WRITE}
+        perms = {CODING_WORKER_CODE_WRITE}
+        if self.investigator is not None:
+            perms.add(CODING_WORKER_INVESTIGATE_READ)
+        return perms
 
     def prepare_args(
         self,
@@ -443,7 +468,27 @@ class CodingWorkerConnector:
         - stamps the originating ``session_id`` (step 5) so worker spend traces
           to the surface session it was invoked from. Gateway-supplied only,
           like ``warm_key``; a model-supplied value is ignored.
+
+        ``investigate:read`` stamps ``profile="investigate"`` (the workflow
+        dispatch key) plus a ``job_id``/``agent``/``agent_id``/``session_id``
+        the same way, so the identity threads through the same fields even
+        though this profile never becomes a durable workflow or approval in
+        Stage 1. It ignores ``warm_key`` — investigation always provisions a
+        fresh ephemeral checkout, never a thread's warm workspace.
         """
+        if permission == CODING_WORKER_INVESTIGATE_READ:
+            args = {**args, "profile": "investigate"}
+            if not args.get("job_id"):
+                args = {**args, "job_id": uuid.uuid4().hex[:12]}
+            if agent is not None:
+                args = {
+                    **args,
+                    "agent": agent.metadata.name,
+                    "agent_id": agent.metadata.id,
+                }
+            if session_id:
+                args = {**args, "session_id": session_id}
+            return args
         if permission != CODING_WORKER_CODE_WRITE:
             return args
         # Normalization (strip) now lives in CodingWorkerPrArgs' validators —
@@ -468,6 +513,15 @@ class CodingWorkerConnector:
     def describe(self, permission: str) -> ActionSpec:
         # Generated from the args model the gateway parses with — declaration
         # and enforcement cannot drift.
+        if permission == CODING_WORKER_INVESTIGATE_READ:
+            return ActionSpec(
+                "Investigate a repository read-only to answer a question. "
+                "Returns an evidence bundle (a summary plus findings cited as "
+                "path:line); makes no code changes and opens no pull request.",
+                InvestigateArgs.model_json_schema(),
+                model=InvestigateArgs,
+                version=INVESTIGATE_ARGS_VERSION,
+            )
         return ActionSpec(
             "Run the coding worker on an instruction and open a draft pull "
             "request with its changes. This starts the worker and opens a draft "
@@ -478,6 +532,8 @@ class CodingWorkerConnector:
         )
 
     async def execute(self, permission: str, args: dict) -> ToolResult:
+        if permission == CODING_WORKER_INVESTIGATE_READ:
+            return await self._execute_investigate(args)
         if permission != CODING_WORKER_CODE_WRITE:
             return ToolResult(ok=False, summary=f"unsupported permission {permission}")
 
@@ -608,6 +664,73 @@ class CodingWorkerConnector:
                 "outcome": _pull_request_outcome(
                     state, pull, f"opened draft PR #{pull.get('number')} in {state.repo}"
                 ),
+            },
+        )
+
+    async def _execute_investigate(self, args: dict) -> ToolResult:
+        """Run one read-only investigation and return its evidence bundle.
+
+        Ungated (``gate=Gate.NONE``): the gateway never creates an approval or
+        a workflow instance for this permission, so this is the whole Stage 1
+        delivery path for ``investigate:read`` — the result flows back through
+        the model tool-loop, never through a durable workflow. It opens no PR
+        and pushes nothing; failures are reported as a failed
+        :class:`ToolResult`, never raised, matching every other execute() path
+        in this connector.
+        """
+        job_id = args.get("job_id") or uuid.uuid4().hex[:12]
+        repo = args["repo"]
+        if self.investigator is None:
+            return ToolResult(
+                ok=False,
+                summary=(
+                    f"investigation job {job_id} failed: no investigator configured"
+                ),
+                data={
+                    "job_id": job_id,
+                    "status": "failed",
+                    "repo": repo,
+                    "error": "no investigator configured",
+                },
+            )
+        workspace: Path | None = None
+        try:
+            workspace = await self.orchestrator.provision_readonly(
+                repo, args.get("ref")
+            )
+            bundle, resp = await self.investigator.investigate(
+                workspace, args["question"], repo
+            )
+        except Exception as exc:  # noqa: BLE001 — never raise out of execute()
+            return ToolResult(
+                ok=False,
+                summary=f"investigation job {job_id} failed: {exc}",
+                data={
+                    "job_id": job_id,
+                    "status": "failed",
+                    "repo": repo,
+                    "error": str(exc),
+                },
+            )
+        finally:
+            # Best-effort, mirroring how a worker attempt discards its
+            # ephemeral workspace — this checkout is read-only and never
+            # reused across turns.
+            if workspace is not None:
+                shutil.rmtree(workspace, ignore_errors=True)
+        return ToolResult(
+            ok=True,
+            summary=bundle.summary,
+            data={
+                "outcome": {
+                    "kind": "evidence_bundle",
+                    "summary": bundle.summary,
+                    "findings": bundle.findings,
+                },
+                "job_id": job_id,
+                "cost_usd": resp.cost_usd,
+                "prompt_tokens": resp.prompt_tokens,
+                "completion_tokens": resp.completion_tokens,
             },
         )
 
@@ -1120,6 +1243,41 @@ class GitWorkspaceOrchestrator:
                 await lease.release()
             else:
                 shutil.rmtree(workspace, ignore_errors=True)
+
+    async def provision_readonly(self, repo: str, ref: str | None = None) -> Path:
+        """A credentialed, read-only shallow clone for investigation.
+
+        Reuses exactly the clone step ``run_attempt`` uses to provision a
+        fresh workspace on its cold path (never the mutable warm pool — an
+        investigation is a one-off read and must not touch a thread's kept
+        checkout) but stops there: no job branch is created, nothing is
+        committed, and nothing is ever pushed. As with every git operation
+        this orchestrator runs, the credential rides an ephemeral
+        ``http.extraHeader`` on the one clone command and is never written
+        into the workspace's ``.git/config`` — the returned workspace is
+        exactly as credential-free as a worker's prepared checkout. The
+        caller owns the workspace's lifetime (best-effort cleanup, mirroring
+        how a worker attempt discards its own ephemeral checkout).
+        """
+        token = await self._credentials.resolve(self._scope)
+        if self._workspace_root is not None:
+            self._workspace_root.mkdir(parents=True, exist_ok=True)
+        workspace = Path(
+            tempfile.mkdtemp(
+                prefix="openloop-investigate-", dir=self._workspace_root
+            )
+        )
+        try:
+            await self._git(
+                *_auth_config(token),
+                "clone", "--depth", "1", "--branch", ref or "main",
+                f"{self._remote_base}/{repo}.git", str(workspace),
+                redact=_auth_secrets(token),
+            )
+        except BaseException:
+            shutil.rmtree(workspace, ignore_errors=True)
+            raise
+        return workspace
 
     async def resume_attempt(
         self,

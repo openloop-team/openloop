@@ -68,7 +68,23 @@ def _worker_phase(completed_steps: list[str]) -> str:
 
 
 def _investigate_steps(investigator) -> list[Step]:
-    raise NotImplementedError("investigate profile is wired in Task 12")
+    """Guard: the investigate profile never reaches the workflow in Stage 1.
+
+    ``investigate:read`` has ``gate=Gate.NONE`` (see
+    :mod:`openloop.tasks.contract`), so the gateway never creates an approval
+    or a workflow instance for it — it always falls straight through to
+    :meth:`~openloop.tools.coding_worker.CodingWorkerConnector.execute`, a
+    synchronous call, whose result then flows back through the model
+    tool-loop. A gated/workflow-driven investigate path (this function) is
+    out of scope for Stage 1; reaching this guard means something started a
+    ``workspace_task`` workflow instance with ``profile=investigate``, which
+    should not happen until a later stage adds gated investigation.
+    """
+    raise NotImplementedError(
+        "the investigate profile is ungated (gate=Gate.NONE) in Stage 1 and "
+        "runs via CodingWorkerConnector.execute(), never via this workflow; "
+        "a gated/workflow-driven investigate path is out of scope here"
+    )
 
 
 def build_workspace_task_workflow(
@@ -85,7 +101,9 @@ def build_workspace_task_workflow(
     The instance's step list is dispatched on ``state["profile"]`` (default
     ``"code"``), stamped by the connector's ``prepare_args``: the ``code``
     profile keeps this module's original approve → run-worker → open-PR
-    chain, and an ``investigate`` profile is wired in Task 12.
+    chain. ``investigate`` is ungated (``gate=Gate.NONE``) in Stage 1, so no
+    instance with that profile is ever started here — see
+    :func:`_investigate_steps`.
     """
 
     async def run_worker(ctx: WorkflowContext) -> None:
@@ -210,7 +228,7 @@ def build_workspace_task_workflow(
 
     def _steps_for(state: dict) -> list[Step]:
         if state.get("profile", "code") == "investigate":
-            return _investigate_steps(investigator)  # added in Task 12
+            return _investigate_steps(investigator)  # unreachable in Stage 1; see guard
         return [
             Step(APPROVAL_EVENT, wait=True),
             # This step owns schema-first resume rules. Marking it non-resumable
