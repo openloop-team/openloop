@@ -13,6 +13,7 @@ from openloop.approvals.store import (
     ApprovalStore,
     InMemoryApprovalStore,
 )
+from openloop.tools.aliases import ACTION_ALIASES, _canonical_action
 from openloop.tools.base import (
     Invocation,
     Tool,
@@ -30,17 +31,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Durable-compatibility alias: the coding worker's legacy action string resolves
-# to its new home as the `code` profile of workspace_task (Stage 1 migration).
-# Applied at the single invoke choke point so both the model path and durable
-# approval-record resolution go through it.
-ACTION_ALIASES: dict[str, str] = {
-    "coding_worker.pr:write": "workspace_task.code:write",
-}
-
-
-def _canonical_action(action: str) -> str:
-    return ACTION_ALIASES.get(action, action)
+# ACTION_ALIASES / _canonical_action live in openloop.tools.aliases (see that
+# module's docstring for why) and are re-exported here — this module is the
+# single invoke choke point where both the model path and durable
+# approval-record resolution apply the alias, and existing imports of these
+# two names from `gateway` keep working.
 
 
 # Function names the model sees must match ^[A-Za-z0-9_-]+$, but action names
@@ -126,6 +121,7 @@ class ToolGateway:
         warm_key: str | None = None,
         session_id: str | None = None,
     ) -> Invocation:
+        requested_action = action
         action = _canonical_action(action)
         tool_name, permission = split_action(action)
 
@@ -136,6 +132,21 @@ class ToolGateway:
             )
 
         tool = self._tools.get(tool_name)
+        if (
+            tool is None or permission not in tool.supported_permissions()
+        ) and requested_action != action:
+            # Transitional window (Stage 1 migration): ACTION_ALIASES already
+            # points callers at the connector's canonical action before the
+            # connector itself is re-registered under that canonical tool
+            # name. Route on the action as the caller actually spelled it —
+            # `action` (canonical) still governs the allowlist check above,
+            # the stored approval-record's ``action``, and the summary below,
+            # so policy and display stay in canonical space either way.
+            legacy_tool_name, legacy_permission = split_action(requested_action)
+            legacy_tool = self._tools.get(legacy_tool_name)
+            if legacy_tool is not None and legacy_permission in legacy_tool.supported_permissions():
+                tool_name, permission, tool = legacy_tool_name, legacy_permission, legacy_tool
+
         if tool is None or permission not in tool.supported_permissions():
             return Invocation(
                 status="forbidden",
@@ -213,8 +224,18 @@ class ToolGateway:
 
         # Connectors may require approval intrinsically regardless of an
         # accidental omission in an agent's config.
+        #
+        # `requires_approval` does a plain membership check against the
+        # agent's declared `require_for` list — it has no alias awareness of
+        # its own (like `Approvals.requires_approval`/`policy.is_allowed`
+        # before this fix). A legacy-YAML agent's `require_for` still names
+        # the pre-alias action (`coding_worker.pr:write`), which never equals
+        # the canonical `action` this invoke() now carries throughout. Check
+        # both spellings here, at the alias choke point, rather than teaching
+        # the schema class about the tools-package alias map.
         if (
             agent.spec.approvals.requires_approval(action)
+            or agent.spec.approvals.requires_approval(requested_action)
             or getattr(tool, "requires_approval", False)
         ):
             # The execution mode this invoke() commits to, recorded durably
@@ -660,7 +681,7 @@ def _summarize(action: str, args: dict) -> str:
             f"({args.get('head', '?')} → {args.get('base', 'main')}): "
             f"{args.get('title', '')}"
         ).strip()
-    if action == "coding_worker.pr:write":
+    if action == "workspace_task.code:write":
         # Be explicit: this gate lets the worker START and open a *draft* PR.
         # It is NOT a review of a generated diff (the draft PR is that gate).
         return (
