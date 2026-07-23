@@ -110,6 +110,31 @@ async def test_execute_investigate_without_investigator_fails_closed():
     assert result.data["status"] == "failed"
 
 
+async def test_execute_investigate_with_empty_args_returns_failed_result():
+    conn = _connector(investigator=_investigator())
+    result = await conn.execute("investigate:read", {})
+
+    assert result.ok is False
+    assert result.data["status"] == "failed"
+    assert "repo" in result.data["error"] or "required" in result.data["error"]
+
+
+async def test_execute_investigate_missing_repo_returns_failed_result():
+    conn = _connector(investigator=_investigator())
+    result = await conn.execute("investigate:read", {"question": "why?"})
+
+    assert result.ok is False
+    assert result.data["status"] == "failed"
+
+
+async def test_execute_investigate_missing_question_returns_failed_result():
+    conn = _connector(investigator=_investigator())
+    result = await conn.execute("investigate:read", {"repo": "a/b"})
+
+    assert result.ok is False
+    assert result.data["status"] == "failed"
+
+
 def test_code_write_permission_and_behavior_are_unchanged():
     conn = _connector(investigator=_investigator())
     spec = conn.describe("code:write")

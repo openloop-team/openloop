@@ -679,7 +679,21 @@ class CodingWorkerConnector:
         in this connector.
         """
         job_id = args.get("job_id") or uuid.uuid4().hex[:12]
-        repo = args["repo"]
+
+        # Validate required args defensively — never raise KeyError out of execute()
+        repo = args.get("repo")
+        question = args.get("question")
+        if not repo or not question:
+            return ToolResult(
+                ok=False,
+                summary="invalid arguments for investigate:read: repo and question are required",
+                data={
+                    "job_id": job_id,
+                    "status": "failed",
+                    "error": "invalid arguments for investigate:read: repo and question are required",
+                },
+            )
+
         if self.investigator is None:
             return ToolResult(
                 ok=False,
@@ -699,7 +713,7 @@ class CodingWorkerConnector:
                 repo, args.get("ref")
             )
             bundle, resp = await self.investigator.investigate(
-                workspace, args["question"], repo
+                workspace, question, repo
             )
         except Exception as exc:  # noqa: BLE001 — never raise out of execute()
             return ToolResult(
