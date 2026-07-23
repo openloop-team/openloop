@@ -30,6 +30,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Durable-compatibility alias: the coding worker's legacy action string resolves
+# to its new home as the `code` profile of workspace_task (Stage 1 migration).
+# Applied at the single invoke choke point so both the model path and durable
+# approval-record resolution go through it.
+ACTION_ALIASES: dict[str, str] = {
+    "coding_worker.pr:write": "workspace_task.code:write",
+}
+
+
+def _canonical_action(action: str) -> str:
+    return ACTION_ALIASES.get(action, action)
+
+
 # Function names the model sees must match ^[A-Za-z0-9_-]+$, but action names
 # use "." and ":". Encode for the wire, keep an exact reverse map per request.
 _FN_SAFE = re.compile(r"[^A-Za-z0-9_-]")
@@ -113,6 +126,7 @@ class ToolGateway:
         warm_key: str | None = None,
         session_id: str | None = None,
     ) -> Invocation:
+        action = _canonical_action(action)
         tool_name, permission = split_action(action)
 
         if not is_allowed(agent, action):
