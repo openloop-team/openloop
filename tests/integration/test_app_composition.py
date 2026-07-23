@@ -191,7 +191,7 @@ async def test_external_broker_mode_wires_adapter_without_app_reconciler(
         broker_stack.push_async_callback(service.server.stop)
 
         async with compose(settings, {agent.metadata.name: agent}) as ctx:
-            worker = ctx.tools._tools["coding_worker"].orchestrator.worker
+            worker = ctx.tools._tools["workspace_task"].orchestrator.worker
             assert isinstance(worker._docker_adapter, BrokerWorkspaceAdapter)
 
     assert recovery_reconcilers == [None]
@@ -228,7 +228,7 @@ async def test_auto_fallback_settles_every_capture_before_wiring(monkeypatch):
         assert ctx.engine.store is ctx.workflows
         assert ctx.tools.approvals is ctx.approvals
 
-        coding = ctx.tools._tools["coding_worker"]
+        coding = ctx.tools._tools["workspace_task"]
         assert coding.checkpoints is ctx.checkpoints
         assert isinstance(coding.checkpoints, InMemoryCheckpointStore)
         assert coding.orchestrator._ledger.usage is ctx.usage

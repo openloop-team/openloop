@@ -27,7 +27,7 @@ class _SpyEngine:
 class _SpyTools:
     def __init__(self, engine) -> None:
         self.engine = engine
-        self._tools: dict = {}  # _resume_worker_jobs looks up "coding_worker" here
+        self._tools: dict = {}  # _resume_worker_jobs looks up "workspace_task" here
 
 
 class _SpyRunner:

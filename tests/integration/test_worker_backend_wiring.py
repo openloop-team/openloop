@@ -52,7 +52,7 @@ def _gateway(settings, agents=None, usage=None, broker_handle=None):
 def test_default_backend_is_the_builtin_diff_worker_with_ledger_attached():
     gateway = _gateway(_settings())
 
-    connector = gateway._tools["coding_worker"]
+    connector = gateway._tools["workspace_task"]
     orchestrator = connector.orchestrator
     assert isinstance(orchestrator.worker, BuiltinCodingWorker)
     # The ledger rides along on the default backend too: spend is recorded
@@ -74,7 +74,7 @@ def test_retired_backend_names_fail_closed(retired, caplog):
     with caplog.at_level("ERROR"):
         gateway = _gateway(_settings(coding_worker_backend=retired))
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "unknown CODING_WORKER_BACKEND" in caplog.text
     assert "expected builtin|openhands|claude" in caplog.text
 
@@ -82,7 +82,7 @@ def test_retired_backend_names_fail_closed(retired, caplog):
 def test_unknown_backend_fails_closed(caplog):
     with caplog.at_level("ERROR"):
         gateway = _gateway(_settings(coding_worker_backend="opnhands"))
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "unknown CODING_WORKER_BACKEND" in caplog.text
     assert "expected builtin|openhands|claude" in caplog.text
     assert "CODING WORKER DISABLED" in caplog.text
@@ -102,7 +102,7 @@ def test_openhands_docker_requires_external_broker(monkeypatch, tmp_path, caplog
             )
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "external broker" in caplog.text
 
 
@@ -121,7 +121,7 @@ def test_openhands_docker_rejects_coprocess_broker_handle(monkeypatch, tmp_path,
             broker_handle=object(),
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "BROKER_MODE=external" in caplog.text
 
 
@@ -137,7 +137,7 @@ def test_openhands_docker_without_external_broker_fails_before_state_setup(
             )
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "external broker" in caplog.text
 
 
@@ -154,7 +154,7 @@ def test_rejected_docker_topology_does_not_log_state_secret(monkeypatch, caplog,
             )
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "external broker" in caplog.text
     assert invalid_secret not in caplog.text
 
@@ -170,7 +170,7 @@ def test_openhands_cold_resume_refuses_host_mode(monkeypatch, caplog):
             )
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "cold resume requires" in caplog.text
 
 
@@ -194,7 +194,7 @@ def test_openhands_without_per_task_cap_fails_closed(monkeypatch, caplog):
             agents={"dev-platform": agent},
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "CODING WORKER DISABLED" in caplog.text
     assert "per_task_usd" in caplog.text
 
@@ -218,21 +218,21 @@ def test_openhands_requires_a_cap_on_every_worker_agent(monkeypatch, caplog):
             agents={"dev-platform": capped, "docs-bot": uncapped},
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "CODING WORKER DISABLED" in caplog.text
     assert "docs-bot" in caplog.text  # the gate names the offender
 
 
 def test_openhands_ignores_uncapped_agent_without_worker_action(monkeypatch):
     # Tool name alone is not enough: only agents that can invoke
-    # coding_worker.pr:write need a cap and can become the fallback owner.
+    # workspace_task.code:write need a cap and can become the fallback owner.
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
     capped = load_agent(AGENT_YAML)
     observer = load_agent(AGENT_YAML)
     observer.metadata.name = "docs-bot"
     observer.spec.budget.per_task_usd = None
     for tool in observer.spec.tools:
-        if tool.name == "coding_worker":
+        if tool.name == "workspace_task":
             tool.permissions = []
 
     gateway = _gateway(
@@ -243,7 +243,7 @@ def test_openhands_ignores_uncapped_agent_without_worker_action(monkeypatch):
         agents={"docs-bot": observer, "dev-platform": capped},
     )
 
-    connector = gateway._tools["coding_worker"]
+    connector = gateway._tools["workspace_task"]
     assert connector.orchestrator._ledger.default_agent == "dev-platform"
 
 
@@ -263,7 +263,7 @@ def test_openhands_without_usage_store_fails_closed(monkeypatch, caplog):
             WorkflowEngine(InMemoryWorkflowStore()),
             usage=None,
         )
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "CODING WORKER DISABLED" in caplog.text
 
 
@@ -279,7 +279,7 @@ def test_openhands_probe_failure_fails_closed(monkeypatch, caplog):
                 coding_worker_openhands_cold_resume_enabled=False,
             )
         )
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "openhands backend probe failed" in caplog.text
     assert "CODING WORKER DISABLED" in caplog.text
 
@@ -301,7 +301,7 @@ def test_openhands_relay_probe_failure_disables_only_coding_worker(
             )
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "github" in gateway._tools
     assert "openhands backend probe failed" in caplog.text
     assert "native OpenHands relay compatibility check failed" in caplog.text
@@ -315,7 +315,7 @@ def test_openhands_with_sandbox_typo_fails_closed(monkeypatch, caplog):
                 coding_worker_backend="openhands", coding_worker_sandbox="dokcer"
             )
         )
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "unknown CODING_WORKER_SANDBOX" in caplog.text
 
 
@@ -323,7 +323,7 @@ def test_claude_registers_in_host_mode(monkeypatch):
     monkeypatch.setattr(ClaudeCodeCodingWorker, "probe", lambda self: None)
     gateway = _gateway(_settings(coding_worker_backend="claude"))
 
-    worker = gateway._tools["coding_worker"].orchestrator.worker
+    worker = gateway._tools["workspace_task"].orchestrator.worker
     assert isinstance(worker, ClaudeCodeCodingWorker)
     # --max-turns + the deadline are threaded from settings as the fail-closed
     # bound; the deadline default (600) is passed through, not disabled.
@@ -339,7 +339,7 @@ def test_claude_docker_mode_fails_closed(monkeypatch, caplog):
         gateway = _gateway(
             _settings(coding_worker_backend="claude", coding_worker_sandbox="docker")
         )
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "supports only CODING_WORKER_SANDBOX=host" in caplog.text
     assert "CODING WORKER DISABLED" in caplog.text
 
@@ -357,8 +357,8 @@ def test_claude_registers_without_a_per_task_dollar_cap(monkeypatch):
         agents={"dev-platform": uncapped},
     )
 
-    assert "coding_worker" in gateway._tools
-    assert gateway._tools["coding_worker"].orchestrator._ledger is not None
+    assert "workspace_task" in gateway._tools
+    assert gateway._tools["workspace_task"].orchestrator._ledger is not None
 
 
 def test_claude_probe_failure_fails_closed(monkeypatch, caplog):
@@ -370,6 +370,13 @@ def test_claude_probe_failure_fails_closed(monkeypatch, caplog):
     monkeypatch.setattr(ClaudeCodeCodingWorker, "probe", boom)
     with caplog.at_level("ERROR"):
         gateway = _gateway(_settings(coding_worker_backend="claude"))
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "claude backend probe failed" in caplog.text
     assert "CODING WORKER DISABLED" in caplog.text
+
+
+def test_workspace_task_tool_registered_for_code_profile(monkeypatch, tmp_path):
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    gateway = _gateway(_settings(coding_worker_backend="builtin"))
+    assert "workspace_task" in gateway._tools
+    assert "code:write" in gateway._tools["workspace_task"].supported_permissions()

@@ -84,17 +84,17 @@ spec:
         - actions_list
         - actions_get
         - get_job_logs
-    - name: coding_worker
+    - name: workspace_task
       type: native
-      # Runs the worker (clone → model-edit → commit → push) and opens a draft PR.
-      permissions: ["pr:write"]
+      # Runs the coding profile (clone → model-edit → commit → push) and opens a draft PR.
+      permissions: ["code:write"]
   # Risky / write actions require a human
   approvals:
     require_for:
       - github.issues:write
       - github.pulls:write
       # Gates the worker STARTING + opening a draft PR — not a diff review.
-      - coding_worker.pr:write
+      - workspace_task.code:write
     approvers: ["@maciag.artur"]
 
   # Spend guardrails

@@ -49,7 +49,7 @@ from openloop.sandbox import (
 from openloop.tools.coding_worker import (
     CodingWorker,
     CodingWorkerConnector,
-    CODING_WORKER_PR_WRITE,
+    CODING_WORKER_CODE_WRITE,
     BuiltinCodingWorker,
     GitWorkspaceOrchestrator,
 )
@@ -67,7 +67,7 @@ from openloop.tools.openhands_worker import (
 from openloop.usage import InMemoryUsageStore, UsageStore, WorkerSpendLedger
 from openloop.usage.postgres import PostgresUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowStore
-from openloop.workflows.coding_worker import build_coding_worker_workflow
+from openloop.workflows.coding_worker import build_workspace_task_workflow
 from openloop.workflows.postgres import PostgresWorkflowStore
 
 log = logging.getLogger("openloop")
@@ -517,7 +517,7 @@ def build_coding_worker(
 def _exposes_coding_worker(agent: Agent) -> bool:
     return any(
         t.name == CodingWorkerConnector.name
-        and CODING_WORKER_PR_WRITE in t.permissions
+        and CODING_WORKER_CODE_WRITE in t.permissions
         for t in agent.spec.tools
     )
 
@@ -627,7 +627,7 @@ def build_tool_gateway(
                     "CODING WORKER DISABLED: CODING_WORKER_BACKEND=openhands "
                     "requires a fail-closed per-task spend cap. Set "
                     "spec.budget.per_task_usd on every agent exposing the "
-                    "coding_worker tool%s.",
+                    "workspace_task tool%s.",
                     (
                         f" (missing on: "
                         f"{', '.join(_uncapped_worker_agents(agents, ledger))})"
@@ -661,10 +661,10 @@ def build_tool_gateway(
                 # Register the worker as a durable workflow (approval = wait
                 # node).
                 engine.register(
-                    build_coding_worker_workflow(orchestrator, github_client)
+                    build_workspace_task_workflow(orchestrator, github_client)
                 )
                 log.info(
-                    "registered native tool: coding_worker "
+                    "registered native tool: workspace_task "
                     "(backend=%s, model=%s, sandbox=%s, default_per_task_cap=%s)",
                     settings.coding_worker_backend,
                     settings.coding_worker_model,
@@ -673,7 +673,7 @@ def build_tool_gateway(
                 )
         else:
             log.info(
-                "coding_worker tool not registered: set CODING_WORKER_ENABLED=1"
+                "workspace_task tool not registered: set CODING_WORKER_ENABLED=1"
             )
     else:
         log.warning(
@@ -863,7 +863,7 @@ async def _safe_close(closeable) -> None:
 
 async def _resume_worker_jobs(tools: ToolGateway) -> None:
     """Drive the coding worker's startup reconciler, if it is registered."""
-    worker = tools._tools.get("coding_worker")
+    worker = tools._tools.get("workspace_task")
     if worker is None or not hasattr(worker, "resume_incomplete"):
         return
     try:
