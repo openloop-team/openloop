@@ -1,6 +1,5 @@
-from pathlib import Path
-
 import pytest
+from pydantic import ValidationError
 
 from openloop.tasks.investigation import InvestigateArgs, RepoInvestigator
 from openloop.tasks.outcomes import EvidenceBundle
@@ -24,8 +23,28 @@ class _FakeGateway:
 
 
 def test_investigate_args_require_question():
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         InvestigateArgs(repo="a/b", question="")
+
+
+def test_parse_findings_inline_after_marker():
+    """Regression: findings on same line as FINDINGS: marker are captured."""
+    from openloop.tasks.investigation import _parse_findings
+
+    # Inline findings on same line as marker (previously dropped silently)
+    summary, findings = _parse_findings("SUMMARY: x\nFINDINGS: - only bullet")
+    assert summary == "x"
+    assert findings == "- only bullet"
+
+
+def test_parse_findings_multiline_after_marker():
+    """Findings on lines following the FINDINGS: marker are captured."""
+    from openloop.tasks.investigation import _parse_findings
+
+    # Multi-line findings (existing behavior, regression guard)
+    summary, findings = _parse_findings("SUMMARY: one line\nFINDINGS:\n- a\n- b")
+    assert summary == "one line"
+    assert findings == "- a\n- b"
 
 
 async def test_investigator_returns_evidence_bundle_from_model_findings(tmp_path):

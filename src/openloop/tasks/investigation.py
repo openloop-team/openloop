@@ -11,6 +11,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from openloop.models.gateway import ModelResponse
 from openloop.tasks.outcomes import EvidenceBundle
 
 INVESTIGATE_ARGS_VERSION = 1
@@ -30,15 +31,28 @@ class InvestigateArgs(BaseModel):
 
 
 def _parse_findings(text: str) -> tuple[str, str]:
-    """Split the model reply into (summary, findings). Tolerant of missing tags."""
-    summary, findings = "", text.strip()
-    lines = text.splitlines()
-    for i, line in enumerate(lines):
-        if line.upper().startswith("SUMMARY:"):
-            summary = line.split(":", 1)[1].strip()
-        elif line.upper().startswith("FINDINGS:"):
-            findings = "\n".join(lines[i + 1 :]).strip()
-            break
+    """Split the model reply into (summary, findings). Tolerant of missing tags.
+
+    Captures content whether it appears inline (same line as marker) or on following lines.
+    Examples:
+      "SUMMARY: x\\nFINDINGS: - bullet" → ("x", "- bullet")
+      "SUMMARY: x\\nFINDINGS:\\n- bullet" → ("x", "- bullet")
+      "no markers" → ("Investigation complete.", "no markers")
+    """
+    summary = ""
+    findings = text.strip()
+
+    # Parse SUMMARY: capture inline value or first line after marker
+    _, sep, summary_body = text.partition("SUMMARY:")
+    if sep:
+        # Extract the summary value: strip leading space, take up to first newline
+        summary = summary_body.split('\n', 1)[0].strip()
+
+    # Parse FINDINGS: capture everything after marker (inline + following lines)
+    _, sep, findings_body = text.partition("FINDINGS:")
+    if sep:
+        findings = findings_body.strip()
+
     return summary or "Investigation complete.", findings
 
 
@@ -55,7 +69,7 @@ class RepoInvestigator:
             self._gateway = ModelGateway()
         return self._gateway
 
-    async def investigate(self, workspace: Path, question: str, repo: str):
+    async def investigate(self, workspace: Path, question: str, repo: str) -> tuple[EvidenceBundle, ModelResponse]:
         context = self._repo_context(workspace)
         messages = [
             {
