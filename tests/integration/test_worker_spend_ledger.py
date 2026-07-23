@@ -104,7 +104,7 @@ async def test_workflow_path_fails_closed_over_cap(monkeypatch):
     )
 
     await engine.start(
-        "coding_worker", "j1",
+        "workspace_task", "j1",
         {"job_id": "j1", "repo": "acme/x", "instruction": "x"},
     )
     instance = await engine.send_event("j1", "await_approval", {})
@@ -200,7 +200,7 @@ async def test_workflow_path_monthly_gate_fails_closed(monkeypatch):
     ))
 
     await engine.start(
-        "coding_worker", "j1",
+        "workspace_task", "j1",
         {"job_id": "j1", "repo": "acme/x", "instruction": "x"},
     )
     instance = await engine.send_event("j1", "await_approval", {})

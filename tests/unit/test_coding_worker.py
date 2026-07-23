@@ -51,11 +51,10 @@ def test_supported_permission():
 
 def test_connector_is_workspace_task_tool():
     assert _connector().name == "workspace_task"
-    # .workflow deliberately NOT renamed yet: the durable workflow is still
-    # registered under "coding_worker" until Task 7 flips both together — if
-    # .workflow pointed at "workspace_task" now, a workflow-backed invoke
-    # would start an instance under an unregistered workflow name.
-    assert _connector().workflow == "coding_worker"
+    # Task 7 flipped both the engine registration (WORKFLOW_NAME) and this
+    # attribute together, so a workflow-backed invoke starts an instance
+    # under the name the engine actually has registered.
+    assert _connector().workflow == "workspace_task"
 
 
 def test_prepare_args_mints_job_id_once():

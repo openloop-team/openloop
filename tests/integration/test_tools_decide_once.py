@@ -78,7 +78,7 @@ async def _seed_workflow_request(
     )
     await gw.approvals.create(req)
     if park and gw.engine is not None:
-        await gw.engine.start("coding_worker", job_id, _workflow_initial_state(req))
+        await gw.engine.start("workspace_task", job_id, _workflow_initial_state(req))
     return req
 
 

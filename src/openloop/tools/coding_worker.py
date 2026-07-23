@@ -399,14 +399,7 @@ class CodingWorkerConnector:
     # workflow (approval = wait node). Without one, execute() below is the Phase B
     # fallback path (checkpoint-based resume). Kept in sync with WORKFLOW_NAME in
     # openloop.workflows.coding_worker.
-    #
-    # Deliberately NOT renamed to "workspace_task" yet (Stage 1 migration): the
-    # durable workflow is still registered under "coding_worker" in the engine
-    # until a later task renames the registration and this attribute together.
-    # Flipping only this side would start a workflow instance under a name the
-    # engine doesn't know, raising KeyError on the very first workflow-backed
-    # invoke.
-    workflow = "coding_worker"
+    workflow = "workspace_task"
 
     def __init__(
         self,

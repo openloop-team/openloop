@@ -44,7 +44,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 
 from openloop.workflows.store import (
@@ -101,7 +101,16 @@ class Step:
 @dataclass(slots=True)
 class Workflow:
     name: str
-    steps: list[Step]
+    steps: list[Step] = field(default_factory=list)
+    # Optional: derive the instance's step list from its immutable initial
+    # state (e.g. profile). Deterministic across re-drives, so the engine's
+    # name-based completed-step skipping is unchanged.
+    steps_resolver: "Callable[[dict], list[Step]] | None" = None
+
+    def steps_for(self, instance) -> list[Step]:
+        if self.steps_resolver is not None:
+            return self.steps_resolver(instance.state)
+        return self.steps
 
 
 class WorkflowPark(Exception):
@@ -338,7 +347,7 @@ class WorkflowEngine:
     ) -> WorkflowInstance:
         if instance.status in TERMINAL:
             return instance
-        for step in workflow.steps:
+        for step in workflow.steps_for(instance):
             if step.name in instance.completed_steps:
                 continue
             if step.wait:
@@ -533,5 +542,6 @@ def _has_pending_non_resumable_step(
     """
     done = set(instance.completed_steps)
     return any(
-        not step.resumable and step.name not in done for step in workflow.steps
+        not step.resumable and step.name not in done
+        for step in workflow.steps_for(instance)
     )

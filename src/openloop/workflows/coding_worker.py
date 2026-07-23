@@ -39,7 +39,7 @@ from openloop.workflows.engine import (
     WorkflowPark,
 )
 
-WORKFLOW_NAME = "coding_worker"
+WORKFLOW_NAME = "workspace_task"
 
 # The wait node's name doubles as the event the approval emits.
 APPROVAL_EVENT = "await_approval"
@@ -67,13 +67,25 @@ def _worker_phase(completed_steps: list[str]) -> str:
     return "is starting…"
 
 
-def build_coding_worker_workflow(
-    orchestrator: AttemptRunner, github: GitHubClient
+def _investigate_steps(investigator) -> list[Step]:
+    raise NotImplementedError("investigate profile is wired in Task 12")
+
+
+def build_workspace_task_workflow(
+    orchestrator: AttemptRunner,
+    github: GitHubClient,
+    *,
+    investigator=None,
 ) -> Workflow:
-    """Build the coding-worker workflow bound to the shared orchestrator.
+    """Build the workspace_task workflow bound to the shared orchestrator.
 
     Both durable paths call the same :class:`AttemptRunner` — no path invokes a
     worker that could hold git credentials (hardening Phase 2 invariant).
+
+    The instance's step list is dispatched on ``state["profile"]`` (default
+    ``"code"``), stamped by the connector's ``prepare_args``: the ``code``
+    profile keeps this module's original approve → run-worker → open-PR
+    chain, and an ``investigate`` profile is wired in Task 12.
     """
 
     async def run_worker(ctx: WorkflowContext) -> None:
@@ -196,13 +208,22 @@ def build_coding_worker_workflow(
                 await cleanup(state, on_step=None)
                 s["worker_state"] = state.to_dict()
 
-    return Workflow(
-        WORKFLOW_NAME,
-        [
+    def _steps_for(state: dict) -> list[Step]:
+        if state.get("profile", "code") == "investigate":
+            return _investigate_steps(investigator)  # added in Task 12
+        return [
             Step(APPROVAL_EVENT, wait=True),
             # This step owns schema-first resume rules. Marking it non-resumable
             # would abandon even safe parked/final boundaries.
             Step("run_worker", run_worker, resumable=True),
             Step("open_pr", open_pr),
-        ],
-    )
+        ]
+
+    return Workflow(WORKFLOW_NAME, [], steps_resolver=_steps_for)
+
+
+def build_coding_worker_workflow(
+    orchestrator: AttemptRunner, github: GitHubClient
+) -> Workflow:
+    """Back-compat alias for :func:`build_workspace_task_workflow`."""
+    return build_workspace_task_workflow(orchestrator, github)
