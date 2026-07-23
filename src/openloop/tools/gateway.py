@@ -243,19 +243,22 @@ class ToolGateway:
         # Connectors may require approval intrinsically regardless of an
         # accidental omission in an agent's config.
         #
-        # `requires_approval` does a plain membership check against the
-        # agent's declared `require_for` list — it has no alias awareness of
-        # its own (like `Approvals.requires_approval`/`policy.is_allowed`
-        # before this fix). A legacy-YAML agent's `require_for` still names
-        # the pre-alias action (`coding_worker.pr:write`), which never equals
-        # the canonical `action` this invoke() now carries throughout. Check
-        # both spellings here, at the alias choke point, rather than teaching
-        # the schema class about the tools-package alias map.
-        if (
-            agent.spec.approvals.requires_approval(action)
-            or agent.spec.approvals.requires_approval(requested_action)
-            or getattr(tool, "requires_approval", False)
-        ):
+        # `Approvals.requires_approval` does a plain membership check against
+        # the agent's declared `require_for` list — it has no alias awareness
+        # of its own. Canonicalize both sides here, at the alias choke point,
+        # exactly like `policy.is_allowed` does for the allowlist: a
+        # legacy-YAML agent's `require_for` still names the pre-alias action
+        # (`coding_worker.pr:write`), and the caller may invoke using either
+        # spelling — comparing only one side (or comparing `action` against
+        # the raw list) lets an aliased spelling slip past a gate the other
+        # spelling would have caught. Symmetric canonicalization closes that,
+        # rather than teaching the schema class about the tools-package alias
+        # map.
+        canonical_require_for = {
+            _canonical_action(entry) for entry in agent.spec.approvals.require_for
+        }
+        needs_agent_approval = action in canonical_require_for
+        if needs_agent_approval or getattr(tool, "requires_approval", False):
             # The execution mode this invoke() commits to, recorded durably
             # with the row so every decided path routes on the marker — never
             # on the resolver's current engine/tool shape (mode drift there
