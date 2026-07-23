@@ -366,9 +366,9 @@ class ToolGateway:
             inv.decided_by = claimed.decided_by
             return inv
 
-        tool = self._tools[claimed.tool]
+        tool, permission = self._resolve_stored_tool(claimed.tool, claimed.permission)
         result = await tool.execute(
-            claimed.permission, _args_for_execute(tool, claimed)
+            permission, _args_for_execute(tool, claimed, permission)
         )
         # Mark AFTER execute returns; containment in the helper — a marking
         # failure must never discard the only copy of the ToolResult.
@@ -472,6 +472,27 @@ class ToolGateway:
             decided_by=request.decided_by,
         )
 
+    def _resolve_stored_tool(
+        self, tool_name: str, permission: str
+    ) -> tuple[Tool | None, str]:
+        """Canonicalize a STORED ``(tool, permission)`` pair to the registered tool.
+
+        Every decision/resolve/reconcile-path lookup keyed on a durable row's
+        ``tool``/``permission`` must go through here, never a raw
+        ``self._tools[...]``/``self._tools.get(...)``: a row written before a
+        connector rename (e.g. ``coding_worker``/``pr:write``) stores the
+        pre-rename spelling forever, and only ``_canonical_action`` (the same
+        alias map ``invoke`` applies on the way in) knows it now lives at
+        ``workspace_task``/``code:write``. Returns the canonical permission
+        alongside the tool so a caller's ``execute(...)`` uses the spelling
+        the renamed connector actually accepts — the stored permission itself
+        may be stale even when the tool name isn't.
+        """
+        canonical_tool_name, canonical_permission = split_action(
+            _canonical_action(f"{tool_name}.{permission}")
+        )
+        return self._tools.get(canonical_tool_name), canonical_permission
+
     def _classify(self, request: ApprovalRequest) -> tuple[str, str | None]:
         """``("workflow", instance_id)`` / ``("direct", None)`` / ``("unknown", None)``.
 
@@ -486,7 +507,7 @@ class ToolGateway:
             return "workflow", request.workflow_instance_id
         if request.workflow_backed is False:
             return "direct", None
-        tool = self._tools.get(request.tool)
+        tool, _ = self._resolve_stored_tool(request.tool, request.permission)
         if tool is None:
             return "unknown", None
         if getattr(tool, "workflow", None):
@@ -503,21 +524,24 @@ class ToolGateway:
         ``None`` means every capability the effect dereferences is present.
         """
         if request.workflow_backed is False:
-            if self._tools.get(request.tool) is None:
+            tool, _ = self._resolve_stored_tool(request.tool, request.permission)
+            if tool is None:
                 return f"tool {request.tool!r} is not registered"
             return None
         if request.workflow_backed is True:
-            return self._workflow_effect_unavailable(request.tool)
+            return self._workflow_effect_unavailable(request.tool, request.permission)
         kind, _ = self._classify(request)
         if kind == "unknown":
             return f"tool {request.tool!r} is not registered"
         if kind == "workflow":
-            return self._workflow_effect_unavailable(request.tool)
+            return self._workflow_effect_unavailable(request.tool, request.permission)
         return None
 
-    def _workflow_effect_unavailable(self, tool_name: str) -> str | None:
+    def _workflow_effect_unavailable(
+        self, tool_name: str, permission: str
+    ) -> str | None:
         """Check the exact capabilities ``_ensure_approved_workflow`` dereferences."""
-        tool = self._tools.get(tool_name)
+        tool, _ = self._resolve_stored_tool(tool_name, permission)
         if tool is None:
             return f"tool {tool_name!r} is not registered"
         workflow = getattr(tool, "workflow", None)
@@ -538,7 +562,7 @@ class ToolGateway:
         consume-once). Callers gate on ``_approve_effect_unavailable`` first.
         The event payload's approver is always the row's ``decided_by``.
         """
-        tool = self._tools[request.tool]
+        tool, _ = self._resolve_stored_tool(request.tool, request.permission)
         instance_id = request.workflow_instance_id or _instance_id(request)
         await self.engine.start(
             tool.workflow, instance_id, _workflow_initial_state(request)
@@ -629,8 +653,15 @@ def _workflow_initial_state(request: ApprovalRequest) -> dict:
     return state
 
 
-def _args_for_execute(tool: Tool, request: ApprovalRequest) -> dict:
+def _args_for_execute(tool: Tool, request: ApprovalRequest, permission: str) -> dict:
     """Args for the direct (engine-less) execute of an approved request.
+
+    ``permission`` is the CANONICAL permission (already resolved via
+    ``ToolGateway._resolve_stored_tool``), not necessarily ``request.permission``
+    verbatim — a pre-rename row's stored permission may no longer be one the
+    resolved tool accepts (e.g. ``pr:write`` vs. the renamed connector's
+    ``code:write``), so every dereference into the tool goes through the
+    canonical spelling.
 
     A versioned action gets the record's ``args_schema`` folded in — the same
     key the workflow path carries in its initial state — so the consumer can
@@ -638,7 +669,7 @@ def _args_for_execute(tool: Tool, request: ApprovalRequest) -> dict:
     receive their args untouched; an injected key would leak into the foreign
     tool call.
     """
-    if tool.describe(request.permission).version is None:
+    if tool.describe(permission).version is None:
         return request.args
     return {
         **request.args,
