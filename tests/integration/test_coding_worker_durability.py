@@ -50,7 +50,7 @@ async def test_checkpoint_persisted_after_each_step():
     store = RecordingStore()
     conn = CodingWorkerConnector(CountingRunner(), FakeGitHub(), checkpoints=store)
 
-    result = await conn.execute("pr:write", _args())
+    result = await conn.execute("code:write", _args())
     assert result.ok
 
     running = [steps for status, steps in store.history if status == "running"]
@@ -71,8 +71,8 @@ async def test_reinvoke_after_open_is_idempotent_noop():
     github = FakeGitHub()
     conn = CodingWorkerConnector(runner, github, checkpoints=store)
 
-    first = await conn.execute("pr:write", _args())
-    second = await conn.execute("pr:write", _args())
+    first = await conn.execute("code:write", _args())
+    second = await conn.execute("code:write", _args())
 
     assert first.ok and second.ok
     assert second.data.get("resumed") is True
@@ -100,7 +100,7 @@ async def test_resume_after_crash_between_push_and_pr_open():
     conn = CodingWorkerConnector(runner, github, checkpoints=store)
 
     # First attempt: worker pushes, but opening the PR fails.
-    first = await conn.execute("pr:write", _args())
+    first = await conn.execute("code:write", _args())
     assert not first.ok
     assert first.data["status"] == "open_pr_failed"
     assert github.pulls == []
@@ -109,7 +109,7 @@ async def test_resume_after_crash_between_push_and_pr_open():
     assert "push" in cp.completed_steps
 
     # Resume: worker is NOT re-run (branch already pushed); the PR opens once.
-    second = await conn.execute("pr:write", _args())
+    second = await conn.execute("code:write", _args())
     assert second.ok
     assert runner.runs == 1  # not re-run
     assert len(github.pulls) == 1
@@ -145,7 +145,7 @@ async def test_resume_uses_checkpoint_base_not_args():
         _seed_checkpoint("j1", "open_pr_failed", STEPS, base="develop")
     )
     # Note: no "base" in args — must not fall back to "main".
-    result = await conn.execute("pr:write", {"job_id": "j1"})
+    result = await conn.execute("code:write", {"job_id": "j1"})
 
     assert result.ok
     assert runner.runs == 0  # branch already pushed
@@ -164,7 +164,7 @@ async def test_resume_before_push_reruns_worker_and_completes():
     await store.upsert(
         _seed_checkpoint("j1", "running", ["clone", "branch", "edit", "commit"])
     )
-    result = await conn.execute("pr:write", {"job_id": "j1", "repo": "acme/x",
+    result = await conn.execute("code:write", {"job_id": "j1", "repo": "acme/x",
                                              "instruction": "add retries"})
 
     assert result.ok
@@ -264,7 +264,7 @@ async def test_existing_pr_is_reused_not_duplicated():
         )
     )
 
-    result = await conn.execute("pr:write", _args())
+    result = await conn.execute("code:write", _args())
     assert result.ok
     assert runner.runs == 0  # branch already pushed
     assert len(github.pulls) == 1  # reused, not duplicated

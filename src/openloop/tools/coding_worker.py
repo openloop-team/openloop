@@ -1,6 +1,6 @@
 """Native coding-worker connector — opens *draft* PRs from an instruction.
 
-Exposes a single write action, ``coding_worker.pr:write``. On execution it runs
+Exposes a single write action, ``workspace_task.code:write``. On execution it runs
 one **worker attempt** (provision a workspace → credential-free worker edit →
 commit → push) and then opens a **draft** pull request from the pushed branch.
 
@@ -102,13 +102,15 @@ class WorkerRunAborted(RuntimeError):
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
 
-CODING_WORKER_TOOL_NAME = "coding_worker"
-CODING_WORKER_PR_WRITE = "pr:write"
+CODING_WORKER_TOOL_NAME = "workspace_task"
+CODING_WORKER_CODE_WRITE = "code:write"
+# Back-compat alias for internal references and pre-migration tests.
+CODING_WORKER_PR_WRITE = CODING_WORKER_CODE_WRITE
 CODING_WORKER_ARGS_VERSION = 1
 
 
 class CodingWorkerPrArgs(BaseModel):
-    """Model-facing args for ``coding_worker.pr:write`` (typed-tool-args §3).
+    """Model-facing args for ``workspace_task.code:write`` (typed-tool-args §3).
 
     The declared schema is generated from this model and the gateway parses
     raw args through it, so normalization (strip) and constraints live in one
@@ -370,13 +372,20 @@ def _pr_body(body: str, job_id: str) -> str:
 
 
 class CodingWorkerConnector:
-    """Maps ``coding_worker.pr:write`` onto an attempt runner + :class:`GitHubClient`."""
+    """Maps ``workspace_task.code:write`` onto an attempt runner + :class:`GitHubClient`."""
 
     name = CODING_WORKER_TOOL_NAME
     # When the gateway has a WorkflowEngine, this action runs as a durable
     # workflow (approval = wait node). Without one, execute() below is the Phase B
     # fallback path (checkpoint-based resume). Kept in sync with WORKFLOW_NAME in
     # openloop.workflows.coding_worker.
+    #
+    # Deliberately NOT renamed to "workspace_task" yet (Stage 1 migration): the
+    # durable workflow is still registered under "coding_worker" in the engine
+    # until a later task renames the registration and this attribute together.
+    # Flipping only this side would start a workflow instance under a name the
+    # engine doesn't know, raising KeyError on the very first workflow-backed
+    # invoke.
     workflow = "coding_worker"
 
     def __init__(
@@ -393,7 +402,7 @@ class CodingWorkerConnector:
         self.checkpoints = checkpoints
 
     def supported_permissions(self) -> set[str]:
-        return {CODING_WORKER_PR_WRITE}
+        return {CODING_WORKER_CODE_WRITE}
 
     def prepare_args(
         self,
@@ -422,7 +431,7 @@ class CodingWorkerConnector:
           to the surface session it was invoked from. Gateway-supplied only,
           like ``warm_key``; a model-supplied value is ignored.
         """
-        if permission != CODING_WORKER_PR_WRITE:
+        if permission != CODING_WORKER_CODE_WRITE:
             return args
         # Normalization (strip) now lives in CodingWorkerPrArgs' validators —
         # the gateway parses raw args through it before calling here, so this
@@ -456,7 +465,7 @@ class CodingWorkerConnector:
         )
 
     async def execute(self, permission: str, args: dict) -> ToolResult:
-        if permission != CODING_WORKER_PR_WRITE:
+        if permission != CODING_WORKER_CODE_WRITE:
             return ToolResult(ok=False, summary=f"unsupported permission {permission}")
 
         job_id = args.get("job_id") or uuid.uuid4().hex[:12]
@@ -732,7 +741,7 @@ class CodingWorkerConnector:
                         continue
                     if resume.status in {"finalizing", "terminal"}:
                         await self.execute(
-                            "pr:write",
+                            CODING_WORKER_CODE_WRITE,
                             {
                                 "job_id": cp.job_id,
                                 "repo": cp.repo,
@@ -776,7 +785,7 @@ class CodingWorkerConnector:
                 continue
             logger.info("resuming coding-worker job %s (was %s)", cp.job_id, cp.status)
             await self.execute(
-                "pr:write",
+                CODING_WORKER_CODE_WRITE,
                 {
                     "job_id": cp.job_id,
                     "repo": cp.repo,

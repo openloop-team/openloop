@@ -80,22 +80,40 @@ class ToolGateway:
         self._tools[tool.name] = tool
 
     def available_actions(self, agent: Agent) -> list[str]:
-        """Allowed actions that also have a registered tool to run them."""
+        """Allowed actions that also have a registered tool to run them.
+
+        An agent's YAML may still declare a legacy action name (e.g.
+        ``coding_worker.pr:write``) that has since been renamed — canonicalize
+        to find the registered tool and its supported permissions (the same
+        as ``policy.allowed_actions`` and ``invoke``'s alias handling), but
+        report back the action exactly as the YAML declares it. Without the
+        canonical lookup, a renamed connector silently disappears from the
+        model's tool-calling definitions for every agent whose YAML hasn't
+        migrated yet; reporting the canonical spelling instead of the
+        as-declared one would needlessly change the model-facing function
+        name mid-migration (``invoke`` re-canonicalizes whatever spelling it
+        is handed, so either survives the round trip — this just keeps the
+        visible name stable until the YAML itself migrates).
+        """
         out = []
         for tool in agent.spec.tools:
-            impl = self._tools.get(tool.name)
-            if impl is None:
-                continue
             for perm in tool.permissions:
-                if perm in impl.supported_permissions():
-                    out.append(f"{tool.name}.{perm}")
+                raw_action = f"{tool.name}.{perm}"
+                tool_name, permission = split_action(_canonical_action(raw_action))
+                impl = self._tools.get(tool_name)
+                if impl is not None and permission in impl.supported_permissions():
+                    out.append(raw_action)
         return sorted(out)
 
     def tool_specs(self, agent: Agent) -> ToolSpecs:
         """Function-calling definitions for the agent's available actions."""
         specs = ToolSpecs()
         for action in self.available_actions(agent):
-            tool_name, permission = split_action(action)
+            # `action` may still be the as-declared (legacy) spelling — see
+            # `available_actions`'s docstring — so canonicalize to find the
+            # registered tool, but keep `action` itself for the function name
+            # and the reverse map (invoke() canonicalizes on receipt either way).
+            tool_name, permission = split_action(_canonical_action(action))
             spec = self._tools[tool_name].describe(permission)
             fname = _fn_name(action)
             specs.by_name[fname] = action
