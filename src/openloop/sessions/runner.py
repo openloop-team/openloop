@@ -84,6 +84,52 @@ def _prose_of(result: "Deliverable | str") -> str:
     return result
 
 
+def _deliverable_from_outcome_data(data: dict) -> "Deliverable | None":
+    """Rebuild a typed outcome from a terminal result's ``outcome`` block.
+
+    ``data`` is a tool/workflow result's ``.data`` — a plain dict that, since
+    Stage 1 Phase 2, may carry an ``outcome`` block (``kind`` + its fields) put
+    there by the connector (e.g. the coding worker's PullRequest, or a future
+    investigation strategy's EvidenceBundle/Diagnosis). Returns ``None`` when
+    there's no recognizable outcome block, so callers can fall back to the
+    existing prose path unchanged.
+    """
+    outcome = data.get("outcome") if isinstance(data, dict) else None
+    if not isinstance(outcome, dict):
+        return None
+    from openloop.tasks.outcomes import (
+        Diagnosis,
+        EvidenceBundle,
+        Failed,
+        PullRequest,
+        to_deliverable,
+    )
+
+    kind = outcome.get("kind")
+    if kind == "diagnosis":
+        built = Diagnosis(text=outcome["text"])
+    elif kind == "evidence_bundle":
+        built = EvidenceBundle(
+            summary=outcome["summary"],
+            findings=outcome["findings"],
+            title=outcome.get("title", "Investigation findings"),
+            filename=outcome.get("filename", "findings.md"),
+        )
+    elif kind == "pull_request":
+        built = PullRequest(
+            repo=outcome["repo"],
+            branch=outcome["branch"],
+            pr_number=outcome.get("pr_number"),
+            pr_url=outcome.get("pr_url"),
+            summary=outcome["summary"],
+        )
+    elif kind == "failed":
+        built = Failed(status=outcome["status"], error=outcome["error"])
+    else:
+        return None
+    return to_deliverable(built)
+
+
 def _approval_id_for_instance(instance) -> str | None:
     state = getattr(instance, "state", {}) or {}
     if state.get("approval_id"):
@@ -464,6 +510,35 @@ class SessionRunner:
         if inv.status == "executed":
             if session.final_message_id is not None:
                 return
+            # Stage 1 Phase 2: an evidence-bundle/diagnosis outcome IS the final
+            # answer (findings/diagnosis prose) — deliver it directly, no model
+            # re-run. A pull_request outcome (or a result with no outcome block
+            # at all) is deliberately excluded here and falls through to the
+            # existing M0b path below unchanged, so the coding worker keeps
+            # today's model-continuation behavior.
+            outcome_data = inv.result.data if inv.result else None
+            outcome_kind = (
+                (outcome_data.get("outcome") or {}).get("kind")
+                if isinstance(outcome_data, dict)
+                else None
+            )
+            if outcome_kind in ("evidence_bundle", "diagnosis"):
+                deliverable = _deliverable_from_outcome_data(outcome_data)
+                if deliverable is not None:
+                    # Persist the outcome (so a failed post is repairable from
+                    # result_summary) before posting — mirrors the pattern below.
+                    session.status = "completed"
+                    session.result_summary = _prose_of(deliverable)
+                    await self.sessions.upsert(session)
+                    await self._post_final(session, deliverable)
+                    try:
+                        await self._update_approval(session, message, [])
+                    except Exception:  # noqa: BLE001 — buttons going stale is cosmetic
+                        logger.exception(
+                            "failed to collapse approval card for session %s",
+                            session.id,
+                        )
+                    return
             # M0b: re-run the model with the approved result folded in, so the reply
             # is a fresh model answer — not the raw tool summary. Falls back to the
             # summary if the continuation can't be built (no engine / lost state).

@@ -1140,3 +1140,24 @@ async def test_history_limit_counts_only_delivered_turns():
     # exchange survives — a pre-filter limit would have returned nothing.
     prior = await store.thread_history(_target("ev-cur"), limit=2)
     assert [s.id for s in prior] == ["old"]
+
+
+# --- runner: typed task outcomes (Stage 1 Phase 2) -----------------------
+
+async def test_evidence_bundle_outcome_delivers_as_artifact():
+    # A workflow terminal result carrying an evidence-bundle outcome is
+    # delivered as an Artifact, not a re-run of the model.
+    from openloop.tasks.outcomes import EvidenceBundle
+    from openloop.sessions.runner import _deliverable_from_outcome_data
+
+    data = {
+        "outcome": {
+            "kind": "evidence_bundle",
+            "summary": "2 call sites",
+            "findings": "# Findings\n- src/p.py:42\n",
+        }
+    }
+    d = _deliverable_from_outcome_data(data)
+    from openloop.deliverable import Artifact
+    assert isinstance(d, Artifact)
+    assert "src/p.py:42" in d.content
