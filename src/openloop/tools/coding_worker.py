@@ -56,6 +56,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from openloop.checkpoints.store import CheckpointStore, WorkerCheckpoint
 from openloop.credentials import CredentialResolver, CredentialScope
+from openloop.tasks.contract import Gate
 from openloop.tasks.investigation import (
     INVESTIGATE_ARGS_VERSION,
     InvestigateArgs,
@@ -116,6 +117,17 @@ CODING_WORKER_ARGS_VERSION = 1
 # openloop.tasks.contract). Offered by the connector only when it is
 # constructed with a RepoInvestigator.
 CODING_WORKER_INVESTIGATE_READ = "investigate:read"
+
+# Gate-as-floor (Stage 1): a profile's declared gate is a MANDATORY minimum —
+# agent `require_for` config may only ADD approval gating on top of it, never
+# remove it. code:write's Gate.START is the locked approve-before-work
+# contract; investigate:read's Gate.NONE means it is never gated by the
+# connector itself (an agent could still list it in `require_for` to add its
+# own gating, but the floor never forces that).
+_PROFILE_GATE = {
+    CODING_WORKER_CODE_WRITE: Gate.START,
+    CODING_WORKER_INVESTIGATE_READ: Gate.NONE,
+}
 
 
 class CodingWorkerPrArgs(BaseModel):
@@ -441,6 +453,17 @@ class CodingWorkerConnector:
         if self.investigator is not None:
             perms.add(CODING_WORKER_INVESTIGATE_READ)
         return perms
+
+    def requires_approval_for(self, permission: str) -> bool:
+        """The profile's gate as a mandatory floor (see ``_PROFILE_GATE``).
+
+        The gateway ORs this into its approval condition alongside the
+        agent's own ``require_for`` — an agent may add gating an unlisted
+        permission never loses, but it can never subtract this floor.
+        ``code:write`` is ``Gate.START`` (must always gate); ``investigate:read``
+        is ``Gate.NONE`` (never forced to gate by the connector itself).
+        """
+        return _PROFILE_GATE.get(permission, Gate.NONE) is Gate.START
 
     def prepare_args(
         self,

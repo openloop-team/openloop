@@ -15,8 +15,11 @@ from openloop.agents import load_agent
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.config import Settings
+from openloop.models.gateway import ModelResponse
+from openloop.tasks.investigation import RepoInvestigator
+from openloop.tasks.outcomes import EvidenceBundle
 from openloop.tools.claude_worker import ClaudeCodeCodingWorker
-from openloop.tools.coding_worker import BuiltinCodingWorker
+from openloop.tools.coding_worker import BuiltinCodingWorker, GitWorkspaceOrchestrator
 from openloop.tools.openhands_worker import (
     OpenHandsCodingWorker,
     OpenHandsUnavailable,
@@ -449,3 +452,95 @@ async def test_legacy_yaml_agent_write_action_is_still_approval_gated(monkeypatc
         assert stored is not None, requested_action
         assert stored.status == "pending", requested_action
         assert stored.action == "workspace_task.code:write", requested_action
+
+
+def test_code_write_gate_is_a_floor_even_if_agent_omits_it(monkeypatch):
+    # Gate-as-floor (Task 13): the profile's declared gate is a mandatory
+    # minimum. code:write's floor is Gate.START (always gates);
+    # investigate:read's floor is Gate.NONE (never forced to gate).
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    gateway = _gateway(_settings(coding_worker_backend="builtin"))
+
+    tool = gateway._tools["workspace_task"]
+    assert getattr(tool, "requires_approval_for", None) is not None
+    assert tool.requires_approval_for("code:write") is True
+    assert tool.requires_approval_for("investigate:read") is False
+
+
+async def test_code_write_gate_floor_forces_approval_even_without_require_for(
+    monkeypatch,
+):
+    # Stronger proof: an agent whose `require_for` does NOT list
+    # workspace_task.code:write still parks for approval — the connector's
+    # floor forces it; agent config can only ADD gating, never remove it.
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    gateway = _gateway(_settings(coding_worker_backend="builtin"))
+
+    agent = load_agent(AGENT_YAML)
+    agent.spec.approvals.require_for = [
+        entry
+        for entry in agent.spec.approvals.require_for
+        if entry != "workspace_task.code:write"
+    ]
+    assert not agent.spec.approvals.requires_approval("workspace_task.code:write")
+
+    inv = await gateway.invoke(
+        agent,
+        "workspace_task.code:write",
+        args={"repo": "a/b", "instruction": "do x"},
+        requested_by="tester",
+    )
+
+    assert inv.status == "pending_approval"
+    assert inv.approval is not None
+
+
+async def test_investigate_read_registered_and_ungated(monkeypatch, tmp_path):
+    # Task 13: with the investigator wired in production builder wiring,
+    # workspace_task.investigate:read is registered and runs without parking
+    # for approval — it is not in require_for and its floor is Gate.NONE.
+    #
+    # The connector, orchestrator, and RepoInvestigator are all built for
+    # real by build_tool_gateway; only the two would-be-network calls
+    # (the model completion and the credentialed git clone) are faked at the
+    # class level, per the task's stated escape hatch.
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+
+    async def fake_investigate(self, workspace, question, repo):
+        return (
+            EvidenceBundle(summary="it returns None", findings="- a.py:1"),
+            ModelResponse(text="", model=self.model, cost_usd=0.01),
+        )
+
+    async def fake_provision_readonly(self, repo, ref=None):
+        workspace = tmp_path / "investigate-ws"
+        workspace.mkdir(exist_ok=True)
+        return workspace
+
+    monkeypatch.setattr(RepoInvestigator, "investigate", fake_investigate)
+    monkeypatch.setattr(
+        GitWorkspaceOrchestrator, "provision_readonly", fake_provision_readonly
+    )
+
+    gateway = _gateway(_settings(coding_worker_backend="builtin"))
+
+    tool = gateway._tools["workspace_task"]
+    assert "investigate:read" in tool.supported_permissions()
+
+    agent = load_agent(AGENT_YAML)
+    for t in agent.spec.tools:
+        if t.name == "workspace_task":
+            t.permissions = [*t.permissions, "investigate:read"]
+    assert "workspace_task.investigate:read" not in agent.spec.approvals.require_for
+
+    inv = await gateway.invoke(
+        agent,
+        "workspace_task.investigate:read",
+        args={"repo": "a/b", "question": "why does parse return None?"},
+        requested_by="tester",
+    )
+
+    assert inv.status == "executed"
+    assert inv.result is not None
+    assert inv.result.ok is True
+    assert inv.result.data["outcome"]["kind"] == "evidence_bundle"

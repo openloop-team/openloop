@@ -86,8 +86,11 @@ spec:
         - get_job_logs
     - name: workspace_task
       type: native
-      # Runs the coding profile (clone → model-edit → commit → push) and opens a draft PR.
-      permissions: ["code:write"]
+      # code:write runs the coding profile (clone → model-edit → commit →
+      # push) and opens a draft PR. investigate:read is a read-only repo
+      # investigation (gate=none — see approvals.require_for below, which
+      # intentionally does NOT list it: it must never be gated).
+      permissions: ["code:write", "investigate:read"]
   # Risky / write actions require a human
   approvals:
     require_for:

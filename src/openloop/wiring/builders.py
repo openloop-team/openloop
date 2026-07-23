@@ -64,6 +64,7 @@ from openloop.tools.openhands_worker import (
     OpenHandsCodingWorker,
     OpenHandsUnavailable,
 )
+from openloop.tasks.investigation import RepoInvestigator
 from openloop.usage import InMemoryUsageStore, UsageStore, WorkerSpendLedger
 from openloop.usage.postgres import PostgresUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowStore
@@ -653,9 +654,16 @@ def build_tool_gateway(
                     ledger=ledger,
                     warm_pool=warm_pool,
                 )
+                # Read-only investigation profile (Task 13): its gateway
+                # param is left default so it lazily builds the real
+                # ModelGateway on first use — never constructed eagerly here.
+                investigator = RepoInvestigator(settings.coding_worker_model)
                 gateway.register(
                     CodingWorkerConnector(
-                        orchestrator, github_client, checkpoints=checkpoints
+                        orchestrator,
+                        github_client,
+                        checkpoints=checkpoints,
+                        investigator=investigator,
                     )
                 )
                 # Register the worker as a durable workflow (approval = wait

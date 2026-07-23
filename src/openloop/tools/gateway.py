@@ -258,7 +258,18 @@ class ToolGateway:
             _canonical_action(entry) for entry in agent.spec.approvals.require_for
         }
         needs_agent_approval = action in canonical_require_for
-        if needs_agent_approval or getattr(tool, "requires_approval", False):
+        # Gate-as-floor: a connector may declare a per-permission approval
+        # floor (its profile's mandatory gate) that agent config can never
+        # remove — only ADD to via require_for. This is an additional
+        # disjunct alongside (never a replacement for) needs_agent_approval
+        # and the tool-wide `requires_approval` flag above.
+        floor = getattr(tool, "requires_approval_for", None)
+        needs_floor = floor(permission) if callable(floor) else False
+        if (
+            needs_agent_approval
+            or getattr(tool, "requires_approval", False)
+            or needs_floor
+        ):
             # The execution mode this invoke() commits to, recorded durably
             # with the row so every decided path routes on the marker — never
             # on the resolver's current engine/tool shape (mode drift there
