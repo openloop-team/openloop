@@ -339,6 +339,14 @@ def _opened_result(cp: WorkerCheckpoint) -> ToolResult:
             "pr_url": cp.pr_url,
             "completed_steps": cp.completed_steps,
             "resumed": True,
+            "outcome": {
+                "kind": "pull_request",
+                "repo": cp.repo,
+                "branch": cp.branch,
+                "pr_number": cp.pr_number,
+                "pr_url": cp.pr_url,
+                "summary": f"draft PR #{cp.pr_number} already open in {cp.repo}",
+            },
         },
     )
 
@@ -369,6 +377,18 @@ def _pr_body(body: str, job_id: str) -> str:
     body = (body or "").rstrip()
     footer = f"---\n🤖 Opened by the OpenLoop coding worker · job `{job_id}`"
     return f"{body}\n\n{footer}" if body else footer
+
+
+def _pull_request_outcome(state: "WorkerState", pull: dict, summary: str) -> dict:
+    """Build a typed PullRequest outcome for the result data."""
+    return {
+        "kind": "pull_request",
+        "repo": state.repo,
+        "branch": state.branch,
+        "pr_number": pull.get("number"),
+        "pr_url": pull.get("html_url"),
+        "summary": summary,
+    }
 
 
 class CodingWorkerConnector:
@@ -592,6 +612,9 @@ class CodingWorkerConnector:
                     "push": state.push_key(),
                     "open_pr": state.open_pr_key(),
                 },
+                "outcome": _pull_request_outcome(
+                    state, pull, f"opened draft PR #{pull.get('number')} in {state.repo}"
+                ),
             },
         )
 

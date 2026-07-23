@@ -465,3 +465,14 @@ def test_parse_generation_splits_title_body_diff():
 def test_parse_generation_requires_a_diff():
     with pytest.raises(RuntimeError, match="no diff"):
         _parse_generation("TITLE: nothing\nBODY: empty\nDIFF:\n")
+
+
+async def test_success_result_carries_pull_request_outcome():
+    conn = _connector()
+    args = conn.prepare_args("code:write", {"repo": "a/b", "instruction": "do x"})
+    result = await conn.execute("code:write", args)
+    assert result.ok
+    outcome = result.data["outcome"]
+    assert outcome["kind"] == "pull_request"
+    assert outcome["repo"] == "a/b"
+    assert outcome["pr_number"] == result.data["pr_number"]
