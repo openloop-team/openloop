@@ -243,10 +243,10 @@ class ToolGateway:
         # Connectors may require approval intrinsically regardless of an
         # accidental omission in an agent's config.
         #
-        # `Approvals.requires_approval` does a plain membership check against
-        # the agent's declared `require_for` list — it has no alias awareness
-        # of its own. Canonicalize both sides here, at the alias choke point,
-        # exactly like `policy.is_allowed` does for the allowlist: a
+        # A plain membership check against the agent's declared `require_for`
+        # list has no alias awareness of its own. Canonicalize both sides here,
+        # at the alias choke point, exactly like `policy.is_allowed` does for
+        # the allowlist: a
         # legacy-YAML agent's `require_for` still names the pre-alias action
         # (`coding_worker.pr:write`), and the caller may invoke using either
         # spelling — comparing only one side (or comparing `action` against

@@ -42,6 +42,7 @@ from openloop.sessions import (
 from openloop.sessions.postgres import PostgresSurfaceSessionStore
 from openloop.sessions.threads import PostgresThreadRecordStore
 from openloop.tools import ToolGateway
+from openloop.tools.aliases import _canonical_action
 from openloop.sandbox import (
     HostSandbox,
     Sandbox,
@@ -516,10 +517,17 @@ def build_coding_worker(
 
 
 def _exposes_coding_worker(agent: Agent) -> bool:
+    # Canonicalized, mirroring policy.allowed_actions: an agent's YAML may
+    # still declare the legacy coding_worker/pr:write spelling, which must be
+    # exactly as visible to this gate as the canonical
+    # workspace_task/code:write — a raw comparison would hide a legacy-named
+    # worker-exposing agent from the boot-time fail-closed cap gate and from
+    # ledger owner attribution.
+    target = _canonical_action(f"{CodingWorkerConnector.name}.{CODING_WORKER_CODE_WRITE}")
     return any(
-        t.name == CodingWorkerConnector.name
-        and CODING_WORKER_CODE_WRITE in t.permissions
+        _canonical_action(f"{t.name}.{p}") == target
         for t in agent.spec.tools
+        for p in t.permissions
     )
 
 

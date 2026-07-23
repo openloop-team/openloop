@@ -250,6 +250,20 @@ def test_openhands_ignores_uncapped_agent_without_worker_action(monkeypatch):
     assert connector.orchestrator._ledger.default_agent == "dev-platform"
 
 
+def test_exposes_coding_worker_detects_legacy_yaml_tool_name():
+    # `_exposes_coding_worker` backs both the boot-time fail-closed cap gate
+    # (`_uncapped_worker_agents`) and ledger owner attribution. It must be
+    # alias-aware: an agent whose YAML still declares the pre-rename
+    # coding_worker/pr:write spelling (never migrated) is exactly as real a
+    # worker-exposing agent as one spelled workspace_task/code:write, and a
+    # raw (non-canonicalizing) name+permission comparison would make it
+    # invisible to the gate — the exact bug this pins against a regression.
+    legacy_agent = load_agent(
+        Path(__file__).parents[1] / "unit" / "data" / "agent.yaml"
+    )
+    assert appmod._exposes_coding_worker(legacy_agent) is True
+
+
 def test_openhands_without_usage_store_fails_closed(monkeypatch, caplog):
     # A deploy that passes no usage store cannot build a ledger — the agentic
     # backend must not run uncapped and unrecorded.
@@ -482,7 +496,7 @@ async def test_code_write_gate_floor_forces_approval_even_without_require_for(
         for entry in agent.spec.approvals.require_for
         if entry != "workspace_task.code:write"
     ]
-    assert not agent.spec.approvals.requires_approval("workspace_task.code:write")
+    assert "workspace_task.code:write" not in agent.spec.approvals.require_for
 
     inv = await gateway.invoke(
         agent,
