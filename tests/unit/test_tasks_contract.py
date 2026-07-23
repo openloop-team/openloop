@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 
-from openloop.tasks.contract import Gate, TaskProfile
+from openloop.tasks.contract import Gate, TaskProfile, WorkspaceTask
 
 
 class _Args(BaseModel):
@@ -22,3 +22,19 @@ def test_profile_declares_its_gate_and_capabilities():
     assert p.gate is Gate.START
     assert p.capabilities == frozenset({"repo:write"})
     assert p.args_model is _Args
+
+
+def test_workspace_task_roundtrips_and_holds_no_outcome_fields():
+    t = WorkspaceTask(
+        task_id="abc123",
+        profile="investigate",
+        entry_action="investigate:read",
+        agent="dev-platform",
+        session_id="s1",
+        profile_state={"repo": "a/b", "question": "why"},
+    )
+    again = WorkspaceTask.from_dict(t.to_dict())
+    assert again == t
+    # PR-only fields live in profile_state, never on the core.
+    assert not hasattr(again, "branch")
+    assert again.profile_state["repo"] == "a/b"

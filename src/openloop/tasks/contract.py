@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 
 
@@ -24,3 +24,35 @@ class TaskProfile:
     args_model: type
     gate: Gate
     capabilities: frozenset[str]
+
+
+@dataclass(slots=True)
+class WorkspaceTask:
+    """Durable task identity + profile-neutral shared state.
+
+    Holds nothing that presumes an outcome. Outcome-specific fields (repo,
+    branch, PR title/body) live in ``profile_state``. ``task_id`` is the
+    workflow instance id — it identifies the task, not the profile."""
+
+    task_id: str
+    profile: str
+    entry_action: str
+    agent: str | None = None
+    agent_id: str | None = None
+    approval_id: str | None = None
+    requester_id: str | None = None
+    session_id: str | None = None
+    warm_key: str | None = None
+    progress: str | None = None
+    profile_state: dict = field(default_factory=dict)
+    completed_steps: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "WorkspaceTask":
+        return cls(**{k: v for k, v in data.items() if k in _WT_FIELDS})
+
+
+_WT_FIELDS = frozenset(WorkspaceTask.__dataclass_fields__)
