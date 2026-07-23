@@ -380,3 +380,52 @@ def test_workspace_task_tool_registered_for_code_profile(monkeypatch, tmp_path):
     gateway = _gateway(_settings(coding_worker_backend="builtin"))
     assert "workspace_task" in gateway._tools
     assert "code:write" in gateway._tools["workspace_task"].supported_permissions()
+
+
+async def test_legacy_action_string_still_invokes_the_code_profile(monkeypatch, tmp_path):
+    # A durable approval row written pre-migration (or an agent whose YAML
+    # hasn't been re-pointed yet) names the legacy action string. The alias
+    # (Task 4) must still route it to the migrated workspace_task connector
+    # and park it for approval — never bounce off as "no registered tool".
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    gateway = _gateway(_settings(coding_worker_backend="builtin"))
+    agent = load_agent(AGENT_YAML)
+    inv = await gateway.invoke(agent, "coding_worker.pr:write",
+                               args={"repo": "a/b", "instruction": "x"},
+                               requested_by="tester")
+    # Aliased to workspace_task.code:write → parks for approval (start gate), not "no tool".
+    assert inv.status in {"pending_approval", "started", "approved"}
+    assert inv.message is None or "no registered tool" not in inv.message
+
+
+async def test_legacy_yaml_agent_write_action_is_still_approval_gated(monkeypatch, tmp_path):
+    # Security invariant: the alias must not let a legacy-YAML agent's write
+    # action slip past the approve-before-work gate. tests/unit/data/agent.yaml
+    # is deliberately kept on the pre-migration spelling
+    # (tool "coding_worker", permission "pr:write") — exercise the write
+    # action via BOTH the legacy and canonical action strings and confirm
+    # each one parks as a genuine, durable approval row rather than running
+    # straight through to "executed".
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    gateway = _gateway(_settings(coding_worker_backend="builtin"))
+    agent = load_agent(AGENT_YAML)
+
+    for action in ("coding_worker.pr:write", "workspace_task.code:write"):
+        inv = await gateway.invoke(
+            agent,
+            action,
+            args={"repo": "a/b", "instruction": "x"},
+            requested_by="tester",
+        )
+
+        assert inv.status == "pending_approval"
+        assert inv.status != "executed"
+        assert inv.approval is not None
+
+        # The pending status alone isn't proof of a real gate — confirm a
+        # durable approval row actually exists (and is still undecided) in
+        # the store the gateway itself would consult on resolve().
+        stored = await gateway.approvals.get(inv.approval.id)
+        assert stored is not None
+        assert stored.status == "pending"
+        assert stored.action == "workspace_task.code:write"
