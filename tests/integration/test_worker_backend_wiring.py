@@ -400,32 +400,55 @@ async def test_legacy_action_string_still_invokes_the_code_profile(monkeypatch, 
 
 async def test_legacy_yaml_agent_write_action_is_still_approval_gated(monkeypatch, tmp_path):
     # Security invariant: the alias must not let a legacy-YAML agent's write
-    # action slip past the approve-before-work gate. tests/unit/data/agent.yaml
-    # is deliberately kept on the pre-migration spelling
-    # (tool "coding_worker", permission "pr:write") — exercise the write
-    # action via BOTH the legacy and canonical action strings and confirm
-    # each one parks as a genuine, durable approval row rather than running
-    # straight through to "executed".
+    # action slip past the approve-before-work gate. Load the LEGACY fixture
+    # tests/unit/data/agent.yaml (not the migrated AGENT_YAML above) BECAUSE
+    # its `require_for` names the pre-migration spelling
+    # (`coding_worker.pr:write`), never the canonical `workspace_task.code:write`
+    # — using AGENT_YAML here (as the previous version of this test did) never
+    # exercises the alias-dependent gate at all, since its `require_for`
+    # already names the canonical action outright.
+    #
+    # Invoke via the legacy action string, exactly as this agent's own
+    # tool_specs would hand it to a model (available_actions() reports the
+    # action in the YAML's as-declared spelling) and exactly as a durable
+    # approval row written pre-migration would still name it. `requires_approval`
+    # does a plain membership check against `require_for`; the real bug this
+    # pins was `requires_approval(canonical_action)` returning False for an
+    # agent like this, so gateway.py now also checks `requires_approval` against
+    # the as-requested string. Confirm it parks as a genuine, durable approval
+    # row rather than running straight through to "executed".
+    #
+    # NOTE: invoking this same agent with the CANONICAL string directly
+    # (`workspace_task.code:write`, as a caller of the raw POST /tools/invoke
+    # endpoint could) is NOT gated by the current gateway.py check — that
+    # check only tries the canonical action and the exact as-requested string
+    # against `require_for`, it never re-canonicalizes `require_for`'s own
+    # legacy entries for comparison. That is a distinct, real, reachable gap
+    # discovered while fixing this test's fixture (confirmed via manual
+    # reproduction), not covered here because closing it requires a src/
+    # change out of scope for this test-only task — see task-10-report.md.
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
-    gateway = _gateway(_settings(coding_worker_backend="builtin"))
-    agent = load_agent(AGENT_YAML)
+    legacy_agent = load_agent(Path(__file__).parents[1] / "unit" / "data" / "agent.yaml")
+    gateway = _gateway(
+        _settings(coding_worker_backend="builtin"),
+        agents={"dev-platform": legacy_agent},
+    )
 
-    for action in ("coding_worker.pr:write", "workspace_task.code:write"):
-        inv = await gateway.invoke(
-            agent,
-            action,
-            args={"repo": "a/b", "instruction": "x"},
-            requested_by="tester",
-        )
+    inv = await gateway.invoke(
+        legacy_agent,
+        "coding_worker.pr:write",
+        args={"repo": "a/b", "instruction": "x"},
+        requested_by="tester",
+    )
 
-        assert inv.status == "pending_approval"
-        assert inv.status != "executed"
-        assert inv.approval is not None
+    assert inv.status == "pending_approval"
+    assert inv.status != "executed"
+    assert inv.approval is not None
 
-        # The pending status alone isn't proof of a real gate — confirm a
-        # durable approval row actually exists (and is still undecided) in
-        # the store the gateway itself would consult on resolve().
-        stored = await gateway.approvals.get(inv.approval.id)
-        assert stored is not None
-        assert stored.status == "pending"
-        assert stored.action == "workspace_task.code:write"
+    # The pending status alone isn't proof of a real gate — confirm a
+    # durable approval row actually exists (and is still undecided) in
+    # the store the gateway itself would consult on resolve().
+    stored = await gateway.approvals.get(inv.approval.id)
+    assert stored is not None
+    assert stored.status == "pending"
+    assert stored.action == "workspace_task.code:write"
