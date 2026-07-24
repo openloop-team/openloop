@@ -39,7 +39,10 @@ services:
     # in-network service host. Overrides any DATABASE_URL in .env.runtime so the
     # localhost example value can't leak in.
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-openloop}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}@postgres:5432/${POSTGRES_DB:-openloop}
+      # Keep the raw password outside the URI so URL-significant characters are
+      # passed to PostgreSQL unchanged.
+      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       STORAGE_MODE: postgres
     # Socket Mode opens an OUTBOUND WebSocket to Slack — no inbound port.

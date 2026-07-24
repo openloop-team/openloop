@@ -34,7 +34,10 @@ services:
     environment:
       # Compose owns database bootstrap values in .env. Override the localhost
       # URL used by direct Python execution with the in-network service host.
-      DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-openloop}
+      # Keep the raw password outside the URI so URL-significant characters are
+      # passed to PostgreSQL unchanged.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}@postgres:5432/${POSTGRES_DB:-openloop}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     depends_on:
       postgres:

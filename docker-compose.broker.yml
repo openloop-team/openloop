@@ -55,7 +55,8 @@ services:
       - ${OPENLOOP_DATA_GID:-10777}
     env_file: .env.broker
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-openloop}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}@postgres:5432/${POSTGRES_DB:-openloop}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me}
       BROKER_MODE: external
       BROKER_CONTROL_SOCKET_DIR: ${OPENLOOP_BROKER_ROOT:?}/control
       BROKER_STATE_ROOT: ${OPENLOOP_BROKER_ROOT:?}/state

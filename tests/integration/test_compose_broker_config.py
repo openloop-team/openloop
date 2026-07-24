@@ -17,9 +17,10 @@ RUNTIME_COMPOSITIONS = (
 COMPOSITIONS = (*RUNTIME_COMPOSITIONS, OVERRIDE)
 BROKER_ROOT = "${OPENLOOP_BROKER_ROOT:?}"
 COMPOSE_DATABASE_URL = (
-    "postgresql://${POSTGRES_USER:-openloop}:${POSTGRES_PASSWORD:-change-me}"
+    "postgresql://${POSTGRES_USER:-openloop}"
     "@postgres:5432/${POSTGRES_DB:-openloop}"
 )
+COMPOSE_PGPASSWORD = "${POSTGRES_PASSWORD:-change-me}"
 BUILD = {
     "context": ".",
     "args": {
@@ -94,6 +95,7 @@ def test_broker_has_explicit_external_environment_health_and_ordering():
 
     assert broker["env_file"] == ".env.broker"
     assert broker["environment"]["DATABASE_URL"] == COMPOSE_DATABASE_URL
+    assert broker["environment"]["PGPASSWORD"] == COMPOSE_PGPASSWORD
     assert broker["environment"]["BROKER_MODE"] == "external"
     assert runtime["environment"]["BROKER_MODE"] == "external"
     assert broker["depends_on"] == {
@@ -113,6 +115,7 @@ def test_runtime_compositions_use_runtime_environment_file():
         runtime = yaml.safe_load(path.read_text())["services"]["runtime"]
         assert runtime["env_file"] == ".env.runtime"
         assert runtime["environment"]["DATABASE_URL"] == COMPOSE_DATABASE_URL
+        assert runtime["environment"]["PGPASSWORD"] == COMPOSE_PGPASSWORD
         assert runtime["environment"]["LOG_LEVEL"] == "${LOG_LEVEL:-info}"
 
 
@@ -169,12 +172,14 @@ def test_example_files_document_and_preserve_the_secret_partition():
 
     assert "BROKER_IDENTITY_PRIVATE_KEY" in app
     assert "BROKER_RECEIPT_ROOTS" in app
+    assert "PGPASSWORD" not in app_names
     assert "BROKER_CAPABILITY_ROOTS" not in app_names
     assert "BROKER_RUNTIME_ROOTS" not in app_names
     assert "BROKER_CAPABILITY_ROOTS" in broker
     assert "BROKER_RUNTIME_ROOTS" in broker
     assert "BROKER_IDENTITY_PRIVATE_KEY" not in broker_names
     assert "BROKER_RECEIPT_ROOTS" not in broker_names
+    assert "PGPASSWORD" not in broker_names
     assert "DATABASE_URL" in app_names
     assert "DATABASE_URL" not in broker_names
     ignored = (ROOT / ".gitignore").read_text().splitlines()
