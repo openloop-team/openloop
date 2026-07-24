@@ -42,11 +42,15 @@ def _parse_findings(text: str) -> tuple[str, str]:
     summary = ""
     findings = text.strip()
 
-    # Parse SUMMARY: capture inline value or first line after marker
+    # Parse SUMMARY: value may be inline or on following lines, but must not
+    # bleed into FINDINGS:. Bound the region first, then take the first non-empty line.
     _, sep, summary_body = text.partition("SUMMARY:")
     if sep:
-        # Extract the summary value: strip leading space, take up to first newline
-        summary = summary_body.split('\n', 1)[0].strip()
+        summary_region = summary_body.partition("FINDINGS:")[0]
+        summary = next(
+            (line.strip() for line in summary_region.splitlines() if line.strip()),
+            "",
+        )
 
     # Parse FINDINGS: capture everything after marker (inline + following lines)
     _, sep, findings_body = text.partition("FINDINGS:")

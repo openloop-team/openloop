@@ -47,6 +47,26 @@ def test_parse_findings_multiline_after_marker():
     assert findings == "- a\n- b"
 
 
+def test_parse_findings_summary_on_following_line():
+    """Summary on a line following the SUMMARY: marker is captured, not dropped."""
+    from openloop.tasks.investigation import _parse_findings
+
+    # Regression: previously the empty inline slot made summary fall back to default.
+    summary, findings = _parse_findings("SUMMARY:\nfoo\nFINDINGS:\n- a")
+    assert summary == "foo"
+    assert findings == "- a"
+
+
+def test_parse_findings_empty_summary_falls_back():
+    """A genuinely empty summary falls back to the default, never grabs FINDINGS:."""
+    from openloop.tasks.investigation import _parse_findings
+
+    # Guards the FINDINGS: bound: without it, "first non-empty line" would be "FINDINGS:".
+    summary, findings = _parse_findings("SUMMARY:\nFINDINGS:\n- a")
+    assert summary == "Investigation complete."
+    assert findings == "- a"
+
+
 async def test_investigator_returns_evidence_bundle_from_model_findings(tmp_path):
     (tmp_path / "p.py").write_text("def parse():\n    return None\n")
     gw = _FakeGateway(
