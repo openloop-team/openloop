@@ -80,7 +80,13 @@ def test_investigate_describe_has_typed_args():
 
 async def test_execute_investigate_returns_evidence_bundle_and_opens_no_pr():
     github = FakeGitHub()
-    runner = FakeWorkerOrchestrator()
+    # execute() now delegates to orchestrator.run_investigation, which owns
+    # provisioning + the investigator call — the fake's run_investigation
+    # returns its OWN canned bundle (it never echoes the investigator's text,
+    # see FakeWorkerOrchestrator.run_investigation), so cost_usd is configured
+    # here and the summary assertion below reads the fake's own canned value
+    # rather than the investigator's.
+    runner = FakeWorkerOrchestrator(cost_usd=0.02)
     conn = _connector(investigator=_investigator(), runner=runner, github=github)
 
     args = conn.prepare_args(
@@ -95,7 +101,7 @@ async def test_execute_investigate_returns_evidence_bundle_and_opens_no_pr():
     outcome = result.data["outcome"]
     assert outcome["kind"] == "evidence_bundle"
     assert outcome["findings"].strip() != ""
-    assert outcome["summary"] == "it returns None"
+    assert outcome["summary"] == runner.investigation_summary
     assert result.data["cost_usd"] == 0.02
     # Never opens a PR, never pushes — this is a read-only profile.
     assert github.pulls == []
@@ -238,3 +244,67 @@ async def test_run_investigation_fails_closed_over_the_per_task_cap(monkeypatch)
     # silent) — but no evidence bundle was ever returned as a success.
     assert usage.records[-1].outcome == "over_task_budget"
     assert usage.records[-1].cost_usd == 0.75
+
+
+# --- Conv Task 3: connector execute() runs on a WorkspaceTask, no WorkerState ---
+#
+# _execute_investigate must build a real WorkspaceTask and delegate to
+# orchestrator.run_investigation instead of calling provision_readonly +
+# investigator.investigate directly (no ledger bracket, no WorkspaceTask).
+# FakeWorkerOrchestrator.run_investigation returns FULLY CANNED output (it
+# never echoes the investigator's own text) and records every task it's
+# handed in self.investigations — so the only way this test's canned
+# assertions can pass is if execute() actually delegated to
+# run_investigation, and the only way to check what the connector built is
+# to inspect the captured WorkspaceTask, not to rely on the fake echoing
+# inputs.
+
+
+async def test_execute_investigate_runs_on_workspacetask_no_workerstate():
+    runner = FakeWorkerOrchestrator(
+        cost_usd=0.03,
+        investigation_summary="canned summary from the orchestrator",
+        investigation_findings="- (canned) finding one",
+    )
+    conn = _connector(investigator=_investigator(), runner=runner)
+    agent = make_agent("dev-platform", "acme")
+
+    args = conn.prepare_args(
+        "investigate:read",
+        {"repo": "a/b", "question": "why does parse return None?", "ref": "dev"},
+        agent=agent,
+        session_id="sess-1",
+    )
+
+    result = await conn.execute("investigate:read", args)
+
+    # The ToolResult carries the ORCHESTRATOR's canned bundle unchanged —
+    # this can only be true if execute() delegated to run_investigation
+    # (the old direct-call path would surface the investigator's own text,
+    # "it returns None", instead).
+    assert result.ok is True
+    outcome = result.data["outcome"]
+    assert outcome["kind"] == "evidence_bundle"
+    assert outcome["summary"] == "canned summary from the orchestrator"
+    assert outcome["findings"] == "- (canned) finding one"
+    assert result.data["cost_usd"] == 0.03
+    assert result.data["job_id"] == args["job_id"]
+
+    # The orchestrator received exactly one call, carrying a real
+    # WorkspaceTask — never a WorkerState — whose profile_state holds ONLY
+    # the investigate inputs (no "code" key, no worker_state key), with the
+    # same identity fields the code:write path threads into WorkerState.
+    (task,) = runner.investigations
+    assert isinstance(task, WorkspaceTask)
+    assert task.task_id == args["job_id"]
+    assert task.profile == "investigate"
+    assert task.entry_action == "investigate:read"
+    assert task.agent == "dev-platform"
+    assert task.agent_id == agent.metadata.id
+    assert task.session_id == "sess-1"
+    assert set(task.profile_state) == {"investigate"}
+    assert task.profile_state["investigate"] == {
+        "repo": "a/b",
+        "question": "why does parse return None?",
+        "ref": "dev",
+    }

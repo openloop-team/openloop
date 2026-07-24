@@ -56,6 +56,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from openloop.checkpoints.store import CheckpointStore, WorkerCheckpoint
 from openloop.credentials import CredentialResolver, CredentialScope
+from openloop.tasks import WorkspaceTask
 from openloop.tasks.contract import Gate, profile_for
 from openloop.tasks.investigation import (
     INVESTIGATE_ARGS_VERSION,
@@ -74,7 +75,6 @@ from openloop.tools.openhands_resume import (
 if TYPE_CHECKING:
     from openloop.models.gateway import ModelResponse
     from openloop.sandbox import Sandbox
-    from openloop.tasks.contract import WorkspaceTask
     from openloop.tasks.outcomes import EvidenceBundle
     from openloop.tools.openhands_resume import WorkspaceArtifactRef
     from openloop.tools.workspace_pool import WarmWorkspacePool
@@ -690,8 +690,17 @@ class CodingWorkerConnector:
         Ungated (``gate=Gate.NONE``): the gateway never creates an approval or
         a workflow instance for this permission, so this is the whole Stage 1
         delivery path for ``investigate:read`` — the result flows back through
-        the model tool-loop, never through a durable workflow. It opens no PR
-        and pushes nothing; failures are reported as a failed
+        the model tool-loop, never through a durable workflow. Builds a
+        :class:`WorkspaceTask` — never a :class:`WorkerState`, and its
+        ``profile_state`` holds only the investigate inputs (no ``"code"``
+        key) — and delegates the whole run to
+        :meth:`GitWorkspaceOrchestrator.run_investigation`, which owns
+        provisioning the read-only workspace, calling the investigator, and
+        bracketing the investigation's model spend through the ledger exactly
+        the way ``run_attempt`` brackets a coding-worker attempt's spend
+        (contract-convergence gap #4 — investigation spend used to be
+        untracked and uncapped). It opens no PR and pushes nothing; failures
+        (including an over-cap budget refusal) are reported as a failed
         :class:`ToolResult`, never raised, matching every other execute() path
         in this connector.
         """
@@ -724,13 +733,33 @@ class CodingWorkerConnector:
                     "error": "no investigator configured",
                 },
             )
-        workspace: Path | None = None
+
+        # The same identity fields execute()'s code:write path threads into
+        # WorkerState (agent/agent_id/session_id/approval_id/requester_id),
+        # carried here into a WorkspaceTask instead. warm_key is deliberately
+        # never read — an investigation always provisions a fresh ephemeral
+        # checkout, never a thread's warm workspace (see prepare_args).
+        task = WorkspaceTask(
+            task_id=job_id,
+            profile="investigate",
+            entry_action=CODING_WORKER_INVESTIGATE_READ,
+            agent=args.get("agent"),
+            agent_id=args.get("agent_id"),
+            approval_id=args.get("approval_id"),
+            requester_id=args.get("approved_by"),
+            session_id=args.get("session_id"),
+            profile_state={
+                "investigate": {
+                    "repo": repo,
+                    "question": question,
+                    "ref": args.get("ref"),
+                }
+            },
+        )
+
         try:
-            workspace = await self.orchestrator.provision_readonly(
-                repo, args.get("ref")
-            )
-            bundle, resp = await self.investigator.investigate(
-                workspace, question, repo
+            bundle, resp = await self.orchestrator.run_investigation(
+                task, self.investigator
             )
         except Exception as exc:  # noqa: BLE001 — never raise out of execute()
             return ToolResult(
@@ -743,12 +772,6 @@ class CodingWorkerConnector:
                     "error": str(exc),
                 },
             )
-        finally:
-            # Best-effort, mirroring how a worker attempt discards its
-            # ephemeral workspace — this checkout is read-only and never
-            # reused across turns.
-            if workspace is not None:
-                shutil.rmtree(workspace, ignore_errors=True)
         return ToolResult(
             ok=True,
             summary=bundle.summary,
