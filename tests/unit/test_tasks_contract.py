@@ -1,3 +1,6 @@
+import ast
+from pathlib import Path
+
 from pydantic import BaseModel
 
 from openloop.tasks.contract import Gate, TaskProfile, WorkspaceTask, profile_for
@@ -82,3 +85,39 @@ def test_workspace_task_budget_usd_roundtrips():
     assert WorkspaceTask(
         task_id="x", profile="code", entry_action="code:write"
     ).budget_usd is None
+
+
+def test_contract_types_are_consumed_by_runtime():
+    """Guard the inverse of the gap that motivated contract convergence.
+
+    The contract must remain a runtime dependency, not drift back into a set
+    of types exercised only by tests: the connector constructs WorkspaceTask,
+    the durable workflow rehydrates it, and the connector's gate consults the
+    TaskProfile registry.
+    """
+    src = Path(__file__).parents[2] / "src" / "openloop"
+    connector_tree = ast.parse(
+        (src / "tools" / "coding_worker.py").read_text(encoding="utf-8")
+    )
+    workflow_tree = ast.parse(
+        (src / "workflows" / "coding_worker.py").read_text(encoding="utf-8")
+    )
+
+    connector_calls = {
+        node.func.id
+        for node in ast.walk(connector_tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    workflow_calls = {
+        (node.func.value.id, node.func.attr)
+        for node in ast.walk(workflow_tree)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+        )
+    }
+
+    assert "WorkspaceTask" in connector_calls
+    assert "profile_for" in connector_calls
+    assert ("WorkspaceTask", "from_dict") in workflow_calls
