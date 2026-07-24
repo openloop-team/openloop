@@ -7,8 +7,8 @@ uv = "latest"
 _.python.venv = { path = ".venv", create = true }
 
 [tasks.install]
-description = "Install the runtime with dev dependencies into the project venv"
-run = "uv pip install -e '.[dev]'"
+description = "Install the runtime with dependencies exercised by the test suite"
+run = "uv pip install -e '.[dev,broker,openhands]'"
 
 [tasks.test]
 description = "Run unit and integration tests"

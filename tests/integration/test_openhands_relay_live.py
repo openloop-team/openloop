@@ -25,7 +25,10 @@ import pytest
 
 os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
 
-if importlib.util.find_spec("openhands.workspace") is None:
+if (
+    importlib.util.find_spec("openhands") is None
+    or importlib.util.find_spec("openhands.workspace") is None
+):
     pytest.skip(
         "OpenHands optional dependency is not installed", allow_module_level=True
     )
