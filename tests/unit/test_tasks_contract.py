@@ -58,6 +58,27 @@ def test_from_dict_rehydrates_old_flat_coding_worker_layout():
     assert t.profile == "code"
     assert t.agent == "dev" and t.agent_id == "id1"
     assert t.profile_state["code"]["worker_state"]["branch"] == "openloop/job-j1"
+    # The old flat layout's budget lived inside worker_state (carried
+    # verbatim above); the compat shim itself has nothing to lift it from,
+    # so the core field is left unset rather than guessed at.
+    assert t.budget_usd is None
     # New layout round-trips too:
     again = WorkspaceTask.from_dict(t.to_dict())
     assert again == t
+
+
+def test_workspace_task_budget_usd_roundtrips():
+    t = WorkspaceTask(
+        task_id="abc123",
+        profile="code",
+        entry_action="code:write",
+        budget_usd=12.5,
+    )
+    assert t.to_dict()["budget_usd"] == 12.5
+    again = WorkspaceTask.from_dict(t.to_dict())
+    assert again.budget_usd == 12.5
+    assert again == t
+    # Default is unset, not silently zero.
+    assert WorkspaceTask(
+        task_id="x", profile="code", entry_action="code:write"
+    ).budget_usd is None

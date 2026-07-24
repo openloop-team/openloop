@@ -225,6 +225,10 @@ async def test_run_investigation_records_spend_for_the_invoking_agent(monkeypatc
     assert record.scope_key == budget_scope_key(agent)
     assert record.outcome == "ok"
     assert record.cost_usd == 0.02
+    # Conv Task 6: the invoking agent's per-task cap is stamped onto the task
+    # itself, mirroring how run_attempt stamps state.budget_usd — observability
+    # parity, not enforcement (that's still settle()'s job above).
+    assert task.budget_usd == 0.50
 
 
 async def test_run_investigation_fails_closed_over_the_per_task_cap(monkeypatch):

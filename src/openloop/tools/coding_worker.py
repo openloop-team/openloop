@@ -122,7 +122,6 @@ CODING_WORKER_ARGS_VERSION = 1
 CODING_WORKER_INVESTIGATE_READ = "investigate:read"
 
 
-
 class CodingWorkerPrArgs(BaseModel):
     """Model-facing args for ``workspace_task.code:write`` (typed-tool-args §3).
 
@@ -315,6 +314,12 @@ class AttemptRunner(Protocol):
         decision: ResumeDecision,
         on_step: StepCallback | None = None,
     ) -> WorkerOutcome | WorkerPaused: ...
+
+    async def provision_readonly(self, repo: str, ref: str | None = None) -> Path: ...
+
+    async def run_investigation(
+        self, task: "WorkspaceTask", investigator: RepoInvestigator
+    ) -> tuple["EvidenceBundle", "ModelResponse"]: ...
 
 
 def _branch_for(job_id: str) -> str:
@@ -1367,6 +1372,12 @@ class GitWorkspaceOrchestrator:
                 approval_id=task.approval_id,
                 approver=task.requester_id,
                 session_id=task.session_id,
+            )
+            # Observability parity with run_attempt's state.budget_usd stamp;
+            # enforcement still happens in settle() below, not by reading this
+            # back.
+            task.budget_usd = self._ledger.per_task_usd_for(
+                task.agent, task.agent_id
             )
 
         workspace: Path | None = None

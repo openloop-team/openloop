@@ -44,6 +44,11 @@ class WorkspaceTask:
     session_id: str | None = None
     warm_key: str | None = None
     progress: str | None = None
+    # The invoking agent's per-task spend ceiling (a contract-level field, not
+    # profile-specific). Stamped for observability by whichever profile wires a
+    # WorkerSpendLedger; enforcement always happens in that ledger's settle(),
+    # never by reading this field back.
+    budget_usd: float | None = None
     profile_state: dict = field(default_factory=dict)
     completed_steps: list[str] = field(default_factory=list)
 
