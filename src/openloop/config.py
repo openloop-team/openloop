@@ -1,7 +1,7 @@
-"""Runtime configuration loaded from environment / `.env`.
+"""Runtime configuration loaded from environment / ``.env.runtime``.
 
-Mirrors the keys documented in `.env.example`. Only what the first vertical
-slice needs is wired up here; more lands as the runtime grows.
+Mirrors the keys documented in ``.env.runtime.example``. Only what the first
+vertical slice needs is wired up here; more lands as the runtime grows.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=".env.runtime",
         env_file_encoding="utf-8",
         extra="ignore",
         hide_input_in_errors=True,

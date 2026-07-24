@@ -40,9 +40,9 @@ the wrong way while the architecture is still forming.
 ```bash
 git clone https://github.com/p1c2u/openloop.git
 cd openloop
-cp .env.example .env
+cp .env.runtime.example .env.runtime
 # configure model provider keys and Slack credentials, then:
-docker compose up -d
+docker compose --env-file .env.runtime up -d
 ```
 
 ## Pull requests
@@ -53,8 +53,8 @@ docker compose up -d
   tradeoffs or follow-ups.
 - **Link the issue** the PR addresses (e.g. `Closes #123`).
 - **Update docs** alongside behavior changes.
-- **Don't commit secrets.** Keep credentials in `.env` (gitignored), never in
-  code or fixtures.
+- **Don't commit secrets.** Keep credentials in `.env.runtime` (gitignored),
+  never in code or fixtures.
 
 ### Commit messages
 

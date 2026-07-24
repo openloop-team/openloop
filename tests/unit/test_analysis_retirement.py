@@ -64,7 +64,8 @@ def test_app_sandbox_has_no_docker_backend() -> None:
 
 def test_active_operator_guidance_has_no_retired_paths() -> None:
     active = "\n".join(
-        (ROOT / name).read_text() for name in ("README.md", ".env.example")
+        (ROOT / name).read_text()
+        for name in ("README.md", ".env.runtime.example")
     )
     assert [marker for marker in RETIRED_GUIDANCE_MARKERS if marker in active] == []
 

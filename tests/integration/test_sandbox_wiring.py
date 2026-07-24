@@ -6,13 +6,15 @@ from openloop.wiring import builders
 
 
 def test_default_is_host_sandbox() -> None:
-    assert isinstance(builders.build_worker_sandbox(Settings()), HostSandbox)
+    assert isinstance(
+        builders.build_worker_sandbox(Settings(_env_file=None)), HostSandbox
+    )
 
 
 def test_builtin_worker_rejects_docker_marker(caplog) -> None:
     with caplog.at_level("ERROR"):
         sandbox = builders.build_worker_sandbox(
-            Settings(coding_worker_sandbox="docker")
+            Settings(_env_file=None, coding_worker_sandbox="docker")
         )
 
     assert sandbox is None
@@ -22,7 +24,7 @@ def test_builtin_worker_rejects_docker_marker(caplog) -> None:
 def test_unknown_sandbox_value_fails_closed(caplog) -> None:
     with caplog.at_level("ERROR"):
         sandbox = builders.build_worker_sandbox(
-            Settings(coding_worker_sandbox="dokcer")
+            Settings(_env_file=None, coding_worker_sandbox="dokcer")
         )
 
     assert sandbox is None

@@ -140,7 +140,7 @@ def _write_partitioned_environments(project: Path) -> None:
         .public_bytes_raw()
     )
     database_url = "postgresql://openloop:change-me@postgres:5432/openloop"
-    (project / ".env").write_text(
+    (project / ".env.runtime").write_text(
         "\n".join(
             (
                 "POSTGRES_USER=openloop",
@@ -206,7 +206,14 @@ def _compose(
     *arguments: str,
     timeout: int = 180,
 ) -> subprocess.CompletedProcess[str]:
-    command = ["docker", "compose", "--project-directory", str(project)]
+    command = [
+        "docker",
+        "compose",
+        "--project-directory",
+        str(project),
+        "--env-file",
+        str(project / ".env.runtime"),
+    ]
     for path in files:
         command.extend(("-f", str(path)))
     command.extend(("--project-name", project_name, *arguments))

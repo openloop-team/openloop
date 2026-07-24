@@ -9,6 +9,10 @@ import yaml
 
 ROOT = Path(__file__).parents[2]
 OVERRIDE = ROOT / "docker-compose.broker.yml"
+RUNTIME_COMPOSITIONS = (
+    ROOT / "docker-compose.yml",
+    ROOT / "docker-compose.deploy.yml",
+)
 BROKER_ROOT = "${OPENLOOP_BROKER_ROOT:?}"
 BUILD = {
     "context": ".",
@@ -97,8 +101,14 @@ def test_broker_has_explicit_external_environment_health_and_ordering():
     ]
 
 
+def test_runtime_compositions_use_runtime_environment_file():
+    for path in RUNTIME_COMPOSITIONS:
+        runtime = yaml.safe_load(path.read_text())["services"]["runtime"]
+        assert runtime["env_file"] == ".env.runtime"
+
+
 def test_example_files_document_and_preserve_the_secret_partition():
-    app = (ROOT / ".env.example").read_text()
+    app = (ROOT / ".env.runtime.example").read_text()
     broker = (ROOT / ".env.broker.example").read_text()
 
     def assigned_names(document: str) -> set[str]:
@@ -119,4 +129,7 @@ def test_example_files_document_and_preserve_the_secret_partition():
     assert "BROKER_RUNTIME_ROOTS" in broker
     assert "BROKER_IDENTITY_PRIVATE_KEY" not in broker_names
     assert "BROKER_RECEIPT_ROOTS" not in broker_names
-    assert ".env.broker" in (ROOT / ".gitignore").read_text().splitlines()
+    ignored = (ROOT / ".gitignore").read_text().splitlines()
+    assert ".env" in ignored
+    assert ".env.runtime" in ignored
+    assert ".env.broker" in ignored

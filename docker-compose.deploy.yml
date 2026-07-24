@@ -7,9 +7,11 @@
 #   - restart: unless-stopped so it survives reboots
 #
 # Usage on the server:
-#   cp .env.example .env   # then fill in tokens/keys
-#   docker compose -f docker-compose.deploy.yml up -d --build
-#   docker compose -f docker-compose.deploy.yml logs -f runtime
+#   cp .env.runtime.example .env.runtime   # then fill in tokens/keys
+#   docker compose --env-file .env.runtime \
+#     -f docker-compose.deploy.yml up -d --build
+#   docker compose --env-file .env.runtime \
+#     -f docker-compose.deploy.yml logs -f runtime
 #
 # The runtime intentionally has no Docker-daemon authority. Containerized
 # OpenHands requires the external broker override.
@@ -33,9 +35,9 @@ services:
   runtime:
     build: .
     restart: unless-stopped
-    env_file: .env
+    env_file: .env.runtime
     # Derive the DB URL from the same vars Postgres uses, pointed at the
-    # in-network service host. Overrides any DATABASE_URL in .env so the
+    # in-network service host. Overrides any DATABASE_URL in .env.runtime so the
     # localhost example value can't leak in.
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-openloop}
@@ -49,7 +51,7 @@ services:
     volumes:
       - ./agents:/app/agents:ro
       # GitHub App auth: mount the App private key and set
-      # GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app.pem in .env.
+      # GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app.pem in .env.runtime.
       - ./secrets/github-app.pem:/run/secrets/github-app.pem:ro
 
 volumes:

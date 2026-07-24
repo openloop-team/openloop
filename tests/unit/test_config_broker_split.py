@@ -12,6 +12,21 @@ from pydantic import ValidationError, field_validator
 from openloop.config import Settings
 
 
+def test_default_settings_load_runtime_dotenv_without_legacy_fallback(
+    monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    (tmp_path / ".env").write_text("OLLAMA_BASE_URL=http://legacy.example\n")
+    runtime_file = tmp_path / ".env.runtime"
+    runtime_file.write_text("OLLAMA_BASE_URL=http://runtime.example\n")
+
+    assert Settings().ollama_base_url == "http://runtime.example"
+
+    runtime_file.unlink()
+    assert Settings().ollama_base_url == "http://localhost:11434"
+
+
 def test_defaults_are_coprocess_with_all_split_fields_unset():
     settings = Settings(_env_file=None)
 

@@ -79,7 +79,12 @@ def test_outcome_type_not_welded_to_profile():
 
 
 def _settings(**kwargs):
-    return Settings(coding_worker_enabled=True, github_token="t", **kwargs)
+    return Settings(
+        _env_file=None,
+        coding_worker_enabled=True,
+        github_token="t",
+        **kwargs,
+    )
 
 
 def _gateway(settings, agents=None, usage=None):

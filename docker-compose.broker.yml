@@ -2,20 +2,22 @@
 #
 # Usage:
 #   cp .env.broker.example .env.broker
-#   docker compose -f docker-compose.yml -f docker-compose.broker.yml up --build
+#   docker compose --env-file .env.runtime \
+#     -f docker-compose.yml -f docker-compose.broker.yml up --build
 #
 # OPENLOOP_BROKER_ROOT must be an absolute host path. The one-shot init service
 # creates the root when absent, then provisions its five children with the exact
 # distinct-uid/shared-gid ownership matrix before either long-running service
 # starts.
 #
-# TRUST PARTITION: `.env` belongs to runtime and may contain only app-side broker
-# material (BROKER_IDENTITY_PRIVATE_KEY and BROKER_RECEIPT_ROOTS). `.env.broker`
-# belongs to broker and may contain only broker-side roots/publics
+# TRUST PARTITION: `.env.runtime` belongs to runtime and may contain only
+# app-side broker material (BROKER_IDENTITY_PRIVATE_KEY and
+# BROKER_RECEIPT_ROOTS). `.env.broker` belongs to broker and may contain only
+# broker-side roots/publics
 # (BROKER_CAPABILITY_ROOTS, BROKER_RUNTIME_ROOTS,
 # BROKER_IDENTITY_PUBLIC_KEYS, BROKER_RECEIPT_PUBLIC_KEYS). The Postgres DSN is
 # intentionally present in both. Compose appends env_file values during merges,
-# so broker-side secrets must never enter `.env` in the first place.
+# so broker-side secrets must never enter `.env.runtime` in the first place.
 #
 # This override keeps Docker authority in the broker service only.
 
