@@ -42,6 +42,7 @@ from openloop.sessions import (
 from openloop.sessions.postgres import PostgresSurfaceSessionStore
 from openloop.sessions.threads import PostgresThreadRecordStore
 from openloop.tools import ToolGateway
+from openloop.tools.aliases import _canonical_action
 from openloop.sandbox import (
     HostSandbox,
     Sandbox,
@@ -49,7 +50,7 @@ from openloop.sandbox import (
 from openloop.tools.coding_worker import (
     CodingWorker,
     CodingWorkerConnector,
-    CODING_WORKER_PR_WRITE,
+    CODING_WORKER_CODE_WRITE,
     BuiltinCodingWorker,
     GitWorkspaceOrchestrator,
 )
@@ -64,10 +65,11 @@ from openloop.tools.openhands_worker import (
     OpenHandsCodingWorker,
     OpenHandsUnavailable,
 )
+from openloop.tasks.investigation import RepoInvestigator
 from openloop.usage import InMemoryUsageStore, UsageStore, WorkerSpendLedger
 from openloop.usage.postgres import PostgresUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowStore
-from openloop.workflows.coding_worker import build_coding_worker_workflow
+from openloop.workflows.coding_worker import build_workspace_task_workflow
 from openloop.workflows.postgres import PostgresWorkflowStore
 
 log = logging.getLogger("openloop")
@@ -515,10 +517,17 @@ def build_coding_worker(
 
 
 def _exposes_coding_worker(agent: Agent) -> bool:
+    # Canonicalized, mirroring policy.allowed_actions: an agent's YAML may
+    # still declare the legacy coding_worker/pr:write spelling, which must be
+    # exactly as visible to this gate as the canonical
+    # workspace_task/code:write — a raw comparison would hide a legacy-named
+    # worker-exposing agent from the boot-time fail-closed cap gate and from
+    # ledger owner attribution.
+    target = _canonical_action(f"{CodingWorkerConnector.name}.{CODING_WORKER_CODE_WRITE}")
     return any(
-        t.name == CodingWorkerConnector.name
-        and CODING_WORKER_PR_WRITE in t.permissions
+        _canonical_action(f"{t.name}.{p}") == target
         for t in agent.spec.tools
+        for p in t.permissions
     )
 
 
@@ -627,7 +636,7 @@ def build_tool_gateway(
                     "CODING WORKER DISABLED: CODING_WORKER_BACKEND=openhands "
                     "requires a fail-closed per-task spend cap. Set "
                     "spec.budget.per_task_usd on every agent exposing the "
-                    "coding_worker tool%s.",
+                    "workspace_task tool%s.",
                     (
                         f" (missing on: "
                         f"{', '.join(_uncapped_worker_agents(agents, ledger))})"
@@ -653,18 +662,25 @@ def build_tool_gateway(
                     ledger=ledger,
                     warm_pool=warm_pool,
                 )
+                # Read-only investigation profile (Task 13): its gateway
+                # param is left default so it lazily builds the real
+                # ModelGateway on first use — never constructed eagerly here.
+                investigator = RepoInvestigator(settings.coding_worker_model)
                 gateway.register(
                     CodingWorkerConnector(
-                        orchestrator, github_client, checkpoints=checkpoints
+                        orchestrator,
+                        github_client,
+                        checkpoints=checkpoints,
+                        investigator=investigator,
                     )
                 )
                 # Register the worker as a durable workflow (approval = wait
                 # node).
                 engine.register(
-                    build_coding_worker_workflow(orchestrator, github_client)
+                    build_workspace_task_workflow(orchestrator, github_client)
                 )
                 log.info(
-                    "registered native tool: coding_worker "
+                    "registered native tool: workspace_task "
                     "(backend=%s, model=%s, sandbox=%s, default_per_task_cap=%s)",
                     settings.coding_worker_backend,
                     settings.coding_worker_model,
@@ -673,7 +689,7 @@ def build_tool_gateway(
                 )
         else:
             log.info(
-                "coding_worker tool not registered: set CODING_WORKER_ENABLED=1"
+                "workspace_task tool not registered: set CODING_WORKER_ENABLED=1"
             )
     else:
         log.warning(
@@ -863,7 +879,7 @@ async def _safe_close(closeable) -> None:
 
 async def _resume_worker_jobs(tools: ToolGateway) -> None:
     """Drive the coding worker's startup reconciler, if it is registered."""
-    worker = tools._tools.get("coding_worker")
+    worker = tools._tools.get("workspace_task")
     if worker is None or not hasattr(worker, "resume_incomplete"):
         return
     try:

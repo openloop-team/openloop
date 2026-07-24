@@ -4,12 +4,17 @@ These helpers are intentionally network-free and database-free. They are used
 by OpenLoop's own tests and can also support downstream integration tests.
 """
 
+import shutil
+import tempfile
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from openloop.config import Settings
 from openloop.memory.embeddings import Embedder
 from openloop.models.gateway import ModelResponse, ToolCall
+from openloop.tasks.outcomes import EvidenceBundle
+from openloop.usage import WorkerSpendLedger
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 
 
@@ -181,6 +186,10 @@ class FakeWorkerOrchestrator:
         cost_usd: float = 0.0,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        seed_files: dict[str, str] | None = None,
+        ledger: WorkerSpendLedger | None = None,
+        investigation_summary: str = "fake investigation summary",
+        investigation_findings: str = "- (fake) no findings",
     ) -> None:
         self.title = title
         self.body = body
@@ -188,6 +197,18 @@ class FakeWorkerOrchestrator:
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
         self.runs: list = []
+        # Files written into every workspace returned by provision_readonly,
+        # so a fake investigation has something to read without a real clone.
+        self.seed_files = seed_files
+        self.readonly_provisions: list[tuple[str, str | None]] = []
+        # Optional spend ledger: when set, run_investigation brackets it the
+        # same way GitWorkspaceOrchestrator.run_investigation does — network-
+        # free, but ledger-accurate for tests that exercise spend tracking
+        # against a fake orchestrator.
+        self._ledger = ledger
+        self.investigation_summary = investigation_summary
+        self.investigation_findings = investigation_findings
+        self.investigations: list = []
 
     async def run_attempt(self, state, on_step=None):
         from openloop.tools.coding_worker import STEPS, WorkerOutcome
@@ -206,6 +227,78 @@ class FakeWorkerOrchestrator:
             prompt_tokens=self.prompt_tokens,
             completion_tokens=self.completion_tokens,
         )
+
+    async def provision_readonly(self, repo: str, ref: str | None = None) -> Path:
+        """A network-free stand-in for GitWorkspaceOrchestrator.provision_readonly.
+
+        Returns a fresh tmp dir (optionally seeded with files) instead of
+        cloning — no git, no credential, no network.
+        """
+        workspace = Path(tempfile.mkdtemp(prefix="openloop-investigate-fake-"))
+        self.readonly_provisions.append((repo, ref))
+        for name, content in (self.seed_files or {}).items():
+            (workspace / name).write_text(content)
+        return workspace
+
+    async def run_investigation(self, task, investigator=None):
+        """A network-free stand-in for GitWorkspaceOrchestrator.run_investigation.
+
+        Returns a canned ``(EvidenceBundle, ModelResponse)`` — built from this
+        fake's own ``cost_usd``/``prompt_tokens``/``completion_tokens`` and
+        ``investigation_summary``/``investigation_findings`` — instead of
+        calling ``investigator`` (which is accepted only for signature parity
+        with the real orchestrator; matches how ``run_attempt`` above never
+        touches a real worker's behavior either). Still provisions and
+        discards a real (fake) read-only workspace via ``provision_readonly``,
+        so call-recording (``readonly_provisions``) stays accurate. When a
+        ledger is set, brackets it exactly like the real
+        ``run_investigation`` — ``check_monthly`` before, ``settle`` after —
+        sourcing attribution from ``task``, so a capped agent still fails
+        closed against a fake orchestrator.
+        """
+        inputs = task.profile_state["investigate"]
+        repo = inputs["repo"]
+        ref = inputs.get("ref")
+
+        if self._ledger is not None:
+            await self._ledger.check_monthly(
+                task.agent,
+                agent_id=task.agent_id,
+                job_id=task.task_id,
+                approval_id=task.approval_id,
+                approver=task.requester_id,
+                session_id=task.session_id,
+            )
+
+        workspace = await self.provision_readonly(repo, ref)
+        try:
+            self.investigations.append(task)
+            resp = ModelResponse(
+                text="",
+                model="fake",
+                cost_usd=self.cost_usd,
+                prompt_tokens=self.prompt_tokens,
+                completion_tokens=self.completion_tokens,
+            )
+            bundle = EvidenceBundle(
+                summary=self.investigation_summary,
+                findings=self.investigation_findings,
+            )
+            if self._ledger is not None:
+                await self._ledger.settle(
+                    agent=task.agent,
+                    agent_id=task.agent_id,
+                    job_id=task.task_id,
+                    approval_id=task.approval_id,
+                    approver=task.requester_id,
+                    session_id=task.session_id,
+                    cost_usd=resp.cost_usd,
+                    prompt_tokens=resp.prompt_tokens,
+                    completion_tokens=resp.completion_tokens,
+                )
+            return bundle, resp
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
 
 
 class FakeSurfaceDelivery:

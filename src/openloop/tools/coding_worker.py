@@ -1,6 +1,6 @@
 """Native coding-worker connector — opens *draft* PRs from an instruction.
 
-Exposes a single write action, ``coding_worker.pr:write``. On execution it runs
+Exposes a single write action, ``workspace_task.code:write``. On execution it runs
 one **worker attempt** (provision a workspace → credential-free worker edit →
 commit → push) and then opens a **draft** pull request from the pushed branch.
 
@@ -56,6 +56,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from openloop.checkpoints.store import CheckpointStore, WorkerCheckpoint
 from openloop.credentials import CredentialResolver, CredentialScope
+from openloop.tasks import WorkspaceTask
+from openloop.tasks.contract import Gate, profile_for
+from openloop.tasks.investigation import (
+    INVESTIGATE_ARGS_VERSION,
+    InvestigateArgs,
+    RepoInvestigator,
+)
 from openloop.tools.base import ActionSpec, ToolResult
 from openloop.tools.github import GitHubClient
 from openloop.tools.openhands_resume import (
@@ -66,7 +73,9 @@ from openloop.tools.openhands_resume import (
 )
 
 if TYPE_CHECKING:
+    from openloop.models.gateway import ModelResponse
     from openloop.sandbox import Sandbox
+    from openloop.tasks.outcomes import EvidenceBundle
     from openloop.tools.openhands_resume import WorkspaceArtifactRef
     from openloop.tools.workspace_pool import WarmWorkspacePool
     from openloop.usage.ledger import WorkerSpendLedger
@@ -102,13 +111,19 @@ class WorkerRunAborted(RuntimeError):
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
 
-CODING_WORKER_TOOL_NAME = "coding_worker"
-CODING_WORKER_PR_WRITE = "pr:write"
+CODING_WORKER_TOOL_NAME = "workspace_task"
+CODING_WORKER_CODE_WRITE = "code:write"
+# Back-compat alias for internal references and pre-migration tests.
+CODING_WORKER_PR_WRITE = CODING_WORKER_CODE_WRITE
 CODING_WORKER_ARGS_VERSION = 1
+# Read-only investigation profile (Stage 1, gate=Gate.NONE — see
+# openloop.tasks.contract). Offered by the connector only when it is
+# constructed with a RepoInvestigator.
+CODING_WORKER_INVESTIGATE_READ = "investigate:read"
 
 
 class CodingWorkerPrArgs(BaseModel):
-    """Model-facing args for ``coding_worker.pr:write`` (typed-tool-args §3).
+    """Model-facing args for ``workspace_task.code:write`` (typed-tool-args §3).
 
     The declared schema is generated from this model and the gateway parses
     raw args through it, so normalization (strip) and constraints live in one
@@ -300,9 +315,80 @@ class AttemptRunner(Protocol):
         on_step: StepCallback | None = None,
     ) -> WorkerOutcome | WorkerPaused: ...
 
+    async def provision_readonly(self, repo: str, ref: str | None = None) -> Path: ...
+
+    async def run_investigation(
+        self, task: "WorkspaceTask", investigator: RepoInvestigator
+    ) -> tuple["EvidenceBundle", "ModelResponse"]: ...
+
 
 def _branch_for(job_id: str) -> str:
     return f"openloop/job-{job_id}"
+
+
+def _worker_state_for_task(
+    task: WorkspaceTask, *, lift_legacy_progress: bool = False
+) -> WorkerState:
+    """Reconstruct the unchanged code-profile shadow behind WorkspaceTask.
+
+    Shared identity comes from the task core. ``lift_legacy_progress`` is used
+    only by the workflow reader to migrate rows written during the partial
+    convergence window, when completed steps and budget were updated solely in
+    the nested worker blob.
+    """
+    code_state = task.profile_state.get("code")
+    if not isinstance(code_state, dict):
+        raise ValueError("code WorkspaceTask is missing profile_state['code']")
+    worker_data = code_state.get("worker_state")
+    if not isinstance(worker_data, dict):
+        raise ValueError("code WorkspaceTask is missing its worker_state")
+
+    state = WorkerState.from_dict(worker_data)
+    if lift_legacy_progress:
+        if not task.completed_steps and state.completed_steps:
+            task.completed_steps = list(state.completed_steps)
+        if task.budget_usd is None and worker_data.get("budget_usd") is not None:
+            task.budget_usd = worker_data["budget_usd"]
+
+    state.job_id = task.task_id
+    state.agent = task.agent
+    state.agent_id = task.agent_id
+    state.requester_id = task.requester_id
+    state.approval_id = task.approval_id
+    state.session_id = task.session_id
+    state.warm_key = task.warm_key
+    state.completed_steps = list(task.completed_steps)
+    state.budget_usd = task.budget_usd
+    for key in ("repo", "instruction", "base"):
+        value = code_state.get(key)
+        if value is not None:
+            setattr(state, key, value)
+    return state
+
+
+def _sync_worker_state_to_task(task: WorkspaceTask, state: WorkerState) -> None:
+    """Persist worker mutations without yielding core-owned identity."""
+    state.job_id = task.task_id
+    state.agent = task.agent
+    state.agent_id = task.agent_id
+    state.requester_id = task.requester_id
+    state.approval_id = task.approval_id
+    state.session_id = task.session_id
+    state.warm_key = task.warm_key
+
+    task.completed_steps = list(state.completed_steps)
+    if state.budget_usd is not None:
+        task.budget_usd = state.budget_usd
+    state.budget_usd = task.budget_usd
+    code_state = task.profile_state.setdefault("code", {})
+    code_state.update(
+        {
+            "repo": state.repo,
+            "instruction": state.instruction,
+            "base": state.base,
+            "worker_state": state.to_dict(),
+        }
+    )
 
 
 def _failed(
@@ -337,6 +423,14 @@ def _opened_result(cp: WorkerCheckpoint) -> ToolResult:
             "pr_url": cp.pr_url,
             "completed_steps": cp.completed_steps,
             "resumed": True,
+            "outcome": {
+                "kind": "pull_request",
+                "repo": cp.repo,
+                "branch": cp.branch,
+                "pr_number": cp.pr_number,
+                "pr_url": cp.pr_url,
+                "summary": f"draft PR #{cp.pr_number} already open in {cp.repo}",
+            },
         },
     )
 
@@ -369,21 +463,43 @@ def _pr_body(body: str, job_id: str) -> str:
     return f"{body}\n\n{footer}" if body else footer
 
 
+def _pull_request_outcome(state: "WorkerState", pull: dict, summary: str) -> dict:
+    """Build a typed PullRequest outcome for the result data."""
+    return {
+        "kind": "pull_request",
+        "repo": state.repo,
+        "branch": state.branch,
+        "pr_number": pull.get("number"),
+        "pr_url": pull.get("html_url"),
+        "summary": summary,
+    }
+
+
 class CodingWorkerConnector:
-    """Maps ``coding_worker.pr:write`` onto an attempt runner + :class:`GitHubClient`."""
+    """Maps ``workspace_task.code:write`` onto an attempt runner + :class:`GitHubClient`.
+
+    When constructed with a :class:`RepoInvestigator`, it also serves
+    ``workspace_task.investigate:read`` — a read-only, ungated repository
+    investigation (Stage 1 profile #2). That profile has ``gate=Gate.NONE``
+    (see :mod:`openloop.tasks.contract`), so the gateway never creates an
+    approval for it and always falls straight through to :meth:`execute`: the
+    investigation runs synchronously in the connector, never as a durable
+    workflow, and its result flows back through the model tool-loop.
+    """
 
     name = CODING_WORKER_TOOL_NAME
     # When the gateway has a WorkflowEngine, this action runs as a durable
     # workflow (approval = wait node). Without one, execute() below is the Phase B
     # fallback path (checkpoint-based resume). Kept in sync with WORKFLOW_NAME in
     # openloop.workflows.coding_worker.
-    workflow = "coding_worker"
+    workflow = "workspace_task"
 
     def __init__(
         self,
         orchestrator: AttemptRunner,
         github: GitHubClient,
         checkpoints: "CheckpointStore | None" = None,
+        investigator: "RepoInvestigator | None" = None,
     ) -> None:
         # The orchestrator owns provision → worker → commit → push (and the git
         # credential); this connector never sees a worker that could push.
@@ -391,9 +507,27 @@ class CodingWorkerConnector:
         self.github = github
         # Optional: when set, jobs are checkpointed per step and resume on crash.
         self.checkpoints = checkpoints
+        # Optional: when set, investigate:read is offered (see
+        # supported_permissions) and served by this same connector.
+        self.investigator = investigator
 
     def supported_permissions(self) -> set[str]:
-        return {CODING_WORKER_PR_WRITE}
+        perms = {CODING_WORKER_CODE_WRITE}
+        if self.investigator is not None:
+            perms.add(CODING_WORKER_INVESTIGATE_READ)
+        return perms
+
+    def requires_approval_for(self, permission: str) -> bool:
+        """The profile's gate as a mandatory floor.
+
+        The gateway ORs this into its approval condition alongside the
+        agent's own ``require_for`` — an agent may add gating an unlisted
+        permission never loses, but it can never subtract this floor.
+        ``code:write`` is ``Gate.START`` (must always gate); ``investigate:read``
+        is ``Gate.NONE`` (never forced to gate by the connector itself).
+        """
+        prof = profile_for(permission)
+        return prof is not None and prof.gate is Gate.START
 
     def prepare_args(
         self,
@@ -421,8 +555,28 @@ class CodingWorkerConnector:
         - stamps the originating ``session_id`` (step 5) so worker spend traces
           to the surface session it was invoked from. Gateway-supplied only,
           like ``warm_key``; a model-supplied value is ignored.
+
+        ``investigate:read`` stamps ``profile="investigate"`` (the workflow
+        dispatch key) plus a ``job_id``/``agent``/``agent_id``/``session_id``
+        the same way, so the identity threads through the same fields even
+        though this profile never becomes a durable workflow or approval in
+        Stage 1. It ignores ``warm_key`` — investigation always provisions a
+        fresh ephemeral checkout, never a thread's warm workspace.
         """
-        if permission != CODING_WORKER_PR_WRITE:
+        if permission == CODING_WORKER_INVESTIGATE_READ:
+            args = {**args, "profile": "investigate"}
+            if not args.get("job_id"):
+                args = {**args, "job_id": uuid.uuid4().hex[:12]}
+            if agent is not None:
+                args = {
+                    **args,
+                    "agent": agent.metadata.name,
+                    "agent_id": agent.metadata.id,
+                }
+            if session_id:
+                args = {**args, "session_id": session_id}
+            return args
+        if permission != CODING_WORKER_CODE_WRITE:
             return args
         # Normalization (strip) now lives in CodingWorkerPrArgs' validators —
         # the gateway parses raw args through it before calling here, so this
@@ -446,6 +600,15 @@ class CodingWorkerConnector:
     def describe(self, permission: str) -> ActionSpec:
         # Generated from the args model the gateway parses with — declaration
         # and enforcement cannot drift.
+        if permission == CODING_WORKER_INVESTIGATE_READ:
+            return ActionSpec(
+                "Investigate a repository read-only to answer a question. "
+                "Returns an evidence bundle (a summary plus findings cited as "
+                "path:line); makes no code changes and opens no pull request.",
+                InvestigateArgs.model_json_schema(),
+                model=InvestigateArgs,
+                version=INVESTIGATE_ARGS_VERSION,
+            )
         return ActionSpec(
             "Run the coding worker on an instruction and open a draft pull "
             "request with its changes. This starts the worker and opens a draft "
@@ -455,8 +618,66 @@ class CodingWorkerConnector:
             version=CODING_WORKER_ARGS_VERSION,
         )
 
+    @staticmethod
+    def _new_code_task(
+        args: dict, *, job_id: str, base: str
+    ) -> tuple[WorkspaceTask, WorkerState]:
+        """Build the authoritative task and its code-profile working adapter."""
+        state = WorkerState(
+            job_id=job_id,
+            repo=args["repo"],
+            instruction=args["instruction"],
+            base=base,
+            branch=_branch_for(job_id),
+            agent=args.get("agent"),
+            agent_id=args.get("agent_id"),
+            requester_id=args.get("approved_by"),
+            approval_id=args.get("approval_id"),
+            session_id=args.get("session_id"),
+            warm_key=args.get("warm_key"),
+        )
+        task = WorkspaceTask(
+            task_id=job_id,
+            profile="code",
+            entry_action=CODING_WORKER_CODE_WRITE,
+            agent=state.agent,
+            agent_id=state.agent_id,
+            requester_id=state.requester_id,
+            approval_id=state.approval_id,
+            session_id=state.session_id,
+            warm_key=state.warm_key,
+            profile_state={
+                "code": {
+                    "repo": state.repo,
+                    "instruction": state.instruction,
+                    "base": state.base,
+                    "worker_state": state.to_dict(),
+                }
+            },
+        )
+        return task, state
+
+    @staticmethod
+    def _load_code_task(
+        data: dict, *, expected_task_id: str | None = None
+    ) -> tuple[WorkspaceTask, WorkerState]:
+        task = WorkspaceTask.from_dict(data)
+        if task.profile != "code" or task.entry_action != CODING_WORKER_CODE_WRITE:
+            raise ValueError(
+                "checkpoint has unexpected task contract "
+                f"{task.profile!r}/{task.entry_action!r}"
+            )
+        if expected_task_id is not None and task.task_id != expected_task_id:
+            raise ValueError(
+                f"checkpoint task_id {task.task_id!r} does not match "
+                f"row id {expected_task_id!r}"
+            )
+        return task, _worker_state_for_task(task)
+
     async def execute(self, permission: str, args: dict) -> ToolResult:
-        if permission != CODING_WORKER_PR_WRITE:
+        if permission == CODING_WORKER_INVESTIGATE_READ:
+            return await self._execute_investigate(args)
+        if permission != CODING_WORKER_CODE_WRITE:
             return ToolResult(ok=False, summary=f"unsupported permission {permission}")
 
         job_id = args.get("job_id") or uuid.uuid4().hex[:12]
@@ -470,21 +691,22 @@ class CodingWorkerConnector:
             return _opened_result(cp)
 
         if cp is not None:
-            state = WorkerState.from_dict(cp.state_json)
+            try:
+                task, state = self._load_code_task(
+                    cp.state_json, expected_task_id=job_id
+                )
+            except Exception as exc:  # noqa: BLE001 — reject malformed durable state
+                return ToolResult(
+                    ok=False,
+                    summary=f"coding worker job {job_id} failed: {exc}",
+                    data={
+                        "job_id": job_id,
+                        "status": "failed",
+                        "error": str(exc),
+                    },
+                )
         else:
-            state = WorkerState(
-                job_id=job_id,
-                repo=args["repo"],
-                instruction=args["instruction"],
-                base=base,
-                branch=_branch_for(job_id),
-                agent=args.get("agent"),
-                agent_id=args.get("agent_id"),
-                requester_id=args.get("approved_by"),
-                approval_id=args.get("approval_id"),
-                session_id=args.get("session_id"),
-                warm_key=args.get("warm_key"),
-            )
+            task, state = self._new_code_task(args, job_id=job_id, base=base)
 
         resume = state.openhands_resume
         if resume is not None and resume.status == "parked":
@@ -498,7 +720,7 @@ class CodingWorkerConnector:
             # The workspace is ephemeral, so local steps (clone…commit) can't
             # resume from a crash — only the push survives. Run a fresh attempt.
             state.completed_steps = []
-            await self._save(state, "running")
+            await self._save(task, state, "running")
             try:
                 if resume is not None and resume.status in {
                     "finalizing",
@@ -512,30 +734,34 @@ class CodingWorkerConnector:
                             raise OpenHandsResumeError(
                                 "finalizing OpenHands recovery is unavailable"
                             )
-                        await reconcile(state, on_step=self._checkpointer())
+                        await reconcile(
+                            state, on_step=self._checkpointer(task)
+                        )
                     deliver = getattr(self.orchestrator, "deliver_terminal", None)
                     if deliver is None:
                         raise OpenHandsResumeError(
                             "terminal OpenHands recovery is unavailable"
                         )
-                    outcome = await deliver(state, on_step=self._checkpointer())
+                    outcome = await deliver(
+                        state, on_step=self._checkpointer(task)
+                    )
                 elif resume is not None:
                     raise OpenHandsResumeError(
                         f"active OpenHands {resume.status} segment cannot be replayed"
                     )
                 else:
                     outcome = await self.orchestrator.run_attempt(
-                        state, on_step=self._checkpointer()
+                        state, on_step=self._checkpointer(task)
                     )
             except Exception as exc:  # noqa: BLE001
-                await self._save(state, "failed", error=str(exc))
+                await self._save(task, state, "failed", error=str(exc))
                 return _failed(job_id, state, "failed", exc)
             if isinstance(outcome, WorkerPaused):
-                await self._save(state, "parked")
+                await self._save(task, state, "parked")
                 return _parked_result(state)
             state.title, state.body = outcome.title, outcome.body
             cost = (outcome.cost_usd, outcome.prompt_tokens, outcome.completion_tokens)
-            await self._save(state, "pushed")
+            await self._save(task, state, "pushed")
         else:
             # Branch already pushed in an earlier run; just (re)open the PR.
             outcome = WorkerOutcome(
@@ -547,16 +773,21 @@ class CodingWorkerConnector:
         try:
             pull = await self._open_pr(state, outcome)
         except Exception as exc:  # noqa: BLE001
-            await self._save(state, "open_pr_failed", error=str(exc))
+            await self._save(task, state, "open_pr_failed", error=str(exc))
             return _failed(job_id, state, "open_pr_failed", exc)
 
         await self._save(
-            state, "opened", pr_number=pull.get("number"), pr_url=pull.get("html_url")
+            task,
+            state,
+            "opened",
+            pr_number=pull.get("number"),
+            pr_url=pull.get("html_url"),
         )
         cleanup = getattr(self.orchestrator, "cleanup_attempt", None)
         if cleanup is not None and state.openhands_resume is not None:
-            await cleanup(state, on_step=self._checkpointer())
+            await cleanup(state, on_step=self._checkpointer(task))
             await self._save(
+                task,
                 state,
                 "opened",
                 pr_number=pull.get("number"),
@@ -583,6 +814,113 @@ class CodingWorkerConnector:
                     "push": state.push_key(),
                     "open_pr": state.open_pr_key(),
                 },
+                "outcome": _pull_request_outcome(
+                    state, pull, f"opened draft PR #{pull.get('number')} in {state.repo}"
+                ),
+            },
+        )
+
+    async def _execute_investigate(self, args: dict) -> ToolResult:
+        """Run one read-only investigation and return its evidence bundle.
+
+        Ungated (``gate=Gate.NONE``): the gateway never creates an approval or
+        a workflow instance for this permission, so this is the whole Stage 1
+        delivery path for ``investigate:read`` — the result flows back through
+        the model tool-loop, never through a durable workflow. Builds a
+        :class:`WorkspaceTask` — never a :class:`WorkerState`, and its
+        ``profile_state`` holds only the investigate inputs (no ``"code"``
+        key) — and delegates the whole run to
+        :meth:`GitWorkspaceOrchestrator.run_investigation`, which owns
+        provisioning the read-only workspace, calling the investigator, and
+        bracketing the investigation's model spend through the ledger exactly
+        the way ``run_attempt`` brackets a coding-worker attempt's spend
+        (contract-convergence gap #4 — investigation spend used to be
+        untracked and uncapped). It opens no PR and pushes nothing; failures
+        (including an over-cap budget refusal) are reported as a failed
+        :class:`ToolResult`, never raised, matching every other execute() path
+        in this connector.
+        """
+        job_id = args.get("job_id") or uuid.uuid4().hex[:12]
+
+        # Validate required args defensively — never raise KeyError out of execute()
+        repo = args.get("repo")
+        question = args.get("question")
+        if not repo or not question:
+            return ToolResult(
+                ok=False,
+                summary="invalid arguments for investigate:read: repo and question are required",
+                data={
+                    "job_id": job_id,
+                    "status": "failed",
+                    "error": "invalid arguments for investigate:read: repo and question are required",
+                },
+            )
+
+        if self.investigator is None:
+            return ToolResult(
+                ok=False,
+                summary=(
+                    f"investigation job {job_id} failed: no investigator configured"
+                ),
+                data={
+                    "job_id": job_id,
+                    "status": "failed",
+                    "repo": repo,
+                    "error": "no investigator configured",
+                },
+            )
+
+        # The same identity fields execute()'s code:write path threads into
+        # WorkerState (agent/agent_id/session_id/approval_id/requester_id),
+        # carried here into a WorkspaceTask instead. warm_key is deliberately
+        # never read — an investigation always provisions a fresh ephemeral
+        # checkout, never a thread's warm workspace (see prepare_args).
+        task = WorkspaceTask(
+            task_id=job_id,
+            profile="investigate",
+            entry_action=CODING_WORKER_INVESTIGATE_READ,
+            agent=args.get("agent"),
+            agent_id=args.get("agent_id"),
+            approval_id=args.get("approval_id"),
+            requester_id=args.get("approved_by"),
+            session_id=args.get("session_id"),
+            profile_state={
+                "investigate": {
+                    "repo": repo,
+                    "question": question,
+                    "ref": args.get("ref"),
+                }
+            },
+        )
+
+        try:
+            bundle, resp = await self.orchestrator.run_investigation(
+                task, self.investigator
+            )
+        except Exception as exc:  # noqa: BLE001 — never raise out of execute()
+            return ToolResult(
+                ok=False,
+                summary=f"investigation job {job_id} failed: {exc}",
+                data={
+                    "job_id": job_id,
+                    "status": "failed",
+                    "repo": repo,
+                    "error": str(exc),
+                },
+            )
+        return ToolResult(
+            ok=True,
+            summary=bundle.summary,
+            data={
+                "outcome": {
+                    "kind": "evidence_bundle",
+                    "summary": bundle.summary,
+                    "findings": bundle.findings,
+                },
+                "job_id": job_id,
+                "cost_usd": resp.cost_usd,
+                "prompt_tokens": resp.prompt_tokens,
+                "completion_tokens": resp.completion_tokens,
             },
         )
 
@@ -598,22 +936,25 @@ class CodingWorkerConnector:
         if cp.status == "opened":
             return _opened_result(cp)
         try:
-            state = WorkerState.from_dict(cp.state_json)
+            task, state = self._load_code_task(
+                cp.state_json, expected_task_id=job_id
+            )
             resume = state.openhands_resume
             if resume is None or resume.status != "parked":
                 raise OpenHandsResumeError("coding worker job is not awaiting a decision")
             outcome = await self.orchestrator.resume_attempt(
                 state,
                 decision,
-                on_step=self._checkpointer(),
+                on_step=self._checkpointer(task),
             )
             if isinstance(outcome, WorkerPaused):
-                await self._save(state, "parked")
+                await self._save(task, state, "parked")
                 return _parked_result(state)
             state.title, state.body = outcome.title, outcome.body
-            await self._save(state, "pushed")
+            await self._save(task, state, "pushed")
             pull = await self._open_pr(state, outcome)
             await self._save(
+                task,
                 state,
                 "opened",
                 pr_number=pull.get("number"),
@@ -621,8 +962,9 @@ class CodingWorkerConnector:
             )
             cleanup = getattr(self.orchestrator, "cleanup_attempt", None)
             if cleanup is not None:
-                await cleanup(state, on_step=self._checkpointer())
+                await cleanup(state, on_step=self._checkpointer(task))
                 await self._save(
+                    task,
                     state,
                     "opened",
                     pr_number=pull.get("number"),
@@ -648,8 +990,9 @@ class CodingWorkerConnector:
             )
         except Exception as exc:  # noqa: BLE001
             state = locals().get("state")
-            if isinstance(state, WorkerState):
-                await self._save(state, "failed", error=str(exc))
+            task = locals().get("task")
+            if isinstance(state, WorkerState) and isinstance(task, WorkspaceTask):
+                await self._save(task, state, "failed", error=str(exc))
                 return _failed(job_id, state, "failed", exc)
             return ToolResult(ok=False, summary=f"coding worker job {job_id} failed: {exc}")
 
@@ -708,12 +1051,33 @@ class CodingWorkerConnector:
         for cp in await self.checkpoints.recent(limit=1000):
             if cp.status in self._LEGACY_TERMINAL:
                 continue
-            if isinstance(cp.state_json, dict) and cp.state_json.get(
-                "openhands_resume"
-            ) is not None:
-                state: WorkerState | None = None
+            if not isinstance(cp.state_json, dict):
+                logger.error(
+                    "quarantining coding-worker checkpoint %s: versioned or "
+                    "malformed state requires a typed reconciler (status=%s)",
+                    cp.job_id,
+                    cp.status,
+                )
+                continue
+
+            task: WorkspaceTask | None = None
+            state: WorkerState | None = None
+            try:
+                task, state = self._load_code_task(
+                    cp.state_json, expected_task_id=cp.job_id
+                )
+            except Exception as exc:  # noqa: BLE001 — quarantine durable state
+                logger.error(
+                    "quarantining coding-worker checkpoint %s: malformed "
+                    "state requires a typed reconciler (%s)",
+                    cp.job_id,
+                    exc,
+                )
+                continue
+
+            worker_data = task.profile_state["code"]["worker_state"]
+            if state.openhands_resume is not None:
                 try:
-                    state = WorkerState.from_dict(cp.state_json)
                     resume = state.openhands_resume
                     assert resume is not None
                     if resume.status in {"parked", "cleaned"}:
@@ -726,13 +1090,15 @@ class CodingWorkerConnector:
                             raise OpenHandsResumeError(
                                 "OpenHands parking reconciler is unavailable"
                             )
-                        await reconcile(state, on_step=self._checkpointer())
-                        await self._save(state, "parked")
+                        await reconcile(
+                            state, on_step=self._checkpointer(task)
+                        )
+                        await self._save(task, state, "parked")
                         resumed.append(cp.job_id)
                         continue
                     if resume.status in {"finalizing", "terminal"}:
                         await self.execute(
-                            "pr:write",
+                            CODING_WORKER_CODE_WRITE,
                             {
                                 "job_id": cp.job_id,
                                 "repo": cp.repo,
@@ -753,11 +1119,11 @@ class CodingWorkerConnector:
                         cp.job_id,
                         exc,
                     )
-                    if state is not None:
-                        await self._save(state, "failed", error=str(exc))
+                    await self._save(task, state, "failed", error=str(exc))
                     continue
-            if not isinstance(cp.state_json, dict) or (
-                self._VERSIONED_STATE_KEYS.intersection(cp.state_json)
+            if any(
+                worker_data.get(key) is not None
+                for key in self._VERSIONED_STATE_KEYS
             ):
                 logger.error(
                     "quarantining coding-worker checkpoint %s: versioned or "
@@ -776,7 +1142,7 @@ class CodingWorkerConnector:
                 continue
             logger.info("resuming coding-worker job %s (was %s)", cp.job_id, cp.status)
             await self.execute(
-                "pr:write",
+                CODING_WORKER_CODE_WRITE,
                 {
                     "job_id": cp.job_id,
                     "repo": cp.repo,
@@ -787,7 +1153,7 @@ class CodingWorkerConnector:
             resumed.append(cp.job_id)
         return resumed
 
-    def _checkpointer(self) -> StepCallback | None:
+    def _checkpointer(self, task: WorkspaceTask) -> StepCallback | None:
         """A per-step callback that persists progress, or None when no store."""
         if self.checkpoints is None:
             return None
@@ -798,12 +1164,13 @@ class CodingWorkerConnector:
                 if state.openhands_resume is not None
                 else "running"
             )
-            await self._save(state, status)
+            await self._save(task, state, status)
 
         return on_step
 
     async def _save(
         self,
+        task: WorkspaceTask,
         state: WorkerState,
         status: str,
         *,
@@ -811,6 +1178,7 @@ class CodingWorkerConnector:
         pr_url: str | None = None,
         error: str | None = None,
     ) -> None:
+        _sync_worker_state_to_task(task, state)
         if self.checkpoints is None:
             return
         await self.checkpoints.upsert(
@@ -822,7 +1190,7 @@ class CodingWorkerConnector:
                 branch=state.branch,
                 status=status,
                 completed_steps=list(state.completed_steps),
-                state_json=state.to_dict(),
+                state_json=task.to_dict(),
                 title=state.title,
                 body=state.body,
                 pr_number=pr_number,
@@ -1094,6 +1462,107 @@ class GitWorkspaceOrchestrator:
             if lease is not None:
                 await lease.release()
             else:
+                shutil.rmtree(workspace, ignore_errors=True)
+
+    async def provision_readonly(self, repo: str, ref: str | None = None) -> Path:
+        """A credentialed, read-only shallow clone for investigation.
+
+        Reuses exactly the clone step ``run_attempt`` uses to provision a
+        fresh workspace on its cold path (never the mutable warm pool — an
+        investigation is a one-off read and must not touch a thread's kept
+        checkout) but stops there: no job branch is created, nothing is
+        committed, and nothing is ever pushed. As with every git operation
+        this orchestrator runs, the credential rides an ephemeral
+        ``http.extraHeader`` on the one clone command and is never written
+        into the workspace's ``.git/config`` — the returned workspace is
+        exactly as credential-free as a worker's prepared checkout. The
+        caller owns the workspace's lifetime (best-effort cleanup, mirroring
+        how a worker attempt discards its own ephemeral checkout).
+        """
+        token = await self._credentials.resolve(self._scope)
+        if self._workspace_root is not None:
+            self._workspace_root.mkdir(parents=True, exist_ok=True)
+        workspace = Path(
+            tempfile.mkdtemp(
+                prefix="openloop-investigate-", dir=self._workspace_root
+            )
+        )
+        try:
+            await self._git(
+                *_auth_config(token),
+                "clone", "--depth", "1", "--branch", ref or "main",
+                f"{self._remote_base}/{repo}.git", str(workspace),
+                redact=_auth_secrets(token),
+            )
+        except BaseException:
+            shutil.rmtree(workspace, ignore_errors=True)
+            raise
+        return workspace
+
+    async def run_investigation(
+        self, task: "WorkspaceTask", investigator: RepoInvestigator
+    ) -> tuple["EvidenceBundle", "ModelResponse"]:
+        """Run one read-only investigation with the same spend bracket
+        ``run_attempt`` gives a coding-worker attempt (contract-convergence
+        gap #4: investigation spend was untracked and uncapped).
+
+        Reads ``repo``/``question``/``ref`` from
+        ``task.profile_state["investigate"]``. With a ledger wired, the
+        invoking agent's monthly budget gates the call *before* any work —
+        mirroring ``run_attempt``'s pre-attempt ``check_monthly`` — and the
+        investigation's model spend is settled against that agent's per-task
+        cap right after the completion returns, exactly where ``run_attempt``
+        settles before its push/PR boundary. An over-cap investigation raises
+        :class:`~openloop.usage.ledger.WorkerBudgetExceeded` out of
+        ``settle()`` — never swallowed here, so it fails the caller closed —
+        and no evidence is returned. Without a ledger this runs unbracketed,
+        at parity with ``run_attempt``. The read-only workspace is always
+        discarded in ``finally``, whether the call succeeds, the investigator
+        raises, or settle raises over-cap.
+        """
+        inputs = task.profile_state["investigate"]
+        repo = inputs["repo"]
+        question = inputs["question"]
+        ref = inputs.get("ref")
+
+        if self._ledger is not None:
+            await self._ledger.check_monthly(
+                task.agent,
+                agent_id=task.agent_id,
+                job_id=task.task_id,
+                approval_id=task.approval_id,
+                approver=task.requester_id,
+                session_id=task.session_id,
+            )
+            # Observability parity with run_attempt's state.budget_usd stamp;
+            # enforcement still happens in settle() below, not by reading this
+            # back.
+            task.budget_usd = self._ledger.per_task_usd_for(
+                task.agent, task.agent_id
+            )
+
+        workspace: Path | None = None
+        try:
+            workspace = await self.provision_readonly(repo, ref)
+            bundle, resp = await investigator.investigate(workspace, question, repo)
+            if self._ledger is not None:
+                await self._ledger.settle(
+                    agent=task.agent,
+                    agent_id=task.agent_id,
+                    job_id=task.task_id,
+                    approval_id=task.approval_id,
+                    approver=task.requester_id,
+                    session_id=task.session_id,
+                    cost_usd=resp.cost_usd,
+                    prompt_tokens=resp.prompt_tokens,
+                    completion_tokens=resp.completion_tokens,
+                )
+            return bundle, resp
+        finally:
+            # Best-effort, mirroring how a worker attempt discards its
+            # ephemeral workspace — this checkout is read-only and never
+            # reused across turns.
+            if workspace is not None:
                 shutil.rmtree(workspace, ignore_errors=True)
 
     async def resume_attempt(

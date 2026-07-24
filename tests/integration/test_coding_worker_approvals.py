@@ -149,7 +149,7 @@ async def test_tool_loop_holds_coding_worker_for_approval():
     model = ScriptedGateway([
         tool_call_response(
             "m",
-            [("c1", "coding_worker_pr_write",
+            [("c1", "workspace_task_code_write",
               {"repo": "acme/x", "instruction": "add retries"})],
         ),
     ])

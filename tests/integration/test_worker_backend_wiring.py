@@ -15,8 +15,11 @@ from openloop.agents import load_agent
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.config import Settings
+from openloop.models.gateway import ModelResponse
+from openloop.tasks.investigation import RepoInvestigator
+from openloop.tasks.outcomes import EvidenceBundle
 from openloop.tools.claude_worker import ClaudeCodeCodingWorker
-from openloop.tools.coding_worker import BuiltinCodingWorker
+from openloop.tools.coding_worker import BuiltinCodingWorker, GitWorkspaceOrchestrator
 from openloop.tools.openhands_worker import (
     OpenHandsCodingWorker,
     OpenHandsUnavailable,
@@ -52,7 +55,7 @@ def _gateway(settings, agents=None, usage=None, broker_handle=None):
 def test_default_backend_is_the_builtin_diff_worker_with_ledger_attached():
     gateway = _gateway(_settings())
 
-    connector = gateway._tools["coding_worker"]
+    connector = gateway._tools["workspace_task"]
     orchestrator = connector.orchestrator
     assert isinstance(orchestrator.worker, BuiltinCodingWorker)
     # The ledger rides along on the default backend too: spend is recorded
@@ -74,7 +77,7 @@ def test_retired_backend_names_fail_closed(retired, caplog):
     with caplog.at_level("ERROR"):
         gateway = _gateway(_settings(coding_worker_backend=retired))
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "unknown CODING_WORKER_BACKEND" in caplog.text
     assert "expected builtin|openhands|claude" in caplog.text
 
@@ -82,7 +85,7 @@ def test_retired_backend_names_fail_closed(retired, caplog):
 def test_unknown_backend_fails_closed(caplog):
     with caplog.at_level("ERROR"):
         gateway = _gateway(_settings(coding_worker_backend="opnhands"))
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "unknown CODING_WORKER_BACKEND" in caplog.text
     assert "expected builtin|openhands|claude" in caplog.text
     assert "CODING WORKER DISABLED" in caplog.text
@@ -102,7 +105,7 @@ def test_openhands_docker_requires_external_broker(monkeypatch, tmp_path, caplog
             )
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "external broker" in caplog.text
 
 
@@ -121,7 +124,7 @@ def test_openhands_docker_rejects_coprocess_broker_handle(monkeypatch, tmp_path,
             broker_handle=object(),
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "BROKER_MODE=external" in caplog.text
 
 
@@ -137,7 +140,7 @@ def test_openhands_docker_without_external_broker_fails_before_state_setup(
             )
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "external broker" in caplog.text
 
 
@@ -154,7 +157,7 @@ def test_rejected_docker_topology_does_not_log_state_secret(monkeypatch, caplog,
             )
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "external broker" in caplog.text
     assert invalid_secret not in caplog.text
 
@@ -170,7 +173,7 @@ def test_openhands_cold_resume_refuses_host_mode(monkeypatch, caplog):
             )
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "cold resume requires" in caplog.text
 
 
@@ -194,7 +197,7 @@ def test_openhands_without_per_task_cap_fails_closed(monkeypatch, caplog):
             agents={"dev-platform": agent},
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "CODING WORKER DISABLED" in caplog.text
     assert "per_task_usd" in caplog.text
 
@@ -218,21 +221,21 @@ def test_openhands_requires_a_cap_on_every_worker_agent(monkeypatch, caplog):
             agents={"dev-platform": capped, "docs-bot": uncapped},
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "CODING WORKER DISABLED" in caplog.text
     assert "docs-bot" in caplog.text  # the gate names the offender
 
 
 def test_openhands_ignores_uncapped_agent_without_worker_action(monkeypatch):
     # Tool name alone is not enough: only agents that can invoke
-    # coding_worker.pr:write need a cap and can become the fallback owner.
+    # workspace_task.code:write need a cap and can become the fallback owner.
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
     capped = load_agent(AGENT_YAML)
     observer = load_agent(AGENT_YAML)
     observer.metadata.name = "docs-bot"
     observer.spec.budget.per_task_usd = None
     for tool in observer.spec.tools:
-        if tool.name == "coding_worker":
+        if tool.name == "workspace_task":
             tool.permissions = []
 
     gateway = _gateway(
@@ -243,8 +246,22 @@ def test_openhands_ignores_uncapped_agent_without_worker_action(monkeypatch):
         agents={"docs-bot": observer, "dev-platform": capped},
     )
 
-    connector = gateway._tools["coding_worker"]
+    connector = gateway._tools["workspace_task"]
     assert connector.orchestrator._ledger.default_agent == "dev-platform"
+
+
+def test_exposes_coding_worker_detects_legacy_yaml_tool_name():
+    # `_exposes_coding_worker` backs both the boot-time fail-closed cap gate
+    # (`_uncapped_worker_agents`) and ledger owner attribution. It must be
+    # alias-aware: an agent whose YAML still declares the pre-rename
+    # coding_worker/pr:write spelling (never migrated) is exactly as real a
+    # worker-exposing agent as one spelled workspace_task/code:write, and a
+    # raw (non-canonicalizing) name+permission comparison would make it
+    # invisible to the gate — the exact bug this pins against a regression.
+    legacy_agent = load_agent(
+        Path(__file__).parents[1] / "unit" / "data" / "agent.yaml"
+    )
+    assert appmod._exposes_coding_worker(legacy_agent) is True
 
 
 def test_openhands_without_usage_store_fails_closed(monkeypatch, caplog):
@@ -263,7 +280,7 @@ def test_openhands_without_usage_store_fails_closed(monkeypatch, caplog):
             WorkflowEngine(InMemoryWorkflowStore()),
             usage=None,
         )
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "CODING WORKER DISABLED" in caplog.text
 
 
@@ -279,7 +296,7 @@ def test_openhands_probe_failure_fails_closed(monkeypatch, caplog):
                 coding_worker_openhands_cold_resume_enabled=False,
             )
         )
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "openhands backend probe failed" in caplog.text
     assert "CODING WORKER DISABLED" in caplog.text
 
@@ -301,7 +318,7 @@ def test_openhands_relay_probe_failure_disables_only_coding_worker(
             )
         )
 
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "github" in gateway._tools
     assert "openhands backend probe failed" in caplog.text
     assert "native OpenHands relay compatibility check failed" in caplog.text
@@ -315,7 +332,7 @@ def test_openhands_with_sandbox_typo_fails_closed(monkeypatch, caplog):
                 coding_worker_backend="openhands", coding_worker_sandbox="dokcer"
             )
         )
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "unknown CODING_WORKER_SANDBOX" in caplog.text
 
 
@@ -323,7 +340,7 @@ def test_claude_registers_in_host_mode(monkeypatch):
     monkeypatch.setattr(ClaudeCodeCodingWorker, "probe", lambda self: None)
     gateway = _gateway(_settings(coding_worker_backend="claude"))
 
-    worker = gateway._tools["coding_worker"].orchestrator.worker
+    worker = gateway._tools["workspace_task"].orchestrator.worker
     assert isinstance(worker, ClaudeCodeCodingWorker)
     # --max-turns + the deadline are threaded from settings as the fail-closed
     # bound; the deadline default (600) is passed through, not disabled.
@@ -339,7 +356,7 @@ def test_claude_docker_mode_fails_closed(monkeypatch, caplog):
         gateway = _gateway(
             _settings(coding_worker_backend="claude", coding_worker_sandbox="docker")
         )
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "supports only CODING_WORKER_SANDBOX=host" in caplog.text
     assert "CODING WORKER DISABLED" in caplog.text
 
@@ -357,8 +374,8 @@ def test_claude_registers_without_a_per_task_dollar_cap(monkeypatch):
         agents={"dev-platform": uncapped},
     )
 
-    assert "coding_worker" in gateway._tools
-    assert gateway._tools["coding_worker"].orchestrator._ledger is not None
+    assert "workspace_task" in gateway._tools
+    assert gateway._tools["workspace_task"].orchestrator._ledger is not None
 
 
 def test_claude_probe_failure_fails_closed(monkeypatch, caplog):
@@ -370,6 +387,174 @@ def test_claude_probe_failure_fails_closed(monkeypatch, caplog):
     monkeypatch.setattr(ClaudeCodeCodingWorker, "probe", boom)
     with caplog.at_level("ERROR"):
         gateway = _gateway(_settings(coding_worker_backend="claude"))
-    assert "coding_worker" not in gateway._tools
+    assert "workspace_task" not in gateway._tools
     assert "claude backend probe failed" in caplog.text
     assert "CODING WORKER DISABLED" in caplog.text
+
+
+def test_workspace_task_tool_registered_for_code_profile(monkeypatch, tmp_path):
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    gateway = _gateway(_settings(coding_worker_backend="builtin"))
+    assert "workspace_task" in gateway._tools
+    assert "code:write" in gateway._tools["workspace_task"].supported_permissions()
+
+
+async def test_legacy_action_string_still_invokes_the_code_profile(monkeypatch, tmp_path):
+    # A durable approval row written pre-migration (or an agent whose YAML
+    # hasn't been re-pointed yet) names the legacy action string. The alias
+    # (Task 4) must still route it to the migrated workspace_task connector
+    # and park it for approval — never bounce off as "no registered tool".
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    gateway = _gateway(_settings(coding_worker_backend="builtin"))
+    agent = load_agent(AGENT_YAML)
+    inv = await gateway.invoke(agent, "coding_worker.pr:write",
+                               args={"repo": "a/b", "instruction": "x"},
+                               requested_by="tester")
+    # Aliased to workspace_task.code:write → parks for approval (start gate), not "no tool".
+    assert inv.status in {"pending_approval", "started", "approved"}
+    assert inv.message is None or "no registered tool" not in inv.message
+
+
+async def test_legacy_yaml_agent_write_action_is_still_approval_gated(monkeypatch, tmp_path):
+    # Security invariant: the alias must not let a legacy-YAML agent's write
+    # action slip past the approve-before-work gate. Load the LEGACY fixture
+    # tests/unit/data/agent.yaml (not the migrated AGENT_YAML above) BECAUSE
+    # its `require_for` names the pre-migration spelling
+    # (`coding_worker.pr:write`), never the canonical `workspace_task.code:write`
+    # — using AGENT_YAML here (as the previous version of this test did) never
+    # exercises the alias-dependent gate at all, since its `require_for`
+    # already names the canonical action outright.
+    #
+    # Invoke via BOTH the legacy action string (exactly as this agent's own
+    # tool_specs would hand it to a model — available_actions() reports the
+    # action in the YAML's as-declared spelling, and exactly as a durable
+    # approval row written pre-migration would still name it) AND the
+    # canonical action string (exactly as a caller of the raw POST
+    # /tools/invoke endpoint could spell it). This pins that NEITHER
+    # invocation spelling can bypass approval for a legacy-`require_for`
+    # agent — the exact bug fixed here: gateway.py's approval condition used
+    # to compare the canonical `action` (and the as-requested string)
+    # directly against `require_for` without canonicalizing `require_for`'s
+    # own entries, so the canonical spelling silently matched nothing and
+    # ran straight through to "executed". The gateway now canonicalizes both
+    # sides symmetrically, exactly like `policy.is_allowed` does for the
+    # allowlist.
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    legacy_agent = load_agent(Path(__file__).parents[1] / "unit" / "data" / "agent.yaml")
+
+    for requested_action in ("coding_worker.pr:write", "workspace_task.code:write"):
+        gateway = _gateway(
+            _settings(coding_worker_backend="builtin"),
+            agents={"dev-platform": legacy_agent},
+        )
+
+        inv = await gateway.invoke(
+            legacy_agent,
+            requested_action,
+            args={"repo": "a/b", "instruction": "x"},
+            requested_by="tester",
+        )
+
+        assert inv.status == "pending_approval", requested_action
+        assert inv.status != "executed", requested_action
+        assert inv.approval is not None, requested_action
+
+        # The pending status alone isn't proof of a real gate — confirm a
+        # durable approval row actually exists (and is still undecided) in
+        # the store the gateway itself would consult on resolve().
+        stored = await gateway.approvals.get(inv.approval.id)
+        assert stored is not None, requested_action
+        assert stored.status == "pending", requested_action
+        assert stored.action == "workspace_task.code:write", requested_action
+
+
+def test_code_write_gate_is_a_floor_even_if_agent_omits_it(monkeypatch):
+    # Gate-as-floor (Task 13): the profile's declared gate is a mandatory
+    # minimum. code:write's floor is Gate.START (always gates);
+    # investigate:read's floor is Gate.NONE (never forced to gate).
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    gateway = _gateway(_settings(coding_worker_backend="builtin"))
+
+    tool = gateway._tools["workspace_task"]
+    assert getattr(tool, "requires_approval_for", None) is not None
+    assert tool.requires_approval_for("code:write") is True
+    assert tool.requires_approval_for("investigate:read") is False
+
+
+async def test_code_write_gate_floor_forces_approval_even_without_require_for(
+    monkeypatch,
+):
+    # Stronger proof: an agent whose `require_for` does NOT list
+    # workspace_task.code:write still parks for approval — the connector's
+    # floor forces it; agent config can only ADD gating, never remove it.
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+    gateway = _gateway(_settings(coding_worker_backend="builtin"))
+
+    agent = load_agent(AGENT_YAML)
+    agent.spec.approvals.require_for = [
+        entry
+        for entry in agent.spec.approvals.require_for
+        if entry != "workspace_task.code:write"
+    ]
+    assert "workspace_task.code:write" not in agent.spec.approvals.require_for
+
+    inv = await gateway.invoke(
+        agent,
+        "workspace_task.code:write",
+        args={"repo": "a/b", "instruction": "do x"},
+        requested_by="tester",
+    )
+
+    assert inv.status == "pending_approval"
+    assert inv.approval is not None
+
+
+async def test_investigate_read_registered_and_ungated(monkeypatch, tmp_path):
+    # Task 13: with the investigator wired in production builder wiring,
+    # workspace_task.investigate:read is registered and runs without parking
+    # for approval — it is not in require_for and its floor is Gate.NONE.
+    #
+    # The connector, orchestrator, and RepoInvestigator are all built for
+    # real by build_tool_gateway; only the two would-be-network calls
+    # (the model completion and the credentialed git clone) are faked at the
+    # class level, per the task's stated escape hatch.
+    monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
+
+    async def fake_investigate(self, workspace, question, repo):
+        return (
+            EvidenceBundle(summary="it returns None", findings="- a.py:1"),
+            ModelResponse(text="", model=self.model, cost_usd=0.01),
+        )
+
+    async def fake_provision_readonly(self, repo, ref=None):
+        workspace = tmp_path / "investigate-ws"
+        workspace.mkdir(exist_ok=True)
+        return workspace
+
+    monkeypatch.setattr(RepoInvestigator, "investigate", fake_investigate)
+    monkeypatch.setattr(
+        GitWorkspaceOrchestrator, "provision_readonly", fake_provision_readonly
+    )
+
+    gateway = _gateway(_settings(coding_worker_backend="builtin"))
+
+    tool = gateway._tools["workspace_task"]
+    assert "investigate:read" in tool.supported_permissions()
+
+    agent = load_agent(AGENT_YAML)
+    for t in agent.spec.tools:
+        if t.name == "workspace_task":
+            t.permissions = [*t.permissions, "investigate:read"]
+    assert "workspace_task.investigate:read" not in agent.spec.approvals.require_for
+
+    inv = await gateway.invoke(
+        agent,
+        "workspace_task.investigate:read",
+        args={"repo": "a/b", "question": "why does parse return None?"},
+        requested_by="tester",
+    )
+
+    assert inv.status == "executed"
+    assert inv.result is not None
+    assert inv.result.ok is True
+    assert inv.result.data["outcome"]["kind"] == "evidence_bundle"

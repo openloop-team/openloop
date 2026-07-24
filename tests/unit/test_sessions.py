@@ -15,6 +15,7 @@ from openloop.agents import load_agent
 from openloop.approvals import ApprovalRequest
 from openloop.memory import InMemoryStore
 from openloop.models.gateway import ModelResponse
+from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
 from openloop.runtime import Runtime, Task
 from openloop.sessions import (
     InMemorySurfaceSessionStore,
@@ -29,8 +30,10 @@ import time
 
 from openloop.sessions.runner import PROGRESS_REFRESH_SECONDS, PROGRESS_STATUS_TEXT
 from openloop.tools import Invocation, ToolGateway, ToolResult
-from openloop.tools.coding_worker import CodingWorkerConnector
+from openloop.tools.coding_worker import CodingWorkerConnector, WorkerOutcome
 from openloop.tools.github import GitHubConnector
+from openloop.tools.openhands_artifacts import WorkspaceArtifact, WorkspaceArtifactIdentity
+from openloop.tools.openhands_resume import OpenHandsResumeState, WorkspaceArtifactRef
 from openloop.usage import InMemoryUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowInstance
 from openloop.workflows.coding_worker import build_coding_worker_workflow
@@ -353,6 +356,192 @@ async def test_workflow_approval_waits_for_background_terminal_result():
     assert completed.final_message_id is not None
     # M0b: the final answer is the model's fresh reply, not the raw workflow summary.
     assert delivery.finals[-1]["text"] == "Opened draft PR #1 🚀"
+
+
+async def test_resolve_openhands_decision_reads_worker_state_from_nested_layout():
+    """resolve_openhands_decision must find the parked OpenHands resume state
+    via WorkspaceTask's nested profile_state["code"]["worker_state"] location
+    (contract-convergence: the workflow's durable code state lives there now,
+    not the pre-convergence flat top-level "worker_state" key), so the Slack
+    accept/reject action still authorizes against slack_requester_id and wakes
+    the parked run instead of reporting "invalid" for every instance."""
+
+    class ResumingRunner:
+        async def resume_attempt(self, state, decision, on_step=None):
+            state.openhands_resume = None
+            return WorkerOutcome(state.branch, "Resumed title", "Resumed body")
+
+    agent = load_agent(AGENT_YAML)
+    engine = WorkflowEngine(InMemoryWorkflowStore())
+    github = FakeGitHub()
+    engine.register(build_coding_worker_workflow(ResumingRunner(), github))
+    runtime = Runtime(
+        agent,
+        gateway=ScriptedGateway([]),
+        usage=InMemoryUsageStore(),
+        memory=InMemoryStore(),
+        engine=engine,
+    )
+    runner = SessionRunner(
+        runtime, InMemorySurfaceSessionStore(), FakeSurfaceDelivery()
+    )
+
+    job_id = "job-openhands-1"
+    branch = f"openloop/job-{job_id}"
+    identity = WorkspaceArtifactIdentity(job_id, "conversation-1", "segment-1", "paused")
+    artifact = WorkspaceArtifactRef(
+        WorkspaceArtifact(
+            identity=identity,
+            key=f"jobs/{job_id}/artifacts/conversation-1/segment-1.paused.artifact",
+            ciphertext_sha256="b" * 64,
+            ciphertext_bytes=10,
+            envelope_version=1,
+            master_key_id="key-v1",
+        ),
+        "git-delta",
+        "a" * 40,
+    )
+    resume = OpenHandsResumeState(
+        status="parked",
+        conversation_id="conversation-1",
+        segment_id="segment-1",
+        base_ref="main",
+        resolved_base_commit="a" * 40,
+        image_digest=DEFAULT_OPENHANDS_SERVER_IMAGE,
+        master_key_id="key-v1",
+        slack_requester_id="maciag.artur",
+        decision_id="decision-1",
+        pending_action_summary="Run terminal",
+        pending_action_fingerprint="c" * 64,
+        workspace_artifact=artifact,
+    )
+    instance = WorkflowInstance(
+        id=job_id,
+        workflow="workspace_task",
+        status="waiting",
+        waiting_on="openhands_decision:decision-1",
+        completed_steps=["await_approval"],
+        state={
+            "task_id": job_id,
+            "profile": "code",
+            "entry_action": "code:write",
+            "profile_state": {
+                "code": {
+                    "repo": "acme/x",
+                    "instruction": "x",
+                    "worker_state": {
+                        "job_id": job_id,
+                        "repo": "acme/x",
+                        "instruction": "x",
+                        "base": "main",
+                        "branch": branch,
+                        "completed_steps": [],
+                        "openhands_resume": resume.to_dict(),
+                    },
+                },
+            },
+        },
+    )
+    await engine.store.create(instance)
+
+    result = await runner.resolve_openhands_decision(
+        job_id, "decision-1", kind="accept", actor_id="maciag.artur", event_id="Ev1",
+    )
+
+    assert result == "✅ Decision recorded; resuming work."
+    # And the woken drive really did resume and open the PR — the fix threads
+    # all the way through, not just past the authorization check.
+    done = await engine.wait_background(job_id)
+    assert done.status == "completed"
+    assert github.pulls and github.pulls[0]["head"] == branch
+
+
+async def test_resolve_openhands_decision_still_rejects_wrong_actor_in_nested_layout():
+    """The authorization check (only the approving user may decide) must keep
+    working once the resume state is read from the nested location."""
+
+    class ResumingRunner:
+        async def resume_attempt(self, state, decision, on_step=None):
+            raise AssertionError("must not resume for an unauthorized actor")
+
+    agent = load_agent(AGENT_YAML)
+    engine = WorkflowEngine(InMemoryWorkflowStore())
+    github = FakeGitHub()
+    engine.register(build_coding_worker_workflow(ResumingRunner(), github))
+    runtime = Runtime(
+        agent,
+        gateway=ScriptedGateway([]),
+        usage=InMemoryUsageStore(),
+        memory=InMemoryStore(),
+        engine=engine,
+    )
+    runner = SessionRunner(
+        runtime, InMemorySurfaceSessionStore(), FakeSurfaceDelivery()
+    )
+
+    job_id = "job-openhands-2"
+    identity = WorkspaceArtifactIdentity(job_id, "conversation-1", "segment-1", "paused")
+    artifact = WorkspaceArtifactRef(
+        WorkspaceArtifact(
+            identity=identity,
+            key=f"jobs/{job_id}/artifacts/conversation-1/segment-1.paused.artifact",
+            ciphertext_sha256="b" * 64,
+            ciphertext_bytes=10,
+            envelope_version=1,
+            master_key_id="key-v1",
+        ),
+        "git-delta",
+        "a" * 40,
+    )
+    resume = OpenHandsResumeState(
+        status="parked",
+        conversation_id="conversation-1",
+        segment_id="segment-1",
+        base_ref="main",
+        resolved_base_commit="a" * 40,
+        image_digest=DEFAULT_OPENHANDS_SERVER_IMAGE,
+        master_key_id="key-v1",
+        slack_requester_id="maciag.artur",
+        decision_id="decision-1",
+        pending_action_summary="Run terminal",
+        pending_action_fingerprint="c" * 64,
+        workspace_artifact=artifact,
+    )
+    instance = WorkflowInstance(
+        id=job_id,
+        workflow="workspace_task",
+        status="waiting",
+        waiting_on="openhands_decision:decision-1",
+        completed_steps=["await_approval"],
+        state={
+            "task_id": job_id,
+            "profile": "code",
+            "entry_action": "code:write",
+            "profile_state": {
+                "code": {
+                    "repo": "acme/x",
+                    "instruction": "x",
+                    "worker_state": {
+                        "job_id": job_id,
+                        "repo": "acme/x",
+                        "instruction": "x",
+                        "base": "main",
+                        "branch": f"openloop/job-{job_id}",
+                        "completed_steps": [],
+                        "openhands_resume": resume.to_dict(),
+                    },
+                },
+            },
+        },
+    )
+    await engine.store.create(instance)
+
+    result = await runner.resolve_openhands_decision(
+        job_id, "decision-1", kind="accept", actor_id="intruder", event_id="Ev1",
+    )
+
+    assert result == "⛔ Only the user who approved this task may decide."
+    assert github.pulls == []
 
 
 async def test_workflow_progress_is_surfaced_as_transient_status():
@@ -1140,3 +1329,196 @@ async def test_history_limit_counts_only_delivered_turns():
     # exchange survives — a pre-filter limit would have returned nothing.
     prior = await store.thread_history(_target("ev-cur"), limit=2)
     assert [s.id for s in prior] == ["old"]
+
+
+# --- runner: typed task outcomes (Stage 1 Phase 2) -----------------------
+
+async def test_evidence_bundle_outcome_delivers_as_artifact():
+    # A workflow terminal result carrying an evidence-bundle outcome is
+    # delivered as an Artifact, not a re-run of the model.
+    from openloop.tasks.outcomes import EvidenceBundle
+    from openloop.sessions.runner import _deliverable_from_outcome_data
+
+    data = {
+        "outcome": {
+            "kind": "evidence_bundle",
+            "summary": "2 call sites",
+            "findings": "# Findings\n- src/p.py:42\n",
+        }
+    }
+    d = _deliverable_from_outcome_data(data)
+    from openloop.deliverable import Artifact
+    assert isinstance(d, Artifact)
+    assert "src/p.py:42" in d.content
+
+
+async def test_evidence_bundle_outcome_delivers_end_to_end_without_model_rerun():
+    """Integration (Finding 2): drive an evidence_bundle outcome all the way
+    through the approval-resolution path — resolve_approval → background
+    workflow drive → terminal callback → _continue_session's direct-deliver
+    branch — mirroring test_workflow_approval_waits_for_background_terminal_
+    result's setup, but asserting the OPPOSITE of that M0b test: the model is
+    never re-run, and the delivered payload is the Artifact built straight
+    from the outcome data.
+    """
+    from openloop.agents.schema import Agent, AgentMetadata, AgentSpec
+    from openloop.agents.schema import Approvals as ApprovalsSpec
+    from openloop.agents.schema import ModelPolicy
+    from openloop.agents.schema import Tool as AgentToolSpec
+    from openloop.deliverable import Artifact
+    from openloop.tools.base import ActionSpec
+    from openloop.workflows.engine import Step, Workflow, WorkflowContext
+
+    WORKFLOW_NAME = "evidence_task_test"
+    FINDINGS = "# Findings\n- src/p.py:42 unchecked input\n"
+    SUMMARY = "2 call sites need validation"
+
+    async def finish(ctx: WorkflowContext) -> None:
+        ctx.instance.result = {
+            "summary": SUMMARY,
+            "outcome": {
+                "kind": "evidence_bundle",
+                "summary": SUMMARY,
+                "findings": FINDINGS,
+            },
+        }
+
+    workflow = Workflow(
+        WORKFLOW_NAME,
+        [Step("await_approval", wait=True), Step("finish", finish)],
+    )
+
+    class _InvestigateConnector:
+        name = "investigate"
+        workflow = WORKFLOW_NAME
+        requires_approval = True
+
+        def supported_permissions(self) -> set[str]:
+            return {"read"}
+
+        def describe(self, permission: str) -> ActionSpec:
+            return ActionSpec(
+                description="investigate", parameters={"type": "object", "properties": {}}
+            )
+
+        async def execute(self, permission: str, args: dict):  # pragma: no cover
+            raise AssertionError("workflow-backed tool must never call execute()")
+
+    engine = WorkflowEngine(InMemoryWorkflowStore())
+    engine.register(workflow)
+    tools = ToolGateway(tools=[_InvestigateConnector()], engine=engine)
+
+    agent = Agent(
+        metadata=AgentMetadata(
+            name="dev-platform", workspace="acme",
+            id="45006d4ce5c64d2c96ed1fe3277d7347",
+        ),
+        spec=AgentSpec(
+            model_policy=ModelPolicy(default="anthropic/claude-sonnet-4-6"),
+            tools=[AgentToolSpec(name="investigate", type="native", permissions=["read"])],
+            approvals=ApprovalsSpec(
+                require_for=["investigate.read"], approvers=["@maciag.artur"],
+            ),
+        ),
+    )
+
+    gateway = ScriptedGateway([
+        tool_call_response(
+            "m", [("c1", "investigate_read", {"query": "find call sites"})]
+        ),
+        # If the runner ever re-ran the model for this outcome, THIS is what
+        # would be delivered — its absence from delivery.finals is the proof
+        # the direct-deliver branch (not M0b) handled it.
+        ModelResponse(text="MODEL RE-RUN — should never be delivered", model="m"),
+    ])
+    sessions = InMemorySurfaceSessionStore()
+    delivery = FakeSurfaceDelivery()
+    runtime = Runtime(
+        agent, gateway=gateway, tools=tools, usage=InMemoryUsageStore(),
+        memory=InMemoryStore(), engine=engine,
+    )
+    runner = SessionRunner(runtime, sessions, delivery)
+
+    session = await runner.run(_task("investigate the bug"), _target())
+    approval_id = session.approval_ids[0]
+
+    message = await runner.resolve_approval(approval_id, "@maciag.artur", approve=True)
+    assert message.startswith("✅ Approved by @maciag.artur")
+
+    request = await tools.approvals.get(approval_id)
+    done = await engine.wait_background(request.workflow_instance_id)
+    assert done.status == "completed"
+
+    completed = await sessions.get(session.id)
+    assert completed.status == "completed"
+    assert completed.final_message_id is not None
+    # The delivered item is the evidence-bundle Artifact, not model prose.
+    delivered = delivery.finals[-1]["text"]
+    assert isinstance(delivered, Artifact)
+    assert FINDINGS in delivered.content
+    # The model ran exactly once (the initial turn) — never re-run for this
+    # outcome, unlike the pull_request/M0b path.
+    assert len(gateway.calls) == 1
+    # result_summary was persisted BEFORE the final post (repairable-delivery
+    # ordering) — its value is the artifact's replay-safe summary.
+    assert completed.result_summary == SUMMARY
+    # The approval card was collapsed (no buttons) as on the normal terminal
+    # path.
+    assert delivery.approvals[-1]["requests"] == []
+
+
+async def test_malformed_outcome_falls_back_to_prose_path_without_raising():
+    """Finding 1 regression: malformed ``outcome`` data on an approved tool
+    result must never raise into the approval-resolution path (which
+    reconcile()'s per-session sweep has no per-iteration try/except around).
+    A non-dict ``outcome`` and a recognized kind missing a required field both
+    must degrade to ``None`` and fall back to the existing M0b prose/model-
+    continuation path — exactly like a pull_request/no-outcome result today.
+    """
+    from openloop.tools.base import ActionSpec, ToolResult
+
+    class _MalformedOutcomeTool:
+        name = "github"
+
+        def __init__(self, data: dict) -> None:
+            self._data = data
+
+        def supported_permissions(self) -> set[str]:
+            return {"issues:write"}
+
+        def describe(self, permission: str) -> ActionSpec:
+            return ActionSpec(
+                description="probe", parameters={"type": "object", "properties": {}}
+            )
+
+        async def execute(self, permission: str, args: dict) -> ToolResult:
+            return ToolResult(ok=True, summary="probe done", data=self._data)
+
+    malformed_cases = [
+        {"outcome": "not-a-dict"},
+        {"outcome": {"kind": "evidence_bundle", "summary": "x"}},  # missing "findings"
+    ]
+    for malformed_data in malformed_cases:
+        tools = ToolGateway(tools=[_MalformedOutcomeTool(malformed_data)])
+        runner, sessions, delivery = _runner(
+            ScriptedGateway([
+                tool_call_response(
+                    "m", [("c1", "github_issues_write", {"repo": "acme/x", "title": "T"})]
+                ),
+                ModelResponse(text="fresh model reply", model="m"),
+            ]),
+            tools=tools,
+        )
+        session = await runner.run(_task("open an issue"), _target())
+        approval_id = session.approval_ids[0]
+
+        message = await runner.resolve_approval(
+            approval_id, "@maciag.artur", approve=True
+        )  # must not raise (AttributeError / KeyError pre-fix)
+
+        assert message.startswith("✅ Approved by @maciag.artur")
+        done = await sessions.get(session.id)
+        assert done.status == "completed"
+        # Fell back to the M0b prose/model-continuation path, never the
+        # evidence-bundle direct-deliver branch.
+        assert delivery.finals[-1]["text"] == "fresh model reply"

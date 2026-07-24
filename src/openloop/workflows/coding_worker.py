@@ -24,11 +24,14 @@ approval → workflow → PR.
 
 from __future__ import annotations
 
+from openloop.tasks import WorkspaceTask
 from openloop.tools.coding_worker import (
     AttemptRunner,
     WorkerState,
     _branch_for,
     _pr_body,
+    _sync_worker_state_to_task,
+    _worker_state_for_task,
 )
 from openloop.tools.github import GitHubClient
 from openloop.tools.openhands_resume import ResumeDecision, WorkerPaused
@@ -39,7 +42,7 @@ from openloop.workflows.engine import (
     WorkflowPark,
 )
 
-WORKFLOW_NAME = "coding_worker"
+WORKFLOW_NAME = "workspace_task"
 
 # The wait node's name doubles as the event the approval emits.
 APPROVAL_EVENT = "await_approval"
@@ -67,57 +70,111 @@ def _worker_phase(completed_steps: list[str]) -> str:
     return "is starting…"
 
 
-def build_coding_worker_workflow(
-    orchestrator: AttemptRunner, github: GitHubClient
+def _investigate_steps(investigator) -> list[Step]:
+    """Guard: the investigate profile never reaches the workflow in Stage 1.
+
+    ``investigate:read`` has ``gate=Gate.NONE`` (see
+    :mod:`openloop.tasks.contract`), so the gateway never creates an approval
+    or a workflow instance for it — it always falls straight through to
+    :meth:`~openloop.tools.coding_worker.CodingWorkerConnector.execute`, a
+    synchronous call, whose result then flows back through the model
+    tool-loop. A gated/workflow-driven investigate path (this function) is
+    out of scope for Stage 1; reaching this guard means something started a
+    ``workspace_task`` workflow instance with ``profile=investigate``, which
+    should not happen until a later stage adds gated investigation.
+    """
+    raise NotImplementedError(
+        "the investigate profile is ungated (gate=Gate.NONE) in Stage 1 and "
+        "runs via CodingWorkerConnector.execute(), never via this workflow; "
+        "a gated/workflow-driven investigate path is out of scope here"
+    )
+
+
+def build_workspace_task_workflow(
+    orchestrator: AttemptRunner,
+    github: GitHubClient,
+    *,
+    investigator=None,
 ) -> Workflow:
-    """Build the coding-worker workflow bound to the shared orchestrator.
+    """Build the workspace_task workflow bound to the shared orchestrator.
 
     Both durable paths call the same :class:`AttemptRunner` — no path invokes a
     worker that could hold git credentials (hardening Phase 2 invariant).
+
+    The instance's step list is dispatched on ``state["profile"]`` (default
+    ``"code"``), stamped by the connector's ``prepare_args``: the ``code``
+    profile keeps this module's original approve → run-worker → open-PR
+    chain. ``investigate`` is ungated (``gate=Gate.NONE``) in Stage 1, so no
+    instance with that profile is ever started here — see
+    :func:`_investigate_steps`.
     """
 
     async def run_worker(ctx: WorkflowContext) -> None:
+        # ``ctx.state`` (``s``) is the ONE durable dict for this instance; it
+        # also carries engine/workflow-managed keys that are NOT WorkspaceTask
+        # fields — ``events`` (the awaited-event payloads, e.g. the approval
+        # that wakes a parked instance) and ``openhands_decision``. Rebuild the
+        # task as a typed VIEW over ``s`` (never replace ``s`` with it): every
+        # persist below merges ``task.to_dict()`` back in, which is safe by
+        # construction — ``to_dict()`` never emits ``events``/
+        # ``openhands_decision`` (they aren't dataclass fields) and
+        # ``dict.update`` never deletes a key absent from its argument. Losing
+        # this would silently strand a parked instance with no way to wake.
         s = ctx.state
-        state = (
-            WorkerState.from_dict(s["worker_state"])
-            if s.get("worker_state") is not None
-            else WorkerState(
-                job_id=s["job_id"],
-                repo=s["repo"],
-                instruction=s["instruction"],
-                base=s.get("base", "main"),
-                branch=_branch_for(s["job_id"]),
+        task = WorkspaceTask.from_dict(s)
+        code_state = task.profile_state.setdefault("code", {})
+
+        def _persist() -> None:
+            s.update(task.to_dict())
+
+        event_requester = (
+            ((s.get("events") or {}).get(APPROVAL_EVENT) or {})
+            .get("approver", "")
+            .lstrip("@")
+            or None
+        )
+        if task.requester_id is None:
+            task.requester_id = event_requester
+
+        if code_state.get("worker_state") is not None:
+            state = _worker_state_for_task(task, lift_legacy_progress=True)
+        else:
+            state = WorkerState(
+                job_id=task.task_id,
+                repo=code_state["repo"],
+                instruction=code_state["instruction"],
+                base=code_state.get("base", "main"),
+                branch=_branch_for(task.task_id),
                 # The invoking agent, stamped into the approval args by the
                 # gateway (Phase 5) — the ledger attributes spend to it. The
                 # durable id pinned beside it is what the ledger resolves
                 # first (rename-safe, recreate-fail-closed).
-                agent=s.get("agent"),
-                agent_id=s.get("agent_id"),
-                requester_id=(
-                    ((s.get("events") or {}).get(APPROVAL_EVENT) or {})
-                    .get("approver", "")
-                    .lstrip("@")
-                    or None
-                ),
+                agent=task.agent,
+                agent_id=task.agent_id,
+                requester_id=task.requester_id,
                 # The approval that authorized this run (attribution envelope,
                 # finding 4), stamped into the durable workflow state by the
                 # gateway — carried so worker spend traces to its authorization.
-                approval_id=s.get("approval_id"),
+                approval_id=task.approval_id,
                 # The originating surface session (attribution envelope, step 5),
                 # stamped into the durable workflow state by the gateway — carried
                 # so worker spend traces to the session it was invoked from.
-                session_id=s.get("session_id"),
+                session_id=task.session_id,
                 # The requesting thread's warm-context key (Phase B) — lets the
                 # orchestrator reuse this thread's kept checkout.
-                warm_key=s.get("warm_key"),
+                warm_key=task.warm_key,
             )
-        )
+            _sync_worker_state_to_task(task, state)
 
         async def on_step(ws: WorkerState) -> None:
             # Record a human progress phrase so the surface can show "still
-            # working…" without knowing worker-internal step names.
-            s["worker_state"] = ws.to_dict()
-            s["progress"] = _worker_phase(ws.completed_steps)
+            # working…" without knowing worker-internal step names. Carried on
+            # the task itself (a real WorkspaceTask field) so it round-trips
+            # through the same merge as everything else, never as a parallel
+            # direct write that a later merge could clobber.
+            _sync_worker_state_to_task(task, ws)
+            task.progress = _worker_phase(ws.completed_steps)
+            _persist()
             await ctx.checkpoint()
 
         resume = state.openhands_resume
@@ -125,7 +182,8 @@ def build_coding_worker_workflow(
             event = f"openhands_decision:{resume.decision_id}"
             payload = s.get("events", {}).get(event)
             if payload is None:
-                s["worker_state"] = state.to_dict()
+                _sync_worker_state_to_task(task, state)
+                _persist()
                 raise WorkflowPark(event)
             decision = ResumeDecision.from_dict(payload)
             outcome = await orchestrator.resume_attempt(
@@ -147,37 +205,46 @@ def build_coding_worker_workflow(
             )
         else:
             outcome = await orchestrator.run_attempt(state, on_step=on_step)
-        s["worker_state"] = state.to_dict()
+        _sync_worker_state_to_task(task, state)
         if isinstance(outcome, WorkerPaused):
             s["openhands_decision"] = {
                 "decision_id": outcome.decision_id,
                 "summary": outcome.pending_action_summary,
                 "fingerprint": outcome.pending_action_fingerprint,
             }
+            _persist()
             raise WorkflowPark(f"openhands_decision:{outcome.decision_id}")
+        # Step-handoff scratch values consumed by open_pr next — outside the
+        # WorkspaceTask contract (not identity, not the durable worker_state),
+        # so they ride ``s`` directly exactly as before the nested layout.
         s["branch"] = outcome.branch
         s["title"] = outcome.title
         s["body"] = outcome.body
         s["cost_usd"] = outcome.cost_usd
         s["prompt_tokens"] = outcome.prompt_tokens
         s["completion_tokens"] = outcome.completion_tokens
+        _persist()
 
     async def open_pr(ctx: WorkflowContext) -> None:
         s = ctx.state
-        base = s.get("base", "main")
-        existing = await github.find_pull(s["repo"], head=s["branch"])
+        task = WorkspaceTask.from_dict(s)
+        code_state = task.profile_state.setdefault("code", {})
+        repo = code_state["repo"]
+        base = code_state.get("base", "main")
+        branch = s["branch"]
+        existing = await github.find_pull(repo, head=branch)
         pull = existing or await github.create_pull(
-            repo=s["repo"],
-            head=s["branch"],
+            repo=repo,
+            head=branch,
             base=base,
             title=s["title"],
-            body=_pr_body(s["body"], s["job_id"]),
+            body=_pr_body(s["body"], task.task_id),
             draft=True,
         )
         ctx.instance.result = {
-            "job_id": s["job_id"],
+            "job_id": task.task_id,
             "status": "opened",
-            "branch": s["branch"],
+            "branch": branch,
             "pr_number": pull.get("number"),
             "pr_url": pull.get("html_url"),
             # Full spend telemetry, matching CodingWorkerConnector.execute()'s data.
@@ -185,24 +252,35 @@ def build_coding_worker_workflow(
             "prompt_tokens": s.get("prompt_tokens", 0),
             "completion_tokens": s.get("completion_tokens", 0),
             "summary": (
-                f"opened draft PR #{pull.get('number')} in {s['repo']} "
-                f"(job {s['job_id']})"
+                f"opened draft PR #{pull.get('number')} in {repo} "
+                f"(job {task.task_id})"
             ),
         }
         cleanup = getattr(orchestrator, "cleanup_attempt", None)
-        if cleanup is not None and s.get("worker_state") is not None:
-            state = WorkerState.from_dict(s["worker_state"])
+        worker_data = code_state.get("worker_state")
+        if cleanup is not None and worker_data is not None:
+            state = _worker_state_for_task(task, lift_legacy_progress=True)
             if state.openhands_resume is not None:
                 await cleanup(state, on_step=None)
-                s["worker_state"] = state.to_dict()
+                _sync_worker_state_to_task(task, state)
+                s.update(task.to_dict())
 
-    return Workflow(
-        WORKFLOW_NAME,
-        [
+    def _steps_for(state: dict) -> list[Step]:
+        if state.get("profile", "code") == "investigate":
+            return _investigate_steps(investigator)  # unreachable in Stage 1; see guard
+        return [
             Step(APPROVAL_EVENT, wait=True),
             # This step owns schema-first resume rules. Marking it non-resumable
             # would abandon even safe parked/final boundaries.
             Step("run_worker", run_worker, resumable=True),
             Step("open_pr", open_pr),
-        ],
-    )
+        ]
+
+    return Workflow(WORKFLOW_NAME, [], steps_resolver=_steps_for)
+
+
+def build_coding_worker_workflow(
+    orchestrator: AttemptRunner, github: GitHubClient
+) -> Workflow:
+    """Back-compat alias for :func:`build_workspace_task_workflow`."""
+    return build_workspace_task_workflow(orchestrator, github)

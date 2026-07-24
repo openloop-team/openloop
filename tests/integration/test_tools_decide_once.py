@@ -78,7 +78,7 @@ async def _seed_workflow_request(
     )
     await gw.approvals.create(req)
     if park and gw.engine is not None:
-        await gw.engine.start("coding_worker", job_id, _workflow_initial_state(req))
+        await gw.engine.start("workspace_task", job_id, _workflow_initial_state(req))
     return req
 
 
@@ -569,6 +569,54 @@ async def test_reconcile_repeated_sweep_drains_to_empty():
     # A repeated sweep is a no-op and the unreconciled set is empty.
     assert await gw.reconcile_decisions() == 0
     assert await gw.approvals.decided_unreconciled() == []
+
+
+# --------------------------------------------------------------------------- #
+# durable-compat: pre-rename stored rows (tool="coding_worker",
+# permission="pr:write") must still resolve onto the renamed workspace_task
+# connector — both names may be stale on a row written before the rename.
+# --------------------------------------------------------------------------- #
+
+
+async def test_legacy_direct_row_executes_on_renamed_connector():
+    """A pre-rename DIRECT row (stored tool="coding_worker",
+    permission="pr:write") must resolve onto the renamed workspace_task
+    connector and execute under its canonical code:write permission — the
+    renamed connector's execute() refuses any other permission spelling."""
+    gw, engine, github, orchestrator = _workflow_gateway()
+    req = ApprovalRequest(
+        agent="a",
+        action="coding_worker.pr:write",
+        tool="coding_worker",
+        permission="pr:write",
+        args={"job_id": "legacy-direct", "repo": "acme/x", "instruction": "do it"},
+        approvers=["@a"],
+        summary="run coding worker",
+        workflow_backed=False,
+    )
+    await gw.approvals.create(req)
+    inv = await gw.resolve(req.id, "@a", approve=True)
+    assert inv.status == "executed"
+    assert len(orchestrator.runs) == 1  # the renamed connector actually ran
+    assert github.pulls  # ... and opened the draft PR
+    stored = await gw.approvals.get(req.id)
+    assert stored.status == "approved"
+    assert stored.effect_at is not None
+
+
+async def test_reconcile_heals_legacy_workflow_row_instead_of_deferring():
+    """reconcile_decisions() must heal a pre-rename, workflow-backed row
+    (stored tool="coding_worker", permission="pr:write") by waking the
+    renamed connector's workflow — not defer it as an unregistered tool."""
+    gw, engine, github, orchestrator = _workflow_gateway()
+    req = await _seed_workflow_request(
+        gw, ["@a"], job_id="legacy-reconcile", status="approved", decided_by="@a"
+    )
+    healed = await gw.reconcile_decisions()
+    assert healed == 1
+    await _drive(engine, req.workflow_instance_id)
+    assert len(orchestrator.runs) == 1
+    assert (await gw.approvals.get(req.id)).effect_at is not None
 
 
 def _small_limit(store, limit):

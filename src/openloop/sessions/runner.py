@@ -84,6 +84,57 @@ def _prose_of(result: "Deliverable | str") -> str:
     return result
 
 
+def _deliverable_from_outcome_data(data) -> "Deliverable | None":
+    """Rebuild a DIRECT-DELIVER outcome from a terminal result's ``outcome``
+    block, or ``None`` for anything that must fall back to the existing
+    prose/model-continuation path.
+
+    ``data`` is a tool/workflow result's ``.data`` — untrusted at this
+    boundary: it may not be a dict at all, its ``outcome`` may be missing or
+    not itself a dict (e.g. a bare string), its ``kind`` may be unrecognized,
+    or a recognized kind may be missing a required field (a still-evolving
+    connector, hand-built test data, or a future strategy's partial payload).
+    ANY of that degrades to ``None`` rather than raising: this is called from
+    :meth:`SessionRunner._continue_session`, itself reachable from
+    :meth:`SessionRunner.reconcile`'s per-session sweep — that loop has no
+    per-iteration try/except, so one raise here would abort the *whole* sweep,
+    and the recovery loop re-runs every interval, re-poisoning it forever.
+
+    This single accessor also IS the "which outcomes deliver directly"
+    policy, so callers need no separate kind check: only ``diagnosis`` and
+    ``evidence_bundle`` ever produce a Deliverable here. ``pull_request``
+    (the coding worker's outcome), ``failed``, and anything unrecognized
+    always return ``None`` — even when perfectly well-formed — so that
+    connector keeps today's unchanged model-continuation (M0b) behavior.
+    """
+    try:
+        outcome = data.get("outcome") if isinstance(data, dict) else None
+        if not isinstance(outcome, dict):
+            return None
+        kind = outcome.get("kind")
+        if kind not in ("diagnosis", "evidence_bundle"):
+            return None
+        from openloop.tasks.outcomes import Diagnosis, EvidenceBundle, to_deliverable
+
+        if kind == "diagnosis":
+            built = Diagnosis(text=outcome["text"])
+        else:
+            built = EvidenceBundle(
+                summary=outcome["summary"],
+                findings=outcome["findings"],
+                title=outcome.get("title", "Investigation findings"),
+                filename=outcome.get("filename", "findings.md"),
+            )
+        return to_deliverable(built)
+    except Exception:  # noqa: BLE001 — never poison the reconcile sweep
+        logger.warning(
+            "ignoring malformed outcome data; falling back to the prose/"
+            "model-continuation path",
+            exc_info=True,
+        )
+        return None
+
+
 def _approval_id_for_instance(instance) -> str | None:
     state = getattr(instance, "state", {}) or {}
     if state.get("approval_id"):
@@ -464,6 +515,33 @@ class SessionRunner:
         if inv.status == "executed":
             if session.final_message_id is not None:
                 return
+            # Stage 1 Phase 2: an evidence-bundle/diagnosis outcome IS the final
+            # answer (findings/diagnosis prose) — deliver it directly, no model
+            # re-run. _deliverable_from_outcome_data is the single, defensive
+            # accessor: it IS the "which kinds direct-deliver" policy (only
+            # evidence_bundle/diagnosis — a pull_request outcome, a result with
+            # no outcome block, or malformed outcome data all return None), so
+            # there's no separate kind check here, and nothing this call can
+            # raise. None falls through to the existing M0b path below
+            # unchanged, so the coding worker keeps today's model-continuation
+            # behavior.
+            outcome_data = inv.result.data if inv.result else None
+            deliverable = _deliverable_from_outcome_data(outcome_data)
+            if deliverable is not None:
+                # Persist the outcome (so a failed post is repairable from
+                # result_summary) before posting — mirrors the pattern below.
+                session.status = "completed"
+                session.result_summary = _prose_of(deliverable)
+                await self.sessions.upsert(session)
+                await self._post_final(session, deliverable)
+                try:
+                    await self._update_approval(session, message, [])
+                except Exception:  # noqa: BLE001 — buttons going stale is cosmetic
+                    logger.exception(
+                        "failed to collapse approval card for session %s",
+                        session.id,
+                    )
+                return
             # M0b: re-run the model with the approved result folded in, so the reply
             # is a fresh model answer — not the raw tool summary. Falls back to the
             # summary if the continuation can't be built (no engine / lost state).
@@ -623,6 +701,7 @@ class SessionRunner:
         event_id: str,
     ) -> str:
         """Authorize, durably record, and asynchronously drive a Slack action."""
+        from openloop.tasks import WorkspaceTask
         from openloop.tools.openhands_resume import OpenHandsResumeState, ResumeDecision
 
         engine = getattr(self.runtime, "engine", None)
@@ -636,7 +715,13 @@ class SessionRunner:
             or instance.waiting_on != event
         ):
             return "⛔ That decision is stale or already resolved."
-        raw_worker = (instance.state or {}).get("worker_state") or {}
+        # WorkspaceTask.from_dict rehydrates either layout: a NEW nested
+        # instance's durable worker_state lives at
+        # profile_state["code"]["worker_state"]; an OLD flat-layout instance
+        # (parked before this contract-convergence rework shipped) is lifted
+        # there by the same compat shim workflows/coding_worker.py relies on.
+        task = WorkspaceTask.from_dict(instance.state or {})
+        raw_worker = task.profile_state.get("code", {}).get("worker_state") or {}
         raw_resume = raw_worker.get("openhands_resume")
         try:
             resume = OpenHandsResumeState.from_dict(raw_resume)

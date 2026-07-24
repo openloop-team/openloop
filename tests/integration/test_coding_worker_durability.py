@@ -6,10 +6,12 @@ never duplicates them.
 """
 
 from openloop.checkpoints import InMemoryCheckpointStore
+from openloop.tasks import WorkspaceTask
 from openloop.tools.coding_worker import (
     STEPS,
     CodingWorkerConnector,
     WorkerOutcome,
+    WorkerState,
 )
 from openloop.testing import FakeGitHub
 
@@ -17,11 +19,16 @@ from openloop.testing import FakeGitHub
 class CountingRunner:
     """Walks all attempt steps and records how many times it actually ran."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, budget_usd: float | None = None) -> None:
         self.runs = 0
+        self.states: list[WorkerState] = []
+        self.budget_usd = budget_usd
 
     async def run_attempt(self, state, on_step=None):
         self.runs += 1
+        self.states.append(state)
+        if self.budget_usd is not None:
+            state.budget_usd = self.budget_usd
         for step in STEPS:
             state.completed_steps.append(step)
             if on_step is not None:
@@ -48,9 +55,11 @@ def _args(job_id="j1"):
 
 async def test_checkpoint_persisted_after_each_step():
     store = RecordingStore()
-    conn = CodingWorkerConnector(CountingRunner(), FakeGitHub(), checkpoints=store)
+    conn = CodingWorkerConnector(
+        CountingRunner(budget_usd=2.5), FakeGitHub(), checkpoints=store
+    )
 
-    result = await conn.execute("pr:write", _args())
+    result = await conn.execute("code:write", _args())
     assert result.ok
 
     running = [steps for status, steps in store.history if status == "running"]
@@ -63,6 +72,19 @@ async def test_checkpoint_persisted_after_each_step():
     final = await store.get("j1")
     assert final.status == "opened"
     assert final.pr_number == 1
+    assert final.state_json["task_id"] == "j1"
+    assert final.state_json["profile"] == "code"
+    assert "job_id" not in final.state_json
+    assert final.state_json["completed_steps"] == list(STEPS)
+    assert final.state_json["budget_usd"] == 2.5
+    assert (
+        final.state_json["profile_state"]["code"]["worker_state"]["job_id"]
+        == "j1"
+    )
+    assert (
+        final.state_json["profile_state"]["code"]["worker_state"]["budget_usd"]
+        == 2.5
+    )
 
 
 async def test_reinvoke_after_open_is_idempotent_noop():
@@ -71,8 +93,8 @@ async def test_reinvoke_after_open_is_idempotent_noop():
     github = FakeGitHub()
     conn = CodingWorkerConnector(runner, github, checkpoints=store)
 
-    first = await conn.execute("pr:write", _args())
-    second = await conn.execute("pr:write", _args())
+    first = await conn.execute("code:write", _args())
+    second = await conn.execute("code:write", _args())
 
     assert first.ok and second.ok
     assert second.data.get("resumed") is True
@@ -80,6 +102,14 @@ async def test_reinvoke_after_open_is_idempotent_noop():
     # The worker ran once and exactly one PR exists.
     assert runner.runs == 1
     assert len(github.pulls) == 1
+
+    # Verify the outcome block on the resumed path is correctly reconstructed.
+    outcome = second.data["outcome"]
+    assert outcome["kind"] == "pull_request"
+    assert outcome["pr_number"] == second.data["pr_number"]
+    assert outcome["pr_url"] == second.data["pr_url"]
+    assert outcome["repo"] == "acme/x"
+    assert outcome["branch"] == f"openloop/job-{_args()['job_id']}"
 
 
 async def test_resume_after_crash_between_push_and_pr_open():
@@ -100,7 +130,7 @@ async def test_resume_after_crash_between_push_and_pr_open():
     conn = CodingWorkerConnector(runner, github, checkpoints=store)
 
     # First attempt: worker pushes, but opening the PR fails.
-    first = await conn.execute("pr:write", _args())
+    first = await conn.execute("code:write", _args())
     assert not first.ok
     assert first.data["status"] == "open_pr_failed"
     assert github.pulls == []
@@ -109,7 +139,7 @@ async def test_resume_after_crash_between_push_and_pr_open():
     assert "push" in cp.completed_steps
 
     # Resume: worker is NOT re-run (branch already pushed); the PR opens once.
-    second = await conn.execute("pr:write", _args())
+    second = await conn.execute("code:write", _args())
     assert second.ok
     assert runner.runs == 1  # not re-run
     assert len(github.pulls) == 1
@@ -145,11 +175,95 @@ async def test_resume_uses_checkpoint_base_not_args():
         _seed_checkpoint("j1", "open_pr_failed", STEPS, base="develop")
     )
     # Note: no "base" in args — must not fall back to "main".
-    result = await conn.execute("pr:write", {"job_id": "j1"})
+    result = await conn.execute("code:write", {"job_id": "j1"})
 
     assert result.ok
     assert runner.runs == 0  # branch already pushed
     assert github.pulls[0]["base"] == "develop"
+    # A pre-convergence flat row is rewritten in the nested contract layout.
+    migrated = await store.get("j1")
+    assert migrated.state_json["task_id"] == "j1"
+    assert "job_id" not in migrated.state_json
+    assert (
+        migrated.state_json["profile_state"]["code"]["worker_state"]["base"]
+        == "develop"
+    )
+
+
+async def test_new_workspace_task_checkpoint_resumes_from_core_identity():
+    store = InMemoryCheckpointStore()
+    runner = CountingRunner()
+    github = FakeGitHub()
+    conn = CodingWorkerConnector(runner, github, checkpoints=store)
+
+    state = WorkerState(
+        job_id="nested1",
+        repo="acme/x",
+        instruction="add retries",
+        base="develop",
+        branch="openloop/job-nested1",
+        completed_steps=[],
+        title="Add retries",
+        body="b",
+        # Deliberately stale shadows: the WorkspaceTask core is authoritative.
+        agent="stale-agent",
+        agent_id="stale-id",
+    )
+    task = WorkspaceTask(
+        task_id="nested1",
+        profile="code",
+        entry_action="code:write",
+        agent="dev-platform",
+        agent_id="durable-agent-id",
+        completed_steps=[],
+        profile_state={
+            "code": {
+                "repo": "acme/x",
+                "instruction": "add retries",
+                "base": "develop",
+                "worker_state": state.to_dict(),
+            }
+        },
+    )
+    checkpoint = _seed_checkpoint(
+        "nested1", "running", [], base="develop"
+    )
+    checkpoint.state_json = task.to_dict()
+    await store.upsert(checkpoint)
+
+    result = await conn.execute("code:write", {"job_id": "nested1"})
+
+    assert result.ok
+    assert runner.runs == 1
+    assert runner.states[0].agent == "dev-platform"
+    assert runner.states[0].agent_id == "durable-agent-id"
+    assert github.pulls[0]["base"] == "develop"
+    persisted = WorkspaceTask.from_dict((await store.get("nested1")).state_json)
+    worker = persisted.profile_state["code"]["worker_state"]
+    assert persisted.agent == "dev-platform"
+    assert persisted.agent_id == "durable-agent-id"
+    assert worker["agent"] == "dev-platform"
+    assert worker["agent_id"] == "durable-agent-id"
+
+
+async def test_checkpoint_task_id_mismatch_fails_closed():
+    store = InMemoryCheckpointStore()
+    runner = CountingRunner()
+    github = FakeGitHub()
+    conn = CodingWorkerConnector(runner, github, checkpoints=store)
+
+    checkpoint = _seed_checkpoint("row-id", "running", [])
+    task = WorkspaceTask.from_dict(checkpoint.state_json)
+    task.task_id = "different-task"
+    checkpoint.state_json = task.to_dict()
+    await store.upsert(checkpoint)
+
+    result = await conn.execute("code:write", {"job_id": "row-id"})
+
+    assert not result.ok
+    assert "does not match row id" in result.data["error"]
+    assert runner.runs == 0
+    assert github.pulls == []
 
 
 async def test_resume_before_push_reruns_worker_and_completes():
@@ -164,7 +278,7 @@ async def test_resume_before_push_reruns_worker_and_completes():
     await store.upsert(
         _seed_checkpoint("j1", "running", ["clone", "branch", "edit", "commit"])
     )
-    result = await conn.execute("pr:write", {"job_id": "j1", "repo": "acme/x",
+    result = await conn.execute("code:write", {"job_id": "j1", "repo": "acme/x",
                                              "instruction": "add retries"})
 
     assert result.ok
@@ -264,7 +378,7 @@ async def test_existing_pr_is_reused_not_duplicated():
         )
     )
 
-    result = await conn.execute("pr:write", _args())
+    result = await conn.execute("code:write", _args())
     assert result.ok
     assert runner.runs == 0  # branch already pushed
     assert len(github.pulls) == 1  # reused, not duplicated

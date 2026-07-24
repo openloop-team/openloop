@@ -9,9 +9,14 @@ from pathlib import Path
 
 from openloop.agents import load_agent
 from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
+from openloop.tasks import WorkspaceTask
 from openloop.tools import ToolGateway
-from openloop.tools.coding_worker import CodingWorkerConnector
-from openloop.tools.coding_worker import WorkerOutcome
+from openloop.tools.coding_worker import (
+    STEPS,
+    CodingWorkerConnector,
+    WorkerOutcome,
+    WorkerState,
+)
 from openloop.tools.openhands_artifacts import (
     WorkspaceArtifact,
     WorkspaceArtifactIdentity,
@@ -23,8 +28,12 @@ from openloop.tools.openhands_resume import (
 )
 from openloop.tools.github import GitHubConnector
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
-from openloop.workflows.coding_worker import _worker_phase, build_coding_worker_workflow
-from openloop.workflows.store import _now
+from openloop.workflows.coding_worker import (
+    WORKFLOW_NAME,
+    _worker_phase,
+    build_coding_worker_workflow,
+)
+from openloop.workflows.store import WorkflowInstance, _now
 from openloop.testing import FakeGitHub, FakeWorkerOrchestrator
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
@@ -300,3 +309,210 @@ async def test_workflow_can_park_repeatedly_on_typed_openhands_decision():
     assert done.status == "completed"
     assert runner.decisions[0].kind == "accept"
     assert len(github.pulls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# contract-convergence: the workflow's durable state adopts the nested
+# WorkspaceTask layout (profile_state["code"]["worker_state"]) without
+# reshaping WorkerState's own serialization or losing engine-owned keys
+# (events / openhands_decision) that live in the same dict but are not
+# WorkspaceTask fields.
+# --------------------------------------------------------------------------- #
+
+
+async def test_new_layout_initial_state_parks_wakes_and_opens_pr():
+    """The workflow's initial state can be a genuine NEW-layout WorkspaceTask
+    dict (``task_id`` + nested ``profile_state["code"]``), not just the flat
+    shape the gateway happens to produce today. It still parks at approval,
+    wakes on the approval event, drives the worker, and opens the PR — and the
+    approval event's payload (engine state, not a WorkspaceTask field) survives
+    every persist made along the way.
+    """
+    gw, engine, store, runner, github = _setup(
+        runner=FakeWorkerOrchestrator(title="Add retries", body="Adds retries.")
+    )
+
+    job_id = "new-layout-job"
+    shadow = WorkerState(
+        job_id=job_id,
+        repo="acme/x",
+        instruction="add retries",
+        base="main",
+        branch=f"openloop/job-{job_id}",
+        # The task core below is authoritative over these stale duplicates.
+        agent="stale-agent",
+        agent_id="stale-agent-id",
+    )
+    task = WorkspaceTask(
+        task_id=job_id,
+        profile="code",
+        entry_action="code:write",
+        agent="agent-name",
+        agent_id="agent-durable-id",
+        session_id="session-1",
+        profile_state={
+            "code": {
+                "repo": "acme/x",
+                "instruction": "add retries",
+                "base": "main",
+                "worker_state": shadow.to_dict(),
+            },
+        },
+    )
+
+    started = await engine.start(WORKFLOW_NAME, job_id, task.to_dict())
+    assert started.status == "waiting"
+    assert started.waiting_on == "await_approval"
+    # This really is the new nested layout: no flat job_id/repo anywhere.
+    assert "job_id" not in started.state
+    assert "repo" not in started.state
+    assert started.state["task_id"] == job_id
+    assert started.state["profile_state"]["code"]["repo"] == "acme/x"
+
+    done = await engine.send_event(
+        job_id,
+        "await_approval",
+        {"approver": "@maciag.artur", "approval_id": "appr-1"},
+    )
+
+    assert done.status == "completed"
+    assert done.result["job_id"] == job_id
+    assert done.result["pr_number"] == 1
+    assert github.pulls[0]["draft"] is True
+    assert github.pulls[0]["head"] == f"openloop/job-{job_id}"
+    assert runner.runs[0].job_id == job_id
+    assert runner.runs[0].agent == "agent-name"
+    assert runner.runs[0].agent_id == "agent-durable-id"
+    # requester_id comes from the approval event's payload, never the task.
+    assert runner.runs[0].requester_id == "maciag.artur"
+
+    # The approval event that woke this instance is still there — proof the
+    # merge into the nested layout never replaced the whole state dict.
+    assert done.state["events"]["await_approval"]["approver"] == "@maciag.artur"
+    # And the durable code state really did move to the nested location.
+    assert done.state["profile_state"]["code"]["worker_state"]["job_id"] == job_id
+    assert done.state["profile_state"]["code"]["worker_state"]["agent"] == "agent-name"
+    assert done.state["completed_steps"] == list(STEPS)
+
+
+async def test_old_flat_layout_parked_instance_rehydrates_wakes_and_resumes():
+    """Compat: a pre-convergence FLAT-layout parked instance — ``worker_state``
+    and ``events`` both at the old top-level location, no ``task_id``
+    anywhere — must still re-hydrate through ``WorkspaceTask.from_dict``'s
+    compat shim, wake on its pending OpenHands decision event, and resume
+    through to a completed PR.
+    """
+
+    class ResumingRunner:
+        def __init__(self):
+            self.decisions = []
+
+        async def resume_attempt(self, state, decision, on_step=None):
+            self.decisions.append(decision)
+            state.openhands_resume = None
+            return WorkerOutcome(state.branch, "Resumed title", "Resumed body")
+
+    gw, engine, store, runner, github = _setup(runner=ResumingRunner())
+
+    job_id = "legacy-flat-job"
+    branch = f"openloop/job-{job_id}"
+
+    resume = OpenHandsResumeState(
+        status="running",
+        conversation_id="conversation-1",
+        segment_id="segment-1",
+        base_ref="main",
+        resolved_base_commit="a" * 40,
+        image_digest=DEFAULT_OPENHANDS_SERVER_IMAGE,
+        master_key_id="key-v1",
+        slack_requester_id="maciag.artur",
+    )
+    identity = WorkspaceArtifactIdentity(job_id, "conversation-1", "segment-1", "paused")
+    artifact = WorkspaceArtifactRef(
+        WorkspaceArtifact(
+            identity=identity,
+            key=f"jobs/{job_id}/artifacts/conversation-1/segment-1.paused.artifact",
+            ciphertext_sha256="b" * 64,
+            ciphertext_bytes=10,
+            envelope_version=1,
+            master_key_id="key-v1",
+        ),
+        "git-delta",
+        "a" * 40,
+    )
+    paused = WorkerPaused(
+        "conversation-1", "segment-1", "decision-1", "Run terminal", "c" * 64, artifact,
+    )
+    resume.transition_to(
+        "parking",
+        decision_id=paused.decision_id,
+        pending_action_summary=paused.pending_action_summary,
+        pending_action_fingerprint=paused.pending_action_fingerprint,
+        workspace_artifact=artifact,
+    )
+    resume.transition_to("parked")
+
+    worker_state = WorkerState(
+        job_id=job_id,
+        repo="acme/x",
+        instruction="add retries",
+        base="main",
+        branch=branch,
+        agent="a",
+        agent_id="agent-1",
+        requester_id="maciag.artur",
+        approval_id="appr-1",
+        session_id="session-1",
+    )
+    worker_state.completed_steps = ["clone", "branch", "edit"]
+    worker_state.openhands_resume = resume
+
+    # Hand-rolled pre-convergence FLAT row: worker_state and events both live
+    # at the top level of state; no task_id anywhere (the pre-Task-5 shape).
+    instance = WorkflowInstance(
+        id=job_id,
+        workflow=WORKFLOW_NAME,
+        status="waiting",
+        waiting_on="openhands_decision:decision-1",
+        completed_steps=["await_approval"],
+        state={
+            "job_id": job_id,
+            "repo": "acme/x",
+            "instruction": "add retries",
+            "base": "main",
+            "agent": "a",
+            "agent_id": "agent-1",
+            "approval_id": "appr-1",
+            "session_id": "session-1",
+            "events": {
+                "await_approval": {
+                    "approver": "@maciag.artur",
+                    "approval_id": "appr-1",
+                },
+            },
+            "worker_state": worker_state.to_dict(),
+        },
+    )
+    assert await store.create(instance)
+
+    done = await engine.send_event(
+        job_id,
+        "openhands_decision:decision-1",
+        {
+            "kind": "accept",
+            "decision_id": "decision-1",
+            "event_id": "Ev1",
+            "actor_id": "maciag.artur",
+        },
+    )
+
+    assert done.status == "completed"
+    assert runner.decisions[0].kind == "accept"
+    assert len(github.pulls) == 1
+    assert github.pulls[0]["head"] == branch
+    # The pre-existing approval event payload survived rehydration and every
+    # persist made while waking and resuming this legacy row.
+    assert done.state["events"]["await_approval"]["approver"] == "@maciag.artur"
+    # The durable state has migrated to the nested WorkspaceTask location.
+    assert done.state["task_id"] == job_id
+    assert done.state["profile_state"]["code"]["worker_state"]["job_id"] == job_id

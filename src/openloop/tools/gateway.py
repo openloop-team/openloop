@@ -13,6 +13,7 @@ from openloop.approvals.store import (
     ApprovalStore,
     InMemoryApprovalStore,
 )
+from openloop.tools.aliases import ACTION_ALIASES, _canonical_action
 from openloop.tools.base import (
     Invocation,
     Tool,
@@ -29,6 +30,13 @@ if TYPE_CHECKING:
     from openloop.workflows.engine import WorkflowEngine
 
 logger = logging.getLogger(__name__)
+
+# ACTION_ALIASES / _canonical_action live in openloop.tools.aliases (see that
+# module's docstring for why) and are re-exported here — this module is the
+# single invoke choke point where both the model path and durable
+# approval-record resolution apply the alias, and existing imports of these
+# two names from `gateway` keep working.
+
 
 # Function names the model sees must match ^[A-Za-z0-9_-]+$, but action names
 # use "." and ":". Encode for the wire, keep an exact reverse map per request.
@@ -72,22 +80,40 @@ class ToolGateway:
         self._tools[tool.name] = tool
 
     def available_actions(self, agent: Agent) -> list[str]:
-        """Allowed actions that also have a registered tool to run them."""
+        """Allowed actions that also have a registered tool to run them.
+
+        An agent's YAML may still declare a legacy action name (e.g.
+        ``coding_worker.pr:write``) that has since been renamed — canonicalize
+        to find the registered tool and its supported permissions (the same
+        as ``policy.allowed_actions`` and ``invoke``'s alias handling), but
+        report back the action exactly as the YAML declares it. Without the
+        canonical lookup, a renamed connector silently disappears from the
+        model's tool-calling definitions for every agent whose YAML hasn't
+        migrated yet; reporting the canonical spelling instead of the
+        as-declared one would needlessly change the model-facing function
+        name mid-migration (``invoke`` re-canonicalizes whatever spelling it
+        is handed, so either survives the round trip — this just keeps the
+        visible name stable until the YAML itself migrates).
+        """
         out = []
         for tool in agent.spec.tools:
-            impl = self._tools.get(tool.name)
-            if impl is None:
-                continue
             for perm in tool.permissions:
-                if perm in impl.supported_permissions():
-                    out.append(f"{tool.name}.{perm}")
+                raw_action = f"{tool.name}.{perm}"
+                tool_name, permission = split_action(_canonical_action(raw_action))
+                impl = self._tools.get(tool_name)
+                if impl is not None and permission in impl.supported_permissions():
+                    out.append(raw_action)
         return sorted(out)
 
     def tool_specs(self, agent: Agent) -> ToolSpecs:
         """Function-calling definitions for the agent's available actions."""
         specs = ToolSpecs()
         for action in self.available_actions(agent):
-            tool_name, permission = split_action(action)
+            # `action` may still be the as-declared (legacy) spelling — see
+            # `available_actions`'s docstring — so canonicalize to find the
+            # registered tool, but keep `action` itself for the function name
+            # and the reverse map (invoke() canonicalizes on receipt either way).
+            tool_name, permission = split_action(_canonical_action(action))
             spec = self._tools[tool_name].describe(permission)
             fname = _fn_name(action)
             specs.by_name[fname] = action
@@ -113,6 +139,8 @@ class ToolGateway:
         warm_key: str | None = None,
         session_id: str | None = None,
     ) -> Invocation:
+        requested_action = action
+        action = _canonical_action(action)
         tool_name, permission = split_action(action)
 
         if not is_allowed(agent, action):
@@ -122,6 +150,21 @@ class ToolGateway:
             )
 
         tool = self._tools.get(tool_name)
+        if (
+            tool is None or permission not in tool.supported_permissions()
+        ) and requested_action != action:
+            # Transitional window (Stage 1 migration): ACTION_ALIASES already
+            # points callers at the connector's canonical action before the
+            # connector itself is re-registered under that canonical tool
+            # name. Route on the action as the caller actually spelled it —
+            # `action` (canonical) still governs the allowlist check above,
+            # the stored approval-record's ``action``, and the summary below,
+            # so policy and display stay in canonical space either way.
+            legacy_tool_name, legacy_permission = split_action(requested_action)
+            legacy_tool = self._tools.get(legacy_tool_name)
+            if legacy_tool is not None and legacy_permission in legacy_tool.supported_permissions():
+                tool_name, permission, tool = legacy_tool_name, legacy_permission, legacy_tool
+
         if tool is None or permission not in tool.supported_permissions():
             return Invocation(
                 status="forbidden",
@@ -199,9 +242,33 @@ class ToolGateway:
 
         # Connectors may require approval intrinsically regardless of an
         # accidental omission in an agent's config.
+        #
+        # A plain membership check against the agent's declared `require_for`
+        # list has no alias awareness of its own. Canonicalize both sides here,
+        # at the alias choke point, exactly like `policy.is_allowed` does for
+        # the allowlist: a
+        # legacy-YAML agent's `require_for` still names the pre-alias action
+        # (`coding_worker.pr:write`), and the caller may invoke using either
+        # spelling — comparing only one side (or comparing `action` against
+        # the raw list) lets an aliased spelling slip past a gate the other
+        # spelling would have caught. Symmetric canonicalization closes that,
+        # rather than teaching the schema class about the tools-package alias
+        # map.
+        canonical_require_for = {
+            _canonical_action(entry) for entry in agent.spec.approvals.require_for
+        }
+        needs_agent_approval = action in canonical_require_for
+        # Gate-as-floor: a connector may declare a per-permission approval
+        # floor (its profile's mandatory gate) that agent config can never
+        # remove — only ADD to via require_for. This is an additional
+        # disjunct alongside (never a replacement for) needs_agent_approval
+        # and the tool-wide `requires_approval` flag above.
+        floor = getattr(tool, "requires_approval_for", None)
+        needs_floor = floor(permission) if callable(floor) else False
         if (
-            agent.spec.approvals.requires_approval(action)
+            needs_agent_approval
             or getattr(tool, "requires_approval", False)
+            or needs_floor
         ):
             # The execution mode this invoke() commits to, recorded durably
             # with the row so every decided path routes on the marker — never
@@ -313,9 +380,9 @@ class ToolGateway:
             inv.decided_by = claimed.decided_by
             return inv
 
-        tool = self._tools[claimed.tool]
+        tool, permission = self._resolve_stored_tool(claimed.tool, claimed.permission)
         result = await tool.execute(
-            claimed.permission, _args_for_execute(tool, claimed)
+            permission, _args_for_execute(tool, claimed, permission)
         )
         # Mark AFTER execute returns; containment in the helper — a marking
         # failure must never discard the only copy of the ToolResult.
@@ -419,6 +486,27 @@ class ToolGateway:
             decided_by=request.decided_by,
         )
 
+    def _resolve_stored_tool(
+        self, tool_name: str, permission: str
+    ) -> tuple[Tool | None, str]:
+        """Canonicalize a STORED ``(tool, permission)`` pair to the registered tool.
+
+        Every decision/resolve/reconcile-path lookup keyed on a durable row's
+        ``tool``/``permission`` must go through here, never a raw
+        ``self._tools[...]``/``self._tools.get(...)``: a row written before a
+        connector rename (e.g. ``coding_worker``/``pr:write``) stores the
+        pre-rename spelling forever, and only ``_canonical_action`` (the same
+        alias map ``invoke`` applies on the way in) knows it now lives at
+        ``workspace_task``/``code:write``. Returns the canonical permission
+        alongside the tool so a caller's ``execute(...)`` uses the spelling
+        the renamed connector actually accepts — the stored permission itself
+        may be stale even when the tool name isn't.
+        """
+        canonical_tool_name, canonical_permission = split_action(
+            _canonical_action(f"{tool_name}.{permission}")
+        )
+        return self._tools.get(canonical_tool_name), canonical_permission
+
     def _classify(self, request: ApprovalRequest) -> tuple[str, str | None]:
         """``("workflow", instance_id)`` / ``("direct", None)`` / ``("unknown", None)``.
 
@@ -433,7 +521,7 @@ class ToolGateway:
             return "workflow", request.workflow_instance_id
         if request.workflow_backed is False:
             return "direct", None
-        tool = self._tools.get(request.tool)
+        tool, _ = self._resolve_stored_tool(request.tool, request.permission)
         if tool is None:
             return "unknown", None
         if getattr(tool, "workflow", None):
@@ -450,21 +538,24 @@ class ToolGateway:
         ``None`` means every capability the effect dereferences is present.
         """
         if request.workflow_backed is False:
-            if self._tools.get(request.tool) is None:
+            tool, _ = self._resolve_stored_tool(request.tool, request.permission)
+            if tool is None:
                 return f"tool {request.tool!r} is not registered"
             return None
         if request.workflow_backed is True:
-            return self._workflow_effect_unavailable(request.tool)
+            return self._workflow_effect_unavailable(request.tool, request.permission)
         kind, _ = self._classify(request)
         if kind == "unknown":
             return f"tool {request.tool!r} is not registered"
         if kind == "workflow":
-            return self._workflow_effect_unavailable(request.tool)
+            return self._workflow_effect_unavailable(request.tool, request.permission)
         return None
 
-    def _workflow_effect_unavailable(self, tool_name: str) -> str | None:
+    def _workflow_effect_unavailable(
+        self, tool_name: str, permission: str
+    ) -> str | None:
         """Check the exact capabilities ``_ensure_approved_workflow`` dereferences."""
-        tool = self._tools.get(tool_name)
+        tool, _ = self._resolve_stored_tool(tool_name, permission)
         if tool is None:
             return f"tool {tool_name!r} is not registered"
         workflow = getattr(tool, "workflow", None)
@@ -485,7 +576,7 @@ class ToolGateway:
         consume-once). Callers gate on ``_approve_effect_unavailable`` first.
         The event payload's approver is always the row's ``decided_by``.
         """
-        tool = self._tools[request.tool]
+        tool, _ = self._resolve_stored_tool(request.tool, request.permission)
         instance_id = request.workflow_instance_id or _instance_id(request)
         await self.engine.start(
             tool.workflow, instance_id, _workflow_initial_state(request)
@@ -576,8 +667,15 @@ def _workflow_initial_state(request: ApprovalRequest) -> dict:
     return state
 
 
-def _args_for_execute(tool: Tool, request: ApprovalRequest) -> dict:
+def _args_for_execute(tool: Tool, request: ApprovalRequest, permission: str) -> dict:
     """Args for the direct (engine-less) execute of an approved request.
+
+    ``permission`` is the CANONICAL permission (already resolved via
+    ``ToolGateway._resolve_stored_tool``), not necessarily ``request.permission``
+    verbatim — a pre-rename row's stored permission may no longer be one the
+    resolved tool accepts (e.g. ``pr:write`` vs. the renamed connector's
+    ``code:write``), so every dereference into the tool goes through the
+    canonical spelling.
 
     A versioned action gets the record's ``args_schema`` folded in — the same
     key the workflow path carries in its initial state — so the consumer can
@@ -585,7 +683,7 @@ def _args_for_execute(tool: Tool, request: ApprovalRequest) -> dict:
     receive their args untouched; an injected key would leak into the foreign
     tool call.
     """
-    if tool.describe(request.permission).version is None:
+    if tool.describe(permission).version is None:
         return request.args
     return {
         **request.args,
@@ -646,7 +744,7 @@ def _summarize(action: str, args: dict) -> str:
             f"({args.get('head', '?')} → {args.get('base', 'main')}): "
             f"{args.get('title', '')}"
         ).strip()
-    if action == "coding_worker.pr:write":
+    if action == "workspace_task.code:write":
         # Be explicit: this gate lets the worker START and open a *draft* PR.
         # It is NOT a review of a generated diff (the draft PR is that gate).
         return (

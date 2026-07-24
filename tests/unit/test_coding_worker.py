@@ -46,15 +46,23 @@ def _state(job_id="j1"):
 
 
 def test_supported_permission():
-    assert _connector().supported_permissions() == {"pr:write"}
+    assert _connector().supported_permissions() == {"code:write"}
+
+
+def test_connector_is_workspace_task_tool():
+    assert _connector().name == "workspace_task"
+    # Task 7 flipped both the engine registration (WORKFLOW_NAME) and this
+    # attribute together, so a workflow-backed invoke starts an instance
+    # under the name the engine actually has registered.
+    assert _connector().workflow == "workspace_task"
 
 
 def test_prepare_args_mints_job_id_once():
     conn = _connector()
-    args = conn.prepare_args("pr:write", {"repo": "a/b", "instruction": "do x"})
+    args = conn.prepare_args("code:write", {"repo": "a/b", "instruction": "do x"})
     assert args["job_id"]
     # Idempotent: an existing job_id is preserved (replay across approval).
-    again = conn.prepare_args("pr:write", {**args})
+    again = conn.prepare_args("code:write", {**args})
     assert again["job_id"] == args["job_id"]
 
 
@@ -66,7 +74,7 @@ def test_prepare_args_stamps_the_invoking_agent():
     # A model-supplied "agent"/"agent_id" arg must never redirect spend
     # attribution — the gateway-passed identity wins unconditionally.
     args = conn.prepare_args(
-        "pr:write",
+        "code:write",
         {
             "repo": "a/b",
             "instruction": "do x",
@@ -102,7 +110,7 @@ async def test_execute_runs_attempt_then_opens_draft_pr():
     conn = _connector(runner, github)
 
     result = await conn.execute(
-        "pr:write",
+        "code:write",
         {"repo": "acme/x", "instruction": "add retries", "job_id": "job123"},
     )
 
@@ -146,7 +154,7 @@ async def test_attempt_failure_records_outcome_without_opening_pr():
     github = FakeGitHub()
     conn = _connector(BoomRunner(), github)
     result = await conn.execute(
-        "pr:write", {"repo": "a/b", "instruction": "x", "job_id": "j1"}
+        "code:write", {"repo": "a/b", "instruction": "x", "job_id": "j1"}
     )
 
     assert not result.ok
@@ -167,7 +175,7 @@ async def test_open_pr_failure_records_outcome_without_crashing():
     github = BoomGitHub()
     conn = _connector(runner, github)
     result = await conn.execute(
-        "pr:write", {"repo": "a/b", "instruction": "x", "job_id": "j1"}
+        "code:write", {"repo": "a/b", "instruction": "x", "job_id": "j1"}
     )
 
     assert not result.ok
@@ -184,7 +192,7 @@ async def test_result_surfaces_worker_model_spend():
     )
     conn = _connector(runner, FakeGitHub())
     result = await conn.execute(
-        "pr:write", {"repo": "a/b", "instruction": "x", "job_id": "j2"}
+        "code:write", {"repo": "a/b", "instruction": "x", "job_id": "j2"}
     )
     assert result.data["cost_usd"] == 0.12
     assert result.data["prompt_tokens"] == 100
@@ -456,3 +464,14 @@ def test_parse_generation_splits_title_body_diff():
 def test_parse_generation_requires_a_diff():
     with pytest.raises(RuntimeError, match="no diff"):
         _parse_generation("TITLE: nothing\nBODY: empty\nDIFF:\n")
+
+
+async def test_success_result_carries_pull_request_outcome():
+    conn = _connector()
+    args = conn.prepare_args("code:write", {"repo": "a/b", "instruction": "do x"})
+    result = await conn.execute("code:write", args)
+    assert result.ok
+    outcome = result.data["outcome"]
+    assert outcome["kind"] == "pull_request"
+    assert outcome["repo"] == "a/b"
+    assert outcome["pr_number"] == result.data["pr_number"]

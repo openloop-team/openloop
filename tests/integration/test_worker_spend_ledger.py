@@ -78,7 +78,7 @@ async def test_connector_path_fails_closed_over_cap(monkeypatch):
     )
 
     result = await connector.execute(
-        "pr:write", {"repo": "acme/x", "instruction": "x", "job_id": "j1"}
+        "code:write", {"repo": "acme/x", "instruction": "x", "job_id": "j1"}
     )
 
     assert not result.ok
@@ -104,7 +104,7 @@ async def test_workflow_path_fails_closed_over_cap(monkeypatch):
     )
 
     await engine.start(
-        "coding_worker", "j1",
+        "workspace_task", "j1",
         {"job_id": "j1", "repo": "acme/x", "instruction": "x"},
     )
     instance = await engine.send_event("j1", "await_approval", {})
@@ -146,7 +146,7 @@ async def test_in_run_abort_records_partial_spend_and_fails_closed(monkeypatch):
     connector = CodingWorkerConnector(orch, github, checkpoints=InMemoryCheckpointStore())
 
     result = await connector.execute(
-        "pr:write", {"repo": "acme/x", "instruction": "x", "job_id": "j1"}
+        "code:write", {"repo": "acme/x", "instruction": "x", "job_id": "j1"}
     )
 
     assert not result.ok
@@ -173,7 +173,7 @@ async def test_connector_path_monthly_gate_fails_closed(monkeypatch):
     ))
 
     result = await connector.execute(
-        "pr:write", {"repo": "acme/x", "instruction": "x", "job_id": "j1"}
+        "code:write", {"repo": "acme/x", "instruction": "x", "job_id": "j1"}
     )
 
     assert not result.ok
@@ -200,7 +200,7 @@ async def test_workflow_path_monthly_gate_fails_closed(monkeypatch):
     ))
 
     await engine.start(
-        "coding_worker", "j1",
+        "workspace_task", "j1",
         {"job_id": "j1", "repo": "acme/x", "instruction": "x"},
     )
     instance = await engine.send_event("j1", "await_approval", {})
@@ -219,7 +219,7 @@ async def test_within_budget_run_is_recorded_and_ships(monkeypatch):
     )
 
     result = await connector.execute(
-        "pr:write",
+        "code:write",
         {
             "repo": "acme/x", "instruction": "x", "job_id": "j2",
             # The engine-less path receives session_id via _args_for_execute the

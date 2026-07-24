@@ -63,9 +63,6 @@ class Approvals(BaseModel):
     require_for: list[str] = Field(default_factory=list)
     approvers: list[str] = Field(default_factory=list)
 
-    def requires_approval(self, action: str) -> bool:
-        return action in self.require_for
-
 
 class Budget(BaseModel):
     monthly_usd: float | None = None
