@@ -44,3 +44,20 @@ def test_profile_registry_matches_legacy_gate_decisions():
     assert profile_for("code:write").gate is Gate.START
     assert profile_for("investigate:read").gate is Gate.NONE
     assert profile_for("bogus:perm") is None
+
+
+def test_from_dict_rehydrates_old_flat_coding_worker_layout():
+    old = {
+        "job_id": "j1", "repo": "a/b", "instruction": "x", "base": "main",
+        "agent": "dev", "agent_id": "id1", "approval_id": "ap1",
+        "session_id": "s1", "warm_key": "w1",
+        "worker_state": {"job_id": "j1", "repo": "a/b", "branch": "openloop/job-j1"},
+    }
+    t = WorkspaceTask.from_dict(old)
+    assert t.task_id == "j1"
+    assert t.profile == "code"
+    assert t.agent == "dev" and t.agent_id == "id1"
+    assert t.profile_state["code"]["worker_state"]["branch"] == "openloop/job-j1"
+    # New layout round-trips too:
+    again = WorkspaceTask.from_dict(t.to_dict())
+    assert again == t
