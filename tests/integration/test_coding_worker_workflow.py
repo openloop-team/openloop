@@ -11,9 +11,12 @@ from openloop.agents import load_agent
 from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
 from openloop.tasks import WorkspaceTask
 from openloop.tools import ToolGateway
-from openloop.tools.coding_worker import CodingWorkerConnector
-from openloop.tools.coding_worker import WorkerOutcome
-from openloop.tools.coding_worker import WorkerState
+from openloop.tools.coding_worker import (
+    STEPS,
+    CodingWorkerConnector,
+    WorkerOutcome,
+    WorkerState,
+)
 from openloop.tools.openhands_artifacts import (
     WorkspaceArtifact,
     WorkspaceArtifactIdentity,
@@ -330,6 +333,16 @@ async def test_new_layout_initial_state_parks_wakes_and_opens_pr():
     )
 
     job_id = "new-layout-job"
+    shadow = WorkerState(
+        job_id=job_id,
+        repo="acme/x",
+        instruction="add retries",
+        base="main",
+        branch=f"openloop/job-{job_id}",
+        # The task core below is authoritative over these stale duplicates.
+        agent="stale-agent",
+        agent_id="stale-agent-id",
+    )
     task = WorkspaceTask(
         task_id=job_id,
         profile="code",
@@ -338,7 +351,12 @@ async def test_new_layout_initial_state_parks_wakes_and_opens_pr():
         agent_id="agent-durable-id",
         session_id="session-1",
         profile_state={
-            "code": {"repo": "acme/x", "instruction": "add retries", "base": "main"},
+            "code": {
+                "repo": "acme/x",
+                "instruction": "add retries",
+                "base": "main",
+                "worker_state": shadow.to_dict(),
+            },
         },
     )
 
@@ -373,6 +391,8 @@ async def test_new_layout_initial_state_parks_wakes_and_opens_pr():
     assert done.state["events"]["await_approval"]["approver"] == "@maciag.artur"
     # And the durable code state really did move to the nested location.
     assert done.state["profile_state"]["code"]["worker_state"]["job_id"] == job_id
+    assert done.state["profile_state"]["code"]["worker_state"]["agent"] == "agent-name"
+    assert done.state["completed_steps"] == list(STEPS)
 
 
 async def test_old_flat_layout_parked_instance_rehydrates_wakes_and_resumes():

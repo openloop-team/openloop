@@ -7,10 +7,12 @@ checkpoint instead of restarting, and the idempotency keys on
 :class:`~openloop.tools.coding_worker.WorkerState` keep the durable side effects
 (branch push, PR open) from being duplicated.
 
-The record stores **both** ``state_json`` (the full serialized worker state)
-**and** ``completed_steps`` as its own column — not just an enum ``status``.
-Failures happen *halfway through* a named phase, so a coarse status alone would
-lie about partial progress. Phase C generalizes this into a workflow store.
+The record stores **both** ``state_json`` (the full serialized
+``WorkspaceTask``, with the unchanged worker state nested under its code
+profile) **and** ``completed_steps`` as its own queryable column — not just an
+enum ``status``. Failures happen *halfway through* a named phase, so a coarse
+status alone would lie about partial progress. Phase C generalizes this into a
+workflow store.
 """
 
 from __future__ import annotations

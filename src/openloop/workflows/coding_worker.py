@@ -30,6 +30,8 @@ from openloop.tools.coding_worker import (
     WorkerState,
     _branch_for,
     _pr_body,
+    _sync_worker_state_to_task,
+    _worker_state_for_task,
 )
 from openloop.tools.github import GitHubClient
 from openloop.tools.openhands_resume import ResumeDecision, WorkerPaused
@@ -125,10 +127,19 @@ def build_workspace_task_workflow(
         def _persist() -> None:
             s.update(task.to_dict())
 
-        state = (
-            WorkerState.from_dict(code_state["worker_state"])
-            if code_state.get("worker_state") is not None
-            else WorkerState(
+        event_requester = (
+            ((s.get("events") or {}).get(APPROVAL_EVENT) or {})
+            .get("approver", "")
+            .lstrip("@")
+            or None
+        )
+        if task.requester_id is None:
+            task.requester_id = event_requester
+
+        if code_state.get("worker_state") is not None:
+            state = _worker_state_for_task(task, lift_legacy_progress=True)
+        else:
+            state = WorkerState(
                 job_id=task.task_id,
                 repo=code_state["repo"],
                 instruction=code_state["instruction"],
@@ -140,12 +151,7 @@ def build_workspace_task_workflow(
                 # first (rename-safe, recreate-fail-closed).
                 agent=task.agent,
                 agent_id=task.agent_id,
-                requester_id=(
-                    ((s.get("events") or {}).get(APPROVAL_EVENT) or {})
-                    .get("approver", "")
-                    .lstrip("@")
-                    or None
-                ),
+                requester_id=task.requester_id,
                 # The approval that authorized this run (attribution envelope,
                 # finding 4), stamped into the durable workflow state by the
                 # gateway — carried so worker spend traces to its authorization.
@@ -158,7 +164,7 @@ def build_workspace_task_workflow(
                 # orchestrator reuse this thread's kept checkout.
                 warm_key=task.warm_key,
             )
-        )
+            _sync_worker_state_to_task(task, state)
 
         async def on_step(ws: WorkerState) -> None:
             # Record a human progress phrase so the surface can show "still
@@ -166,7 +172,7 @@ def build_workspace_task_workflow(
             # the task itself (a real WorkspaceTask field) so it round-trips
             # through the same merge as everything else, never as a parallel
             # direct write that a later merge could clobber.
-            code_state["worker_state"] = ws.to_dict()
+            _sync_worker_state_to_task(task, ws)
             task.progress = _worker_phase(ws.completed_steps)
             _persist()
             await ctx.checkpoint()
@@ -176,7 +182,7 @@ def build_workspace_task_workflow(
             event = f"openhands_decision:{resume.decision_id}"
             payload = s.get("events", {}).get(event)
             if payload is None:
-                code_state["worker_state"] = state.to_dict()
+                _sync_worker_state_to_task(task, state)
                 _persist()
                 raise WorkflowPark(event)
             decision = ResumeDecision.from_dict(payload)
@@ -199,7 +205,7 @@ def build_workspace_task_workflow(
             )
         else:
             outcome = await orchestrator.run_attempt(state, on_step=on_step)
-        code_state["worker_state"] = state.to_dict()
+        _sync_worker_state_to_task(task, state)
         if isinstance(outcome, WorkerPaused):
             s["openhands_decision"] = {
                 "decision_id": outcome.decision_id,
@@ -253,17 +259,11 @@ def build_workspace_task_workflow(
         cleanup = getattr(orchestrator, "cleanup_attempt", None)
         worker_data = code_state.get("worker_state")
         if cleanup is not None and worker_data is not None:
-            state = WorkerState.from_dict(worker_data)
+            state = _worker_state_for_task(task, lift_legacy_progress=True)
             if state.openhands_resume is not None:
                 await cleanup(state, on_step=None)
-                code_state["worker_state"] = state.to_dict()
-                # Targeted nested write, not a blanket task.to_dict() merge:
-                # this step never touches progress/events/openhands_decision,
-                # so there is nothing to gain (and a compat rehydrate's
-                # ``progress`` reset to lose) from merging the whole task back.
-                s.setdefault("profile_state", {}).setdefault("code", {}).update(
-                    code_state
-                )
+                _sync_worker_state_to_task(task, state)
+                s.update(task.to_dict())
 
     def _steps_for(state: dict) -> list[Step]:
         if state.get("profile", "code") == "investigate":

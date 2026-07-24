@@ -87,6 +87,30 @@ def test_workspace_task_budget_usd_roundtrips():
     ).budget_usd is None
 
 
+def test_from_dict_rehydrates_old_direct_worker_checkpoint_layout():
+    old_worker = {
+        "job_id": "j2",
+        "repo": "a/b",
+        "instruction": "x",
+        "base": "develop",
+        "branch": "openloop/job-j2",
+        "completed_steps": ["clone", "branch"],
+        "agent": "dev",
+        "agent_id": "id2",
+        "budget_usd": 3.5,
+        "openhands_resume": None,
+    }
+
+    task = WorkspaceTask.from_dict(old_worker)
+
+    assert task.task_id == "j2"
+    assert task.agent == "dev"
+    assert task.agent_id == "id2"
+    assert task.budget_usd == 3.5
+    assert task.completed_steps == ["clone", "branch"]
+    assert task.profile_state["code"]["worker_state"] == old_worker
+
+
 def test_contract_types_are_consumed_by_runtime():
     """Guard the inverse of the gap that motivated contract convergence.
 

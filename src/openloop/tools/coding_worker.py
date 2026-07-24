@@ -326,6 +326,71 @@ def _branch_for(job_id: str) -> str:
     return f"openloop/job-{job_id}"
 
 
+def _worker_state_for_task(
+    task: WorkspaceTask, *, lift_legacy_progress: bool = False
+) -> WorkerState:
+    """Reconstruct the unchanged code-profile shadow behind WorkspaceTask.
+
+    Shared identity comes from the task core. ``lift_legacy_progress`` is used
+    only by the workflow reader to migrate rows written during the partial
+    convergence window, when completed steps and budget were updated solely in
+    the nested worker blob.
+    """
+    code_state = task.profile_state.get("code")
+    if not isinstance(code_state, dict):
+        raise ValueError("code WorkspaceTask is missing profile_state['code']")
+    worker_data = code_state.get("worker_state")
+    if not isinstance(worker_data, dict):
+        raise ValueError("code WorkspaceTask is missing its worker_state")
+
+    state = WorkerState.from_dict(worker_data)
+    if lift_legacy_progress:
+        if not task.completed_steps and state.completed_steps:
+            task.completed_steps = list(state.completed_steps)
+        if task.budget_usd is None and worker_data.get("budget_usd") is not None:
+            task.budget_usd = worker_data["budget_usd"]
+
+    state.job_id = task.task_id
+    state.agent = task.agent
+    state.agent_id = task.agent_id
+    state.requester_id = task.requester_id
+    state.approval_id = task.approval_id
+    state.session_id = task.session_id
+    state.warm_key = task.warm_key
+    state.completed_steps = list(task.completed_steps)
+    state.budget_usd = task.budget_usd
+    for key in ("repo", "instruction", "base"):
+        value = code_state.get(key)
+        if value is not None:
+            setattr(state, key, value)
+    return state
+
+
+def _sync_worker_state_to_task(task: WorkspaceTask, state: WorkerState) -> None:
+    """Persist worker mutations without yielding core-owned identity."""
+    state.job_id = task.task_id
+    state.agent = task.agent
+    state.agent_id = task.agent_id
+    state.requester_id = task.requester_id
+    state.approval_id = task.approval_id
+    state.session_id = task.session_id
+    state.warm_key = task.warm_key
+
+    task.completed_steps = list(state.completed_steps)
+    if state.budget_usd is not None:
+        task.budget_usd = state.budget_usd
+    state.budget_usd = task.budget_usd
+    code_state = task.profile_state.setdefault("code", {})
+    code_state.update(
+        {
+            "repo": state.repo,
+            "instruction": state.instruction,
+            "base": state.base,
+            "worker_state": state.to_dict(),
+        }
+    )
+
+
 def _failed(
     job_id: str, state: WorkerState, status: str, exc: Exception
 ) -> ToolResult:
@@ -553,6 +618,62 @@ class CodingWorkerConnector:
             version=CODING_WORKER_ARGS_VERSION,
         )
 
+    @staticmethod
+    def _new_code_task(
+        args: dict, *, job_id: str, base: str
+    ) -> tuple[WorkspaceTask, WorkerState]:
+        """Build the authoritative task and its code-profile working adapter."""
+        state = WorkerState(
+            job_id=job_id,
+            repo=args["repo"],
+            instruction=args["instruction"],
+            base=base,
+            branch=_branch_for(job_id),
+            agent=args.get("agent"),
+            agent_id=args.get("agent_id"),
+            requester_id=args.get("approved_by"),
+            approval_id=args.get("approval_id"),
+            session_id=args.get("session_id"),
+            warm_key=args.get("warm_key"),
+        )
+        task = WorkspaceTask(
+            task_id=job_id,
+            profile="code",
+            entry_action=CODING_WORKER_CODE_WRITE,
+            agent=state.agent,
+            agent_id=state.agent_id,
+            requester_id=state.requester_id,
+            approval_id=state.approval_id,
+            session_id=state.session_id,
+            warm_key=state.warm_key,
+            profile_state={
+                "code": {
+                    "repo": state.repo,
+                    "instruction": state.instruction,
+                    "base": state.base,
+                    "worker_state": state.to_dict(),
+                }
+            },
+        )
+        return task, state
+
+    @staticmethod
+    def _load_code_task(
+        data: dict, *, expected_task_id: str | None = None
+    ) -> tuple[WorkspaceTask, WorkerState]:
+        task = WorkspaceTask.from_dict(data)
+        if task.profile != "code" or task.entry_action != CODING_WORKER_CODE_WRITE:
+            raise ValueError(
+                "checkpoint has unexpected task contract "
+                f"{task.profile!r}/{task.entry_action!r}"
+            )
+        if expected_task_id is not None and task.task_id != expected_task_id:
+            raise ValueError(
+                f"checkpoint task_id {task.task_id!r} does not match "
+                f"row id {expected_task_id!r}"
+            )
+        return task, _worker_state_for_task(task)
+
     async def execute(self, permission: str, args: dict) -> ToolResult:
         if permission == CODING_WORKER_INVESTIGATE_READ:
             return await self._execute_investigate(args)
@@ -570,21 +691,22 @@ class CodingWorkerConnector:
             return _opened_result(cp)
 
         if cp is not None:
-            state = WorkerState.from_dict(cp.state_json)
+            try:
+                task, state = self._load_code_task(
+                    cp.state_json, expected_task_id=job_id
+                )
+            except Exception as exc:  # noqa: BLE001 — reject malformed durable state
+                return ToolResult(
+                    ok=False,
+                    summary=f"coding worker job {job_id} failed: {exc}",
+                    data={
+                        "job_id": job_id,
+                        "status": "failed",
+                        "error": str(exc),
+                    },
+                )
         else:
-            state = WorkerState(
-                job_id=job_id,
-                repo=args["repo"],
-                instruction=args["instruction"],
-                base=base,
-                branch=_branch_for(job_id),
-                agent=args.get("agent"),
-                agent_id=args.get("agent_id"),
-                requester_id=args.get("approved_by"),
-                approval_id=args.get("approval_id"),
-                session_id=args.get("session_id"),
-                warm_key=args.get("warm_key"),
-            )
+            task, state = self._new_code_task(args, job_id=job_id, base=base)
 
         resume = state.openhands_resume
         if resume is not None and resume.status == "parked":
@@ -598,7 +720,7 @@ class CodingWorkerConnector:
             # The workspace is ephemeral, so local steps (clone…commit) can't
             # resume from a crash — only the push survives. Run a fresh attempt.
             state.completed_steps = []
-            await self._save(state, "running")
+            await self._save(task, state, "running")
             try:
                 if resume is not None and resume.status in {
                     "finalizing",
@@ -612,30 +734,34 @@ class CodingWorkerConnector:
                             raise OpenHandsResumeError(
                                 "finalizing OpenHands recovery is unavailable"
                             )
-                        await reconcile(state, on_step=self._checkpointer())
+                        await reconcile(
+                            state, on_step=self._checkpointer(task)
+                        )
                     deliver = getattr(self.orchestrator, "deliver_terminal", None)
                     if deliver is None:
                         raise OpenHandsResumeError(
                             "terminal OpenHands recovery is unavailable"
                         )
-                    outcome = await deliver(state, on_step=self._checkpointer())
+                    outcome = await deliver(
+                        state, on_step=self._checkpointer(task)
+                    )
                 elif resume is not None:
                     raise OpenHandsResumeError(
                         f"active OpenHands {resume.status} segment cannot be replayed"
                     )
                 else:
                     outcome = await self.orchestrator.run_attempt(
-                        state, on_step=self._checkpointer()
+                        state, on_step=self._checkpointer(task)
                     )
             except Exception as exc:  # noqa: BLE001
-                await self._save(state, "failed", error=str(exc))
+                await self._save(task, state, "failed", error=str(exc))
                 return _failed(job_id, state, "failed", exc)
             if isinstance(outcome, WorkerPaused):
-                await self._save(state, "parked")
+                await self._save(task, state, "parked")
                 return _parked_result(state)
             state.title, state.body = outcome.title, outcome.body
             cost = (outcome.cost_usd, outcome.prompt_tokens, outcome.completion_tokens)
-            await self._save(state, "pushed")
+            await self._save(task, state, "pushed")
         else:
             # Branch already pushed in an earlier run; just (re)open the PR.
             outcome = WorkerOutcome(
@@ -647,16 +773,21 @@ class CodingWorkerConnector:
         try:
             pull = await self._open_pr(state, outcome)
         except Exception as exc:  # noqa: BLE001
-            await self._save(state, "open_pr_failed", error=str(exc))
+            await self._save(task, state, "open_pr_failed", error=str(exc))
             return _failed(job_id, state, "open_pr_failed", exc)
 
         await self._save(
-            state, "opened", pr_number=pull.get("number"), pr_url=pull.get("html_url")
+            task,
+            state,
+            "opened",
+            pr_number=pull.get("number"),
+            pr_url=pull.get("html_url"),
         )
         cleanup = getattr(self.orchestrator, "cleanup_attempt", None)
         if cleanup is not None and state.openhands_resume is not None:
-            await cleanup(state, on_step=self._checkpointer())
+            await cleanup(state, on_step=self._checkpointer(task))
             await self._save(
+                task,
                 state,
                 "opened",
                 pr_number=pull.get("number"),
@@ -805,22 +936,25 @@ class CodingWorkerConnector:
         if cp.status == "opened":
             return _opened_result(cp)
         try:
-            state = WorkerState.from_dict(cp.state_json)
+            task, state = self._load_code_task(
+                cp.state_json, expected_task_id=job_id
+            )
             resume = state.openhands_resume
             if resume is None or resume.status != "parked":
                 raise OpenHandsResumeError("coding worker job is not awaiting a decision")
             outcome = await self.orchestrator.resume_attempt(
                 state,
                 decision,
-                on_step=self._checkpointer(),
+                on_step=self._checkpointer(task),
             )
             if isinstance(outcome, WorkerPaused):
-                await self._save(state, "parked")
+                await self._save(task, state, "parked")
                 return _parked_result(state)
             state.title, state.body = outcome.title, outcome.body
-            await self._save(state, "pushed")
+            await self._save(task, state, "pushed")
             pull = await self._open_pr(state, outcome)
             await self._save(
+                task,
                 state,
                 "opened",
                 pr_number=pull.get("number"),
@@ -828,8 +962,9 @@ class CodingWorkerConnector:
             )
             cleanup = getattr(self.orchestrator, "cleanup_attempt", None)
             if cleanup is not None:
-                await cleanup(state, on_step=self._checkpointer())
+                await cleanup(state, on_step=self._checkpointer(task))
                 await self._save(
+                    task,
                     state,
                     "opened",
                     pr_number=pull.get("number"),
@@ -855,8 +990,9 @@ class CodingWorkerConnector:
             )
         except Exception as exc:  # noqa: BLE001
             state = locals().get("state")
-            if isinstance(state, WorkerState):
-                await self._save(state, "failed", error=str(exc))
+            task = locals().get("task")
+            if isinstance(state, WorkerState) and isinstance(task, WorkspaceTask):
+                await self._save(task, state, "failed", error=str(exc))
                 return _failed(job_id, state, "failed", exc)
             return ToolResult(ok=False, summary=f"coding worker job {job_id} failed: {exc}")
 
@@ -915,12 +1051,33 @@ class CodingWorkerConnector:
         for cp in await self.checkpoints.recent(limit=1000):
             if cp.status in self._LEGACY_TERMINAL:
                 continue
-            if isinstance(cp.state_json, dict) and cp.state_json.get(
-                "openhands_resume"
-            ) is not None:
-                state: WorkerState | None = None
+            if not isinstance(cp.state_json, dict):
+                logger.error(
+                    "quarantining coding-worker checkpoint %s: versioned or "
+                    "malformed state requires a typed reconciler (status=%s)",
+                    cp.job_id,
+                    cp.status,
+                )
+                continue
+
+            task: WorkspaceTask | None = None
+            state: WorkerState | None = None
+            try:
+                task, state = self._load_code_task(
+                    cp.state_json, expected_task_id=cp.job_id
+                )
+            except Exception as exc:  # noqa: BLE001 — quarantine durable state
+                logger.error(
+                    "quarantining coding-worker checkpoint %s: malformed "
+                    "state requires a typed reconciler (%s)",
+                    cp.job_id,
+                    exc,
+                )
+                continue
+
+            worker_data = task.profile_state["code"]["worker_state"]
+            if state.openhands_resume is not None:
                 try:
-                    state = WorkerState.from_dict(cp.state_json)
                     resume = state.openhands_resume
                     assert resume is not None
                     if resume.status in {"parked", "cleaned"}:
@@ -933,8 +1090,10 @@ class CodingWorkerConnector:
                             raise OpenHandsResumeError(
                                 "OpenHands parking reconciler is unavailable"
                             )
-                        await reconcile(state, on_step=self._checkpointer())
-                        await self._save(state, "parked")
+                        await reconcile(
+                            state, on_step=self._checkpointer(task)
+                        )
+                        await self._save(task, state, "parked")
                         resumed.append(cp.job_id)
                         continue
                     if resume.status in {"finalizing", "terminal"}:
@@ -960,11 +1119,11 @@ class CodingWorkerConnector:
                         cp.job_id,
                         exc,
                     )
-                    if state is not None:
-                        await self._save(state, "failed", error=str(exc))
+                    await self._save(task, state, "failed", error=str(exc))
                     continue
-            if not isinstance(cp.state_json, dict) or (
-                self._VERSIONED_STATE_KEYS.intersection(cp.state_json)
+            if any(
+                worker_data.get(key) is not None
+                for key in self._VERSIONED_STATE_KEYS
             ):
                 logger.error(
                     "quarantining coding-worker checkpoint %s: versioned or "
@@ -994,7 +1153,7 @@ class CodingWorkerConnector:
             resumed.append(cp.job_id)
         return resumed
 
-    def _checkpointer(self) -> StepCallback | None:
+    def _checkpointer(self, task: WorkspaceTask) -> StepCallback | None:
         """A per-step callback that persists progress, or None when no store."""
         if self.checkpoints is None:
             return None
@@ -1005,12 +1164,13 @@ class CodingWorkerConnector:
                 if state.openhands_resume is not None
                 else "running"
             )
-            await self._save(state, status)
+            await self._save(task, state, status)
 
         return on_step
 
     async def _save(
         self,
+        task: WorkspaceTask,
         state: WorkerState,
         status: str,
         *,
@@ -1018,6 +1178,7 @@ class CodingWorkerConnector:
         pr_url: str | None = None,
         error: str | None = None,
     ) -> None:
+        _sync_worker_state_to_task(task, state)
         if self.checkpoints is None:
             return
         await self.checkpoints.upsert(
@@ -1029,7 +1190,7 @@ class CodingWorkerConnector:
                 branch=state.branch,
                 status=status,
                 completed_steps=list(state.completed_steps),
-                state_json=state.to_dict(),
+                state_json=task.to_dict(),
                 title=state.title,
                 body=state.body,
                 pr_number=pr_number,

@@ -65,40 +65,56 @@ class WorkspaceTask:
         WorkspaceTask field (``_WT_FIELDS``) — including ``profile_state``,
         already shaped for this contract — passes straight through.
 
-        Old layout (pre contract-convergence coding-worker checkpoint /
-        workflow state): a flat top-level ``{job_id, repo, instruction, base,
-        agent, agent_id, approval_id, session_id, warm_key}`` plus a nested
-        ``worker_state`` dict (a ``WorkerState.to_dict()``), and no
-        ``task_id``. Detected by that absence alongside the presence of
-        ``job_id`` and/or ``worker_state``, so an in-flight row written
-        before this convergence still loads after it: ``job_id`` becomes
-        ``task_id``; the profile defaults to ``"code"`` / ``"code:write"``;
-        the identity/attribution fields are lifted to the core; and the
-        code-specific bits — the original ``worker_state`` sub-dict
-        (carried verbatim; never touched here) plus any flat
-        ``repo``/``instruction``/``base`` — move under
-        ``profile_state["code"]``. Tolerant of missing keys throughout
-        (``.get``) since legacy rows predate several of these fields.
+        Old workflow layout: flat task fields plus a nested ``worker_state``
+        dict. Old checkpoint-only layout: ``WorkerState.to_dict()`` itself at
+        the top level. Both lack ``task_id``. The shim detects either form,
+        lifts identity/attribution/progress to the task core, and carries the
+        original worker blob verbatim under
+        ``profile_state["code"]["worker_state"]``. Any flat
+        ``repo``/``instruction``/``base`` values also move under the code
+        profile. Missing keys remain tolerated because legacy rows predate
+        several shared fields.
         """
         if "task_id" not in data and ("job_id" in data or "worker_state" in data):
             code_state: dict = {}
             worker_state = data.get("worker_state")
+            if worker_state is None and "job_id" in data and "branch" in data:
+                # Checkpoint-only rows stored WorkerState.to_dict() directly as
+                # state_json (without the workflow's outer ``worker_state``
+                # key). Carry that blob verbatim too; the code adapter is the
+                # only layer allowed to interpret it.
+                worker_state = dict(data)
             if worker_state is not None:
                 code_state["worker_state"] = worker_state
             for key in ("repo", "instruction", "base"):
                 if key in data:
                     code_state[key] = data[key]
+                elif isinstance(worker_state, dict) and key in worker_state:
+                    code_state[key] = worker_state[key]
+
+            def shared(key: str):
+                value = data.get(key)
+                if value is None and isinstance(worker_state, dict):
+                    value = worker_state.get(key)
+                return value
+
+            completed_steps = data.get("completed_steps")
+            if completed_steps is None and isinstance(worker_state, dict):
+                completed_steps = worker_state.get("completed_steps")
             return cls(
-                task_id=data.get("job_id"),
+                task_id=shared("job_id"),
                 profile="code",
                 entry_action="code:write",
-                agent=data.get("agent"),
-                agent_id=data.get("agent_id"),
-                approval_id=data.get("approval_id"),
-                requester_id=data.get("requester_id"),
-                session_id=data.get("session_id"),
-                warm_key=data.get("warm_key"),
+                agent=shared("agent"),
+                agent_id=shared("agent_id"),
+                approval_id=shared("approval_id"),
+                requester_id=shared("requester_id"),
+                session_id=shared("session_id"),
+                warm_key=shared("warm_key"),
+                progress=data.get("progress"),
+                budget_usd=shared("budget_usd"),
                 profile_state={"code": code_state},
+                completed_steps=list(completed_steps or []),
             )
         return cls(**{k: v for k, v in data.items() if k in _WT_FIELDS})
 
