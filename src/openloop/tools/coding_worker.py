@@ -72,7 +72,10 @@ from openloop.tools.openhands_resume import (
 )
 
 if TYPE_CHECKING:
+    from openloop.models.gateway import ModelResponse
     from openloop.sandbox import Sandbox
+    from openloop.tasks.contract import WorkspaceTask
+    from openloop.tasks.outcomes import EvidenceBundle
     from openloop.tools.openhands_resume import WorkspaceArtifactRef
     from openloop.tools.workspace_pool import WarmWorkspacePool
     from openloop.usage.ledger import WorkerSpendLedger
@@ -1306,6 +1309,66 @@ class GitWorkspaceOrchestrator:
             shutil.rmtree(workspace, ignore_errors=True)
             raise
         return workspace
+
+    async def run_investigation(
+        self, task: "WorkspaceTask", investigator: RepoInvestigator
+    ) -> tuple["EvidenceBundle", "ModelResponse"]:
+        """Run one read-only investigation with the same spend bracket
+        ``run_attempt`` gives a coding-worker attempt (contract-convergence
+        gap #4: investigation spend was untracked and uncapped).
+
+        Reads ``repo``/``question``/``ref`` from
+        ``task.profile_state["investigate"]``. With a ledger wired, the
+        invoking agent's monthly budget gates the call *before* any work —
+        mirroring ``run_attempt``'s pre-attempt ``check_monthly`` — and the
+        investigation's model spend is settled against that agent's per-task
+        cap right after the completion returns, exactly where ``run_attempt``
+        settles before its push/PR boundary. An over-cap investigation raises
+        :class:`~openloop.usage.ledger.WorkerBudgetExceeded` out of
+        ``settle()`` — never swallowed here, so it fails the caller closed —
+        and no evidence is returned. Without a ledger this runs unbracketed,
+        at parity with ``run_attempt``. The read-only workspace is always
+        discarded in ``finally``, whether the call succeeds, the investigator
+        raises, or settle raises over-cap.
+        """
+        inputs = task.profile_state["investigate"]
+        repo = inputs["repo"]
+        question = inputs["question"]
+        ref = inputs.get("ref")
+
+        if self._ledger is not None:
+            await self._ledger.check_monthly(
+                task.agent,
+                agent_id=task.agent_id,
+                job_id=task.task_id,
+                approval_id=task.approval_id,
+                approver=task.requester_id,
+                session_id=task.session_id,
+            )
+
+        workspace: Path | None = None
+        try:
+            workspace = await self.provision_readonly(repo, ref)
+            bundle, resp = await investigator.investigate(workspace, question, repo)
+            if self._ledger is not None:
+                await self._ledger.settle(
+                    agent=task.agent,
+                    agent_id=task.agent_id,
+                    job_id=task.task_id,
+                    approval_id=task.approval_id,
+                    approver=task.requester_id,
+                    session_id=task.session_id,
+                    cost_usd=resp.cost_usd,
+                    prompt_tokens=resp.prompt_tokens,
+                    completion_tokens=resp.completion_tokens,
+                )
+            return bundle, resp
+        finally:
+            # Best-effort, mirroring how a worker attempt discards its
+            # ephemeral workspace — this checkout is read-only and never
+            # reused across turns.
+            if workspace is not None:
+                shutil.rmtree(workspace, ignore_errors=True)
 
     async def resume_attempt(
         self,
