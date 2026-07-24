@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 
-from openloop.tasks.contract import Gate, TaskProfile, WorkspaceTask
+from openloop.tasks.contract import Gate, TaskProfile, WorkspaceTask, profile_for
 
 
 class _Args(BaseModel):
@@ -38,3 +38,9 @@ def test_workspace_task_roundtrips_and_holds_no_outcome_fields():
     # PR-only fields live in profile_state, never on the core.
     assert not hasattr(again, "branch")
     assert again.profile_state["repo"] == "a/b"
+
+
+def test_profile_registry_matches_legacy_gate_decisions():
+    assert profile_for("code:write").gate is Gate.START
+    assert profile_for("investigate:read").gate is Gate.NONE
+    assert profile_for("bogus:perm") is None

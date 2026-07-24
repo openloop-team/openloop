@@ -56,3 +56,20 @@ class WorkspaceTask:
 
 
 _WT_FIELDS = frozenset(WorkspaceTask.__dataclass_fields__)
+
+
+WORKSPACE_TASK_PROFILES: dict[str, TaskProfile] = {
+    "code:write": TaskProfile(
+        name="code", entry_action="code:write", args_model=object,
+        gate=Gate.START, capabilities=frozenset({"repo:write"}),
+    ),
+    "investigate:read": TaskProfile(
+        name="investigate", entry_action="investigate:read", args_model=object,
+        gate=Gate.NONE, capabilities=frozenset({"repo:read"}),
+    ),
+}
+
+
+def profile_for(permission: str) -> "TaskProfile | None":
+    """Look up a profile by permission string."""
+    return WORKSPACE_TASK_PROFILES.get(permission)
