@@ -15,6 +15,7 @@ from openloop.agents import load_agent
 from openloop.approvals import ApprovalRequest
 from openloop.memory import InMemoryStore
 from openloop.models.gateway import ModelResponse
+from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
 from openloop.runtime import Runtime, Task
 from openloop.sessions import (
     InMemorySurfaceSessionStore,
@@ -29,8 +30,10 @@ import time
 
 from openloop.sessions.runner import PROGRESS_REFRESH_SECONDS, PROGRESS_STATUS_TEXT
 from openloop.tools import Invocation, ToolGateway, ToolResult
-from openloop.tools.coding_worker import CodingWorkerConnector
+from openloop.tools.coding_worker import CodingWorkerConnector, WorkerOutcome
 from openloop.tools.github import GitHubConnector
+from openloop.tools.openhands_artifacts import WorkspaceArtifact, WorkspaceArtifactIdentity
+from openloop.tools.openhands_resume import OpenHandsResumeState, WorkspaceArtifactRef
 from openloop.usage import InMemoryUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowInstance
 from openloop.workflows.coding_worker import build_coding_worker_workflow
@@ -353,6 +356,192 @@ async def test_workflow_approval_waits_for_background_terminal_result():
     assert completed.final_message_id is not None
     # M0b: the final answer is the model's fresh reply, not the raw workflow summary.
     assert delivery.finals[-1]["text"] == "Opened draft PR #1 🚀"
+
+
+async def test_resolve_openhands_decision_reads_worker_state_from_nested_layout():
+    """resolve_openhands_decision must find the parked OpenHands resume state
+    via WorkspaceTask's nested profile_state["code"]["worker_state"] location
+    (contract-convergence: the workflow's durable code state lives there now,
+    not the pre-convergence flat top-level "worker_state" key), so the Slack
+    accept/reject action still authorizes against slack_requester_id and wakes
+    the parked run instead of reporting "invalid" for every instance."""
+
+    class ResumingRunner:
+        async def resume_attempt(self, state, decision, on_step=None):
+            state.openhands_resume = None
+            return WorkerOutcome(state.branch, "Resumed title", "Resumed body")
+
+    agent = load_agent(AGENT_YAML)
+    engine = WorkflowEngine(InMemoryWorkflowStore())
+    github = FakeGitHub()
+    engine.register(build_coding_worker_workflow(ResumingRunner(), github))
+    runtime = Runtime(
+        agent,
+        gateway=ScriptedGateway([]),
+        usage=InMemoryUsageStore(),
+        memory=InMemoryStore(),
+        engine=engine,
+    )
+    runner = SessionRunner(
+        runtime, InMemorySurfaceSessionStore(), FakeSurfaceDelivery()
+    )
+
+    job_id = "job-openhands-1"
+    branch = f"openloop/job-{job_id}"
+    identity = WorkspaceArtifactIdentity(job_id, "conversation-1", "segment-1", "paused")
+    artifact = WorkspaceArtifactRef(
+        WorkspaceArtifact(
+            identity=identity,
+            key=f"jobs/{job_id}/artifacts/conversation-1/segment-1.paused.artifact",
+            ciphertext_sha256="b" * 64,
+            ciphertext_bytes=10,
+            envelope_version=1,
+            master_key_id="key-v1",
+        ),
+        "git-delta",
+        "a" * 40,
+    )
+    resume = OpenHandsResumeState(
+        status="parked",
+        conversation_id="conversation-1",
+        segment_id="segment-1",
+        base_ref="main",
+        resolved_base_commit="a" * 40,
+        image_digest=DEFAULT_OPENHANDS_SERVER_IMAGE,
+        master_key_id="key-v1",
+        slack_requester_id="maciag.artur",
+        decision_id="decision-1",
+        pending_action_summary="Run terminal",
+        pending_action_fingerprint="c" * 64,
+        workspace_artifact=artifact,
+    )
+    instance = WorkflowInstance(
+        id=job_id,
+        workflow="workspace_task",
+        status="waiting",
+        waiting_on="openhands_decision:decision-1",
+        completed_steps=["await_approval"],
+        state={
+            "task_id": job_id,
+            "profile": "code",
+            "entry_action": "code:write",
+            "profile_state": {
+                "code": {
+                    "repo": "acme/x",
+                    "instruction": "x",
+                    "worker_state": {
+                        "job_id": job_id,
+                        "repo": "acme/x",
+                        "instruction": "x",
+                        "base": "main",
+                        "branch": branch,
+                        "completed_steps": [],
+                        "openhands_resume": resume.to_dict(),
+                    },
+                },
+            },
+        },
+    )
+    await engine.store.create(instance)
+
+    result = await runner.resolve_openhands_decision(
+        job_id, "decision-1", kind="accept", actor_id="maciag.artur", event_id="Ev1",
+    )
+
+    assert result == "✅ Decision recorded; resuming work."
+    # And the woken drive really did resume and open the PR — the fix threads
+    # all the way through, not just past the authorization check.
+    done = await engine.wait_background(job_id)
+    assert done.status == "completed"
+    assert github.pulls and github.pulls[0]["head"] == branch
+
+
+async def test_resolve_openhands_decision_still_rejects_wrong_actor_in_nested_layout():
+    """The authorization check (only the approving user may decide) must keep
+    working once the resume state is read from the nested location."""
+
+    class ResumingRunner:
+        async def resume_attempt(self, state, decision, on_step=None):
+            raise AssertionError("must not resume for an unauthorized actor")
+
+    agent = load_agent(AGENT_YAML)
+    engine = WorkflowEngine(InMemoryWorkflowStore())
+    github = FakeGitHub()
+    engine.register(build_coding_worker_workflow(ResumingRunner(), github))
+    runtime = Runtime(
+        agent,
+        gateway=ScriptedGateway([]),
+        usage=InMemoryUsageStore(),
+        memory=InMemoryStore(),
+        engine=engine,
+    )
+    runner = SessionRunner(
+        runtime, InMemorySurfaceSessionStore(), FakeSurfaceDelivery()
+    )
+
+    job_id = "job-openhands-2"
+    identity = WorkspaceArtifactIdentity(job_id, "conversation-1", "segment-1", "paused")
+    artifact = WorkspaceArtifactRef(
+        WorkspaceArtifact(
+            identity=identity,
+            key=f"jobs/{job_id}/artifacts/conversation-1/segment-1.paused.artifact",
+            ciphertext_sha256="b" * 64,
+            ciphertext_bytes=10,
+            envelope_version=1,
+            master_key_id="key-v1",
+        ),
+        "git-delta",
+        "a" * 40,
+    )
+    resume = OpenHandsResumeState(
+        status="parked",
+        conversation_id="conversation-1",
+        segment_id="segment-1",
+        base_ref="main",
+        resolved_base_commit="a" * 40,
+        image_digest=DEFAULT_OPENHANDS_SERVER_IMAGE,
+        master_key_id="key-v1",
+        slack_requester_id="maciag.artur",
+        decision_id="decision-1",
+        pending_action_summary="Run terminal",
+        pending_action_fingerprint="c" * 64,
+        workspace_artifact=artifact,
+    )
+    instance = WorkflowInstance(
+        id=job_id,
+        workflow="workspace_task",
+        status="waiting",
+        waiting_on="openhands_decision:decision-1",
+        completed_steps=["await_approval"],
+        state={
+            "task_id": job_id,
+            "profile": "code",
+            "entry_action": "code:write",
+            "profile_state": {
+                "code": {
+                    "repo": "acme/x",
+                    "instruction": "x",
+                    "worker_state": {
+                        "job_id": job_id,
+                        "repo": "acme/x",
+                        "instruction": "x",
+                        "base": "main",
+                        "branch": f"openloop/job-{job_id}",
+                        "completed_steps": [],
+                        "openhands_resume": resume.to_dict(),
+                    },
+                },
+            },
+        },
+    )
+    await engine.store.create(instance)
+
+    result = await runner.resolve_openhands_decision(
+        job_id, "decision-1", kind="accept", actor_id="intruder", event_id="Ev1",
+    )
+
+    assert result == "⛔ Only the user who approved this task may decide."
+    assert github.pulls == []
 
 
 async def test_workflow_progress_is_surfaced_as_transient_status():

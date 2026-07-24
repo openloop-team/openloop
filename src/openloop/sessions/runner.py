@@ -701,6 +701,7 @@ class SessionRunner:
         event_id: str,
     ) -> str:
         """Authorize, durably record, and asynchronously drive a Slack action."""
+        from openloop.tasks import WorkspaceTask
         from openloop.tools.openhands_resume import OpenHandsResumeState, ResumeDecision
 
         engine = getattr(self.runtime, "engine", None)
@@ -714,7 +715,13 @@ class SessionRunner:
             or instance.waiting_on != event
         ):
             return "⛔ That decision is stale or already resolved."
-        raw_worker = (instance.state or {}).get("worker_state") or {}
+        # WorkspaceTask.from_dict rehydrates either layout: a NEW nested
+        # instance's durable worker_state lives at
+        # profile_state["code"]["worker_state"]; an OLD flat-layout instance
+        # (parked before this contract-convergence rework shipped) is lifted
+        # there by the same compat shim workflows/coding_worker.py relies on.
+        task = WorkspaceTask.from_dict(instance.state or {})
+        raw_worker = task.profile_state.get("code", {}).get("worker_state") or {}
         raw_resume = raw_worker.get("openhands_resume")
         try:
             resume = OpenHandsResumeState.from_dict(raw_resume)
