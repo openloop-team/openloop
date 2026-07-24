@@ -14,7 +14,7 @@ import pytest
 
 from openloop.cli import main
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+UNIT_DATA = Path(__file__).with_name("data")
 
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 VALID_ID = "9f2c1d4e8a7b4c3d9e0f1a2b3c4d5e6f"
@@ -60,14 +60,14 @@ def test_yes_mints_and_inserts_under_metadata(tmp_path, capsys):
 
 
 def test_insert_preserves_comments_and_formatting(tmp_path):
-    # A fixture with real comment density: the committed brand-designer file.
-    original = (REPO_ROOT / "agents" / "brand-designer.yaml").read_text()
+    # A committed unit fixture with real comments and hand-authored formatting.
+    original = (UNIT_DATA / "agent.yaml").read_text()
     without_id = "".join(
         line
         for line in original.splitlines(keepends=True)
         if not line.startswith("  id: ")
     )
-    file = tmp_path / "brand-designer.yaml"
+    file = tmp_path / "agent.yaml"
     file.write_text(without_id)
 
     rc = main(["agents", "id", "issue", "-f", str(file), "--yes"])
@@ -240,12 +240,11 @@ def test_apply_keeps_the_generic_message_for_other_errors(tmp_path, capsys):
     assert "error:" in err
 
 
-@pytest.mark.parametrize("name", ["dev-platform.yaml", "brand-designer.yaml"])
-def test_committed_agent_files_already_have_identity(name, capsys):
-    # Dogfood check: the repo's real agent files are stamped, so a re-run is
-    # the idempotent keep path.
+def test_unit_agent_fixture_already_has_identity(capsys):
+    # The committed unit fixture is stamped, so a re-run is the idempotent
+    # keep path.
     rc = main([
-        "agents", "id", "issue", "-f", str(REPO_ROOT / "agents" / name), "--yes"
+        "agents", "id", "issue", "-f", str(UNIT_DATA / "agent.yaml"), "--yes"
     ])
 
     assert rc == 0
