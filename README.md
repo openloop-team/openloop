@@ -226,8 +226,9 @@ Requires Docker + Compose and at least one model provider key.
 ```bash
 git clone https://github.com/p1c2u/openloop.git
 cd openloop
-cp .env.runtime.example .env.runtime       # set provider keys + Slack credentials
-docker compose --env-file .env.runtime up -d  # Postgres + Redis + runtime
+cp .env.example .env                  # Compose/deployment values
+cp .env.runtime.example .env.runtime  # provider keys + Slack credentials
+docker compose up -d                  # Postgres + Redis + runtime
 openloop agents apply -f agents/dev-platform.yaml
 # invite the bot to a channel, then: @agent summarize this thread
 ```
@@ -464,8 +465,8 @@ account.
   externally, or deleting anything.
 - **Scoped tokens:** use fine-grained, per-integration tokens.
 - **Memory isolation:** scope memory per channel so context doesn't leak.
-- **Secrets:** keep them in `.env.runtime` or a secrets manager — never commit
-  them.
+- **Secrets:** keep Compose, runtime, and broker credentials in their gitignored
+  `.env`, `.env.runtime`, and `.env.broker` files, or use a secrets manager.
 - **Inspect:** self-host the runtime to see exactly what the agent does.
 
 Early-stage software, no warranty. Don't connect sensitive production systems

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -13,7 +14,12 @@ RUNTIME_COMPOSITIONS = (
     ROOT / "docker-compose.yml",
     ROOT / "docker-compose.deploy.yml",
 )
+COMPOSITIONS = (*RUNTIME_COMPOSITIONS, OVERRIDE)
 BROKER_ROOT = "${OPENLOOP_BROKER_ROOT:?}"
+COMPOSE_DATABASE_URL = (
+    "postgresql://${POSTGRES_USER:-openloop}:${POSTGRES_PASSWORD:-change-me}"
+    "@postgres:5432/${POSTGRES_DB:-openloop}"
+)
 BUILD = {
     "context": ".",
     "args": {
@@ -87,6 +93,7 @@ def test_broker_has_explicit_external_environment_health_and_ordering():
     runtime = services["runtime"]
 
     assert broker["env_file"] == ".env.broker"
+    assert broker["environment"]["DATABASE_URL"] == COMPOSE_DATABASE_URL
     assert broker["environment"]["BROKER_MODE"] == "external"
     assert runtime["environment"]["BROKER_MODE"] == "external"
     assert broker["depends_on"] == {
@@ -105,9 +112,12 @@ def test_runtime_compositions_use_runtime_environment_file():
     for path in RUNTIME_COMPOSITIONS:
         runtime = yaml.safe_load(path.read_text())["services"]["runtime"]
         assert runtime["env_file"] == ".env.runtime"
+        assert runtime["environment"]["DATABASE_URL"] == COMPOSE_DATABASE_URL
+        assert runtime["environment"]["LOG_LEVEL"] == "${LOG_LEVEL:-info}"
 
 
 def test_example_files_document_and_preserve_the_secret_partition():
+    compose = (ROOT / ".env.example").read_text()
     app = (ROOT / ".env.runtime.example").read_text()
     broker = (ROOT / ".env.broker.example").read_text()
 
@@ -118,8 +128,44 @@ def test_example_files_document_and_preserve_the_secret_partition():
             if line and not line.startswith("#") and "=" in line
         }
 
+    def documented_names(document: str) -> set[str]:
+        return {
+            line.lstrip("#").split("=", 1)[0]
+            for line in document.splitlines()
+            if re.match(r"^#?[A-Z][A-Z0-9_]*=", line)
+        }
+
+    compose_names = assigned_names(compose)
     app_names = assigned_names(app)
     broker_names = assigned_names(broker)
+    interpolated_names = {
+        match
+        for path in COMPOSITIONS
+        for match in re.findall(r"\$\{([A-Z][A-Z0-9_]*)", path.read_text())
+    }
+
+    assert interpolated_names <= documented_names(compose)
+    assert interpolated_names.isdisjoint(documented_names(app))
+    assert interpolated_names.isdisjoint(documented_names(broker))
+
+    compose_owned = {
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD",
+        "POSTGRES_DB",
+        "LOG_LEVEL",
+        "BROKER_IDENTITY_ISSUER",
+        "BROKER_IDENTITY_AUDIENCE",
+        "BROKER_EXECUTION_LEASE_SECONDS",
+        "BROKER_GENERATION_DEADLINE_SECONDS",
+        "BROKER_RECONCILE_INTERVAL_SECONDS",
+    }
+    assert compose_owned <= compose_names
+    assert compose_owned.isdisjoint(app_names)
+    assert compose_owned.isdisjoint(broker_names)
+
+    assert "OPENAI_API_KEY" not in compose
+    assert "BROKER_IDENTITY_PRIVATE_KEY" not in compose
+    assert "BROKER_CAPABILITY_ROOTS" not in compose
 
     assert "BROKER_IDENTITY_PRIVATE_KEY" in app
     assert "BROKER_RECEIPT_ROOTS" in app
@@ -129,7 +175,23 @@ def test_example_files_document_and_preserve_the_secret_partition():
     assert "BROKER_RUNTIME_ROOTS" in broker
     assert "BROKER_IDENTITY_PRIVATE_KEY" not in broker_names
     assert "BROKER_RECEIPT_ROOTS" not in broker_names
+    assert "DATABASE_URL" in app_names
+    assert "DATABASE_URL" not in broker_names
     ignored = (ROOT / ".gitignore").read_text().splitlines()
     assert ".env" in ignored
     assert ".env.runtime" in ignored
     assert ".env.broker" in ignored
+
+
+def test_operator_commands_use_compose_default_environment_discovery():
+    guidance = "\n".join(
+        path.read_text()
+        for path in (
+            ROOT / "README.md",
+            ROOT / "CONTRIBUTING.md",
+            ROOT / "mise.toml",
+            *COMPOSITIONS,
+        )
+    )
+
+    assert "--env-file .env.runtime" not in guidance

@@ -139,14 +139,19 @@ def _write_partitioned_environments(project: Path) -> None:
         .public_key()
         .public_bytes_raw()
     )
-    database_url = "postgresql://openloop:change-me@postgres:5432/openloop"
-    (project / ".env.runtime").write_text(
+    (project / ".env").write_text(
         "\n".join(
             (
                 "POSTGRES_USER=openloop",
                 "POSTGRES_PASSWORD=change-me",
                 "POSTGRES_DB=openloop",
-                f"DATABASE_URL={database_url}",
+                "",
+            )
+        )
+    )
+    (project / ".env.runtime").write_text(
+        "\n".join(
+            (
                 "STORAGE_MODE=memory",
                 "CODING_WORKER_ENABLED=false",
                 "BROKER_IDENTITY_KEY_ID=identity-v1",
@@ -167,7 +172,6 @@ def _write_partitioned_environments(project: Path) -> None:
     (project / ".env.broker").write_text(
         "\n".join(
             (
-                f"DATABASE_URL={database_url}",
                 "BROKER_CAPABILITY_ROOTS="
                 + json.dumps({"cap-key-v1": _root(1)}, separators=(",", ":")),
                 "BROKER_CAPABILITY_CURRENT_VERSION=cap-key-v1",
@@ -206,14 +210,7 @@ def _compose(
     *arguments: str,
     timeout: int = 180,
 ) -> subprocess.CompletedProcess[str]:
-    command = [
-        "docker",
-        "compose",
-        "--project-directory",
-        str(project),
-        "--env-file",
-        str(project / ".env.runtime"),
-    ]
+    command = ["docker", "compose", "--project-directory", str(project)]
     for path in files:
         command.extend(("-f", str(path)))
     command.extend(("--project-name", project_name, *arguments))
@@ -572,6 +569,12 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
                     )
                 ).splitlines()
             )
+            expected_database_url = (
+                "DATABASE_URL="
+                "postgresql://openloop:change-me@postgres:5432/openloop"
+            )
+            assert expected_database_url in runtime_env
+            assert expected_database_url in broker_env
             assert not any(
                 line.startswith(("BROKER_CAPABILITY_ROOTS=", "BROKER_RUNTIME_ROOTS="))
                 for line in runtime_env

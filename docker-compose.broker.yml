@@ -1,9 +1,10 @@
 # External privileged broker override
 #
 # Usage:
+#   cp .env.example .env
+#   cp .env.runtime.example .env.runtime
 #   cp .env.broker.example .env.broker
-#   docker compose --env-file .env.runtime \
-#     -f docker-compose.yml -f docker-compose.broker.yml up --build
+#   docker compose -f docker-compose.yml -f docker-compose.broker.yml up --build
 #
 # OPENLOOP_BROKER_ROOT must be an absolute host path. The one-shot init service
 # creates the root when absent, then provisions its five children with the exact
@@ -16,8 +17,9 @@
 # broker-side roots/publics
 # (BROKER_CAPABILITY_ROOTS, BROKER_RUNTIME_ROOTS,
 # BROKER_IDENTITY_PUBLIC_KEYS, BROKER_RECEIPT_PUBLIC_KEYS). The Postgres DSN is
-# intentionally present in both. Compose appends env_file values during merges,
-# so broker-side secrets must never enter `.env.runtime` in the first place.
+# injected from Compose-owned POSTGRES_* values in `.env`. Compose appends
+# env_file values during merges, so broker-side secrets must never enter
+# `.env.runtime` in the first place.
 #
 # This override keeps Docker authority in the broker service only.
 
@@ -53,6 +55,7 @@ services:
       - ${OPENLOOP_DATA_GID:-10777}
     env_file: .env.broker
     environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-openloop}
       BROKER_MODE: external
       BROKER_CONTROL_SOCKET_DIR: ${OPENLOOP_BROKER_ROOT:?}/control
       BROKER_STATE_ROOT: ${OPENLOOP_BROKER_ROOT:?}/state
