@@ -74,10 +74,12 @@ logger = logging.getLogger(__name__)
 
 
 class _RunAborted(Exception):
-    """Signal raised from the SDK callback to stop ``conversation.run()`` early.
+    """Why a run was cut short, recorded by the SDK callback guard.
 
-    Internal to the worker: ``_drive`` catches it, reads the spend accrued so
-    far, and re-raises as :class:`WorkerRunAborted` for the orchestrator.
+    Internal to the worker: the guard records one of these and asks the agent to
+    stop; ``_drive``/``_drive_cold`` re-raise it as :class:`WorkerRunAborted`
+    once ``run()`` returns. It is never raised out of the callback itself — see
+    :meth:`OpenHandsCodingWorker._event_guard`.
     """
 
     def __init__(self, reason: str) -> None:
@@ -320,6 +322,83 @@ class OpenHandsCodingWorker:
             raise OpenHandsResumeError("prepared checkout has an invalid base commit")
         return commit
 
+    def _event_guard(
+        self, heartbeat, cost_limit: float | None, conv_box: list
+    ) -> tuple[Callable[[object], None], list]:
+        """Build the per-run event guard, plus the box it records an abort in.
+
+        The guard heartbeats on every agent event and stops the run once accrued
+        spend crosses ``cost_limit`` or wall-time crosses the deadline.
+
+        It must not stop the run by *raising*. Under the container broker the
+        conversation is remote: the SDK dispatches callbacks on its WebSocket
+        listener thread, which logs and swallows every callback exception, so a
+        raise never reaches ``run()`` and the agent keeps spending server-side.
+        Raising also starves the callbacks composed after this one — the event
+        cache :meth:`_pending_action` reads, and the run-completion signal
+        ``run()`` blocks on.
+
+        So the guard records the reason and asks the agent to stop where it
+        actually burns budget; :meth:`_settle_abort` converts that into
+        :class:`WorkerRunAborted` once ``run()`` returns. Returned as a list
+        rather than instance state because one worker may drive concurrent
+        attempts in separate threads.
+        """
+        aborted: list[_RunAborted] = []
+        started = time.monotonic()
+        deadline = self.deadline_seconds
+
+        def guard(_event) -> None:
+            heartbeat()
+            if aborted:  # already stopping; keep the chain cheap and quiet
+                return
+            conversation = conv_box[0] if conv_box else None
+            reason = None
+            if conversation is not None and cost_limit is not None:
+                spent = self._accumulated_cost(conversation)
+                if spent is not None and spent > cost_limit:
+                    reason = (
+                        f"in-run spend ${spent:.4f} reached the "
+                        f"${cost_limit:.2f} per-task cap"
+                    )
+            if reason is None and deadline and time.monotonic() - started > deadline:
+                reason = f"exceeded the {deadline:.0f}s attempt deadline"
+            if reason is None:
+                return
+            aborted.append(_RunAborted(reason))
+            self._request_stop(conversation)
+
+        return guard, aborted
+
+    @staticmethod
+    def _request_stop(conversation) -> None:
+        """Ask the agent to stop at its next iteration — locally or server-side.
+
+        Best-effort by design: a stop that does not land must not break the
+        callback chain, and the post-run settle still fails the attempt closed.
+        """
+        pause = getattr(conversation, "pause", None)
+        if not callable(pause):
+            logger.warning("openhands_abort_stop_unsupported")
+            return
+        try:
+            pause()
+        except Exception:
+            logger.warning("openhands_abort_stop_failed", exc_info=True)
+
+    def _settle_abort(self, aborted: list, conversation) -> None:
+        """Re-raise a guard-recorded abort for the orchestrator, with spend."""
+        if not aborted:
+            return
+        abort = aborted[0]
+        cost, prompt_tokens, completion_tokens = self._safe_metrics(conversation)
+        raise WorkerRunAborted(
+            abort.reason,
+            cost_usd=cost,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        ) from abort
+
     def _drive_cold(
         self,
         workspace: Path,
@@ -332,25 +411,7 @@ class OpenHandsCodingWorker:
         resume = state.openhands_resume
         assert resume is not None
         conv_box: list = []
-        started = time.monotonic()
-
-        def guard(_event) -> None:
-            heartbeat()
-            conversation = conv_box[0] if conv_box else None
-            if conversation is not None and cost_limit is not None:
-                spent = self._accumulated_cost(conversation)
-                if spent is not None and spent > cost_limit:
-                    raise _RunAborted(
-                        f"in-run spend ${spent:.4f} reached the "
-                        f"${cost_limit:.2f} per-task cap"
-                    )
-            if (
-                self.deadline_seconds
-                and time.monotonic() - started > self.deadline_seconds
-            ):
-                raise _RunAborted(
-                    f"exceeded the {self.deadline_seconds:.0f}s attempt deadline"
-                )
+        guard, aborted = self._event_guard(heartbeat, cost_limit, conv_box)
 
         runtime = self._open_cold_runtime(workspace, state, [guard])
         conversation = runtime.conversation
@@ -391,16 +452,8 @@ class OpenHandsCodingWorker:
                 if decision.kind == "reject":
                     conversation.reject_pending_actions(OPENHANDS_REJECTION_REASON)
 
-            try:
-                conversation.run()
-            except _RunAborted as abort:
-                cost, pt, ct = self._safe_metrics(conversation)
-                raise WorkerRunAborted(
-                    abort.reason,
-                    cost_usd=cost,
-                    prompt_tokens=pt,
-                    completion_tokens=ct,
-                ) from abort
+            conversation.run()
+            self._settle_abort(aborted, conversation)
 
             cost, prompt_tokens, completion_tokens = self._metrics(conversation)
             status = self._execution_status(conversation)
@@ -770,12 +823,11 @@ class OpenHandsCodingWorker:
     ) -> tuple[float, int, int]:
         """Run the conversation to completion (worker thread; SDK is sync).
 
-        A guard runs on every agent event: it heartbeats, and stops the run early
-        (raising :class:`_RunAborted`) once accrued spend crosses ``cost_limit``
-        or wall-time crosses the deadline — the only in-thread hook that can
-        interrupt the sync ``run()``. It depends on the SDK invoking callbacks and
-        propagating their exceptions; if it doesn't, the run finishes and the
-        post-run ledger settle still fails an over-budget attempt closed.
+        A guard runs on every agent event (see :meth:`_event_guard`): it
+        heartbeats, and stops the run early once accrued spend crosses
+        ``cost_limit`` or wall-time crosses the deadline. If the stop does not
+        land, the run finishes and the post-run ledger settle still fails an
+        over-budget attempt closed.
 
         Final metrics are read without defensive fallbacks on purpose: if the
         SDK's stats API drifts, this raises and the attempt fails — silently
@@ -785,36 +837,14 @@ class OpenHandsCodingWorker:
         # attempts in separate threads); the guard reads spend off the live
         # conversation once the factory has produced one.
         conv_box: list = []
-        started = time.monotonic()
-        deadline = self.deadline_seconds
-
-        def guard(_event) -> None:
-            heartbeat()
-            conversation = conv_box[0] if conv_box else None
-            if conversation is not None and cost_limit is not None:
-                spent = self._accumulated_cost(conversation)
-                if spent is not None and spent > cost_limit:
-                    raise _RunAborted(
-                        f"in-run spend ${spent:.4f} reached the "
-                        f"${cost_limit:.2f} per-task cap"
-                    )
-            if deadline and time.monotonic() - started > deadline:
-                raise _RunAborted(
-                    f"exceeded the {deadline:.0f}s attempt deadline"
-                )
+        guard, aborted = self._event_guard(heartbeat, cost_limit, conv_box)
 
         conversation, cleanup = self._factory(workspace, [guard], job_id)
         conv_box.append(conversation)
         try:
             conversation.send_message(prompt)
-            try:
-                conversation.run()
-            except _RunAborted as abort:
-                cost, pt, ct = self._safe_metrics(conversation)
-                raise WorkerRunAborted(
-                    abort.reason, cost_usd=cost, prompt_tokens=pt,
-                    completion_tokens=ct,
-                ) from abort
+            conversation.run()
+            self._settle_abort(aborted, conversation)
             metrics = conversation.conversation_stats.get_combined_metrics()
             usage = metrics.accumulated_token_usage
             return (

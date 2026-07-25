@@ -69,6 +69,7 @@ class FakeConversation:
         self.pr_text = pr_text
         self.events = events
         self.prompt = None
+        self.paused = False
         self.teardown = []  # records close/cleanup ordering
         self.conversation_stats = _Stats(
             _Metrics(cost, prompt_tokens, completion_tokens)
@@ -81,8 +82,14 @@ class FakeConversation:
     def send_message(self, prompt):
         self.prompt = prompt
 
+    def pause(self):
+        """Stop at the next iteration — how the SDK actually aborts a run."""
+        self.paused = True
+
     def run(self):
         for _ in range(self.events):
+            if self.paused:
+                return  # stopped mid-task: the agent never wrote the handoff
             for cb in self.callbacks:
                 cb(object())  # a chatty agent event stream
         if self.pr_text is not None:
@@ -181,6 +188,8 @@ class GrowingCostConversation(FakeConversation):
 
     def run(self):
         for _ in range(self.events):
+            if self.paused:
+                return
             self.conversation_stats._metrics.accumulated_cost += self._per_event
             for cb in self.callbacks:
                 cb(object())  # the guard reads current cost and may abort here
@@ -193,6 +202,8 @@ class SleepyConversation(FakeConversation):
 
     def run(self):
         for _ in range(self.events):
+            if self.paused:
+                return
             time.sleep(0.02)
             for cb in self.callbacks:
                 cb(object())
@@ -247,6 +258,79 @@ async def test_deadline_abort_stops_a_slow_run(tmp_path):
         await worker.run(tmp_path, _state())
     assert "deadline" in exc.value.reason
     assert created[0].teardown == ["close", "cleanup"]
+
+
+class RelayCostConversation(FakeConversation):
+    """Models the *remote* dispatch contract, which the in-process fakes hide.
+
+    Under the broker relay the agent runs server-side: ``run()`` only triggers
+    it, events arrive on a separate WebSocket thread, and that thread swallows
+    every callback exception (``relay_ws_event_processing_error``). A guard that
+    aborts by raising is therefore invisible here — the burn only stops if the
+    guard asks the server to stop.
+    """
+
+    def __init__(self, workspace, callbacks, *, per_event=0.5, **kw):
+        super().__init__(workspace, callbacks, cost=0.0, **kw)
+        self._per_event = per_event
+        self.emitted = 0  # events actually billed before the run stopped
+        self.delivered = []  # events the *downstream* callbacks received
+        # The event-cache callback the SDK appends after ours; it only runs if
+        # the guard leaves the composed chain intact.
+        callbacks.append(self.delivered.append)
+
+    def run(self):
+        import threading
+
+        def pump():
+            for _ in range(self.events):
+                if self.paused:  # the server honours the stop request
+                    break
+                self.emitted += 1
+                self.conversation_stats._metrics.accumulated_cost += self._per_event
+                for cb in self.callbacks:
+                    try:
+                        cb(object())
+                    except Exception:
+                        pass  # exactly what the relay's WS loop does
+
+        thread = threading.Thread(target=pump)
+        thread.start()
+        thread.join()
+        if self.pr_text is not None:
+            (self.workspace / PR_FILE).write_text(self.pr_text)
+
+
+async def test_cost_abort_stops_a_relay_run_whose_callbacks_cannot_raise(tmp_path):
+    # $0.50/event, cap $1.00. The guard trips on event 2 ($1.00 is not over the
+    # cap; $1.50 is), so a working abort stops the burn well short of the
+    # 20-event ($10.00) completion.
+    worker, created = _worker_with(RelayCostConversation, per_event=0.5, events=20)
+    state = _state()
+    state.budget_usd = 1.0
+
+    with pytest.raises(WorkerRunAborted) as exc:
+        await worker.run(tmp_path, state)
+
+    assert "cap" in exc.value.reason
+    assert created[0].paused  # the run was stopped where it burns: server-side
+    assert created[0].emitted <= 4  # not all 20 — spend actually halted
+    assert exc.value.cost_usd == pytest.approx(created[0].emitted * 0.5)
+
+
+async def test_cost_abort_leaves_the_downstream_callback_chain_intact(tmp_path):
+    """The guard is callbacks[0]; the SDK composes it ahead of the event-cache
+    and run-completion callbacks. Aborting must not starve them — a truncated
+    event cache is what `_pending_action` later reads."""
+    worker, created = _worker_with(RelayCostConversation, per_event=0.5, events=20)
+    state = _state()
+    state.budget_usd = 1.0
+
+    with pytest.raises(WorkerRunAborted):
+        await worker.run(tmp_path, state)
+
+    conversation = created[0]
+    assert len(conversation.delivered) == conversation.emitted
 
 
 async def test_worker_holds_no_git_credential(tmp_path):
@@ -403,6 +487,58 @@ class _ColdConversation(FakeConversation):
     def run(self):
         for cb in self.callbacks:
             cb(self.state.events[-1])
+
+
+class _RelayColdConversation(_ColdConversation):
+    """The broker segment as it really behaves: server-side agent, events on a
+    WebSocket thread that swallows callback exceptions."""
+
+    def __init__(self, workspace, callbacks, *, per_event=0.5, events=20):
+        super().__init__(workspace, callbacks, "FINISHED")
+        self.conversation_stats._metrics.accumulated_cost = 0.0
+        self._per_event = per_event
+        self.events = events
+        self.emitted = 0
+
+    def run(self):
+        import threading
+
+        def pump():
+            for _ in range(self.events):
+                if self.paused:
+                    break
+                self.emitted += 1
+                self.conversation_stats._metrics.accumulated_cost += self._per_event
+                for cb in self.callbacks:
+                    try:
+                        cb(self.state.events[-1])
+                    except Exception:
+                        pass  # the relay's WS loop logs and carries on
+
+        thread = threading.Thread(target=pump)
+        thread.start()
+        thread.join()
+
+
+async def test_cold_segment_cost_abort_stops_the_server_side_burn(tmp_path):
+    created = []
+
+    def conversation(workspace, callbacks):
+        conv = _RelayColdConversation(workspace, callbacks, per_event=0.5, events=20)
+        created.append(conv)
+        return conv
+
+    worker, _ = _cold_worker(tmp_path, conversation)
+    state = _state()
+    state.requester_id = "U123"
+    state.budget_usd = 1.0
+
+    with pytest.raises(WorkerRunAborted) as exc:
+        await worker.run(tmp_path, state)
+
+    assert "cap" in exc.value.reason
+    assert created[0].paused
+    assert created[0].emitted <= 4  # not the full 20-event, $10.00 run
 
 
 def _cold_worker(tmp_path, conversation):
