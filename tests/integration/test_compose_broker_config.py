@@ -190,7 +190,6 @@ def test_example_files_document_and_preserve_the_secret_partition():
             if re.match(r"^#?[A-Z][A-Z0-9_]*=", line)
         }
 
-    compose_names = assigned_names(compose)
     app_names = assigned_names(app)
     broker_names = assigned_names(broker)
     interpolated_names = {
@@ -214,7 +213,11 @@ def test_example_files_document_and_preserve_the_secret_partition():
         "BROKER_GENERATION_DEADLINE_SECONDS",
         "BROKER_RECONCILE_INTERVAL_SECONDS",
     }
-    assert compose_owned <= compose_names
+    # Documented, not necessarily assigned: `.env.example` carries these as
+    # commented entries showing the default Compose already applies, and an
+    # operator uncomments one only to override it. Ownership is what matters
+    # here — the partition below is what keeps them out of the other two files.
+    assert compose_owned <= documented_names(compose)
     assert compose_owned.isdisjoint(app_names)
     assert compose_owned.isdisjoint(broker_names)
 
