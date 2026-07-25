@@ -50,8 +50,10 @@ residual container or workspace until its owner and contents are understood.
 3. Remove `docker-compose.sandbox.yml` from deployment composition.
 4. Start containerized OpenHands only with the external broker configuration.
 5. Drain every old application replica.
-6. Verify the runtime service has no `/var/run/docker.sock` mount and the broker
-   is the only service that does.
+6. Verify the runtime and broker have no `/var/run/docker.sock` mount. Only the
+   networkless `docker-socket-adapter` may mount it; the broker mounts the
+   private forwarded-socket volume read-only and retains
+   `OPENLOOP_DATA_GID`.
 7. Restart one new runtime replica and confirm it does not recreate an analysis
    table.
 
@@ -84,7 +86,9 @@ the five dedicated analysis tables when the locked counts are zero.
 3. Invoke a non-production request for `analysis.report:write` and confirm it
    receives the ordinary unknown-action response.
 4. Recheck the effective Compose configuration and running mounts: only the
-   standalone broker owns the Docker socket.
+   HAProxy permission adapter owns the raw Docker socket, the non-root broker
+   alone mounts its private forwarded UDS, and the runtime receives neither
+   endpoint.
 5. Record SQL output, application version, replica drain confirmation, backup
    identifier, and postflight results with the deployment change.
 

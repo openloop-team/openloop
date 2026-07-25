@@ -10,6 +10,37 @@ _.python.venv = { path = ".venv", create = true }
 description = "Install the runtime with dependencies exercised by the test suite"
 run = "uv pip install -e '.[dev,broker,openhands]'"
 
+[tasks.compose-build]
+description = "Fetch the pinned Docker adapter and build runtime/broker images"
+run = """
+docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml pull docker-socket-adapter
+docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml build broker-init broker runtime
+"""
+
+[tasks.compose-up]
+description = "Recreate the Docker adapter, broker, and runtime"
+run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml up -d --force-recreate docker-socket-adapter broker runtime --remove-orphans"
+
+[tasks.compose-down]
+description = "Bring down the containers and project volumes"
+run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml down --remove-orphans --volumes"
+
+[tasks.compose-logs]
+description = "Follow the adapter, runtime, broker, and Postgres logs"
+run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml logs -f docker-socket-adapter runtime broker postgres"
+
+[tasks.compose-ps]
+description = "List the containers"
+run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml ps"
+
+[tasks.compose-psql]
+description = "Open a psql shell to the Postgres database"
+run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml exec postgres psql  -U openloop -d openloop"
+
+[tasks.compose-python]
+description = "Open a Python shell in the runtime container"
+run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml exec runtime python"
+
 [tasks.test]
 description = "Run unit and integration tests"
 run = "python -m pytest tests/unit tests/integration -q"

@@ -32,14 +32,16 @@ def test_legacy_runtime_socket_override_is_absent() -> None:
     assert not (ROOT / "docker-compose.sandbox.yml").exists()
 
 
-def test_only_broker_service_receives_docker_socket() -> None:
+def test_only_permission_adapter_receives_raw_docker_socket() -> None:
     socket_owners = []
     for path in COMPOSE_FILES:
         for service_name, service in (_compose(path).get("services") or {}).items():
             if SOCKET in _targets(service):
                 socket_owners.append((path.name, service_name))
 
-    assert socket_owners == [("docker-compose.broker.yml", "broker")]
+    assert socket_owners == [
+        ("docker-compose.broker.yml", "docker-socket-adapter")
+    ]
 
 
 def test_runtime_services_never_receive_docker_socket() -> None:

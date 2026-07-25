@@ -29,7 +29,7 @@ from openloop.wiring.builders import build_coding_worker
 from tests.support.processes import cleanup_process
 
 
-_BROKER_TOPOLOGIES = {"coprocess", "subprocess", "managed"}
+_BROKER_TOPOLOGIES = {"subprocess", "managed"}
 _IDENTITY_SEED = bytes(range(32))
 _RECEIPT_ROOT = bytes([3]) * 32
 
@@ -63,7 +63,7 @@ def _repository(root: Path) -> tuple[Path, str]:
 
 
 def _settings(root: Path, socket_root: Path) -> Settings:
-    topology = os.environ.get("OPENLOOP_CANARY_BROKER_MODE", "coprocess")
+    topology = os.environ.get("OPENLOOP_CANARY_BROKER_MODE", "subprocess")
     if topology not in _BROKER_TOPOLOGIES:
         raise RuntimeError(f"unsupported canary broker topology: {topology}")
     external = topology != "coprocess"
@@ -289,7 +289,7 @@ def _cleanup_runtime(broker_job_id: str | None) -> None:
 
 
 async def _run() -> dict[str, object]:
-    topology = os.environ.get("OPENLOOP_CANARY_BROKER_MODE", "coprocess")
+    topology = os.environ.get("OPENLOOP_CANARY_BROKER_MODE", "subprocess")
     if topology not in _BROKER_TOPOLOGIES:
         raise RuntimeError(f"unsupported canary broker topology: {topology}")
     shared = Path(os.environ["OPENLOOP_CANARY_SHARED_ROOT"])
@@ -323,10 +323,7 @@ async def _run() -> dict[str, object]:
             worker = build_coding_worker(settings, broker_handle=handle)
             assert worker is not None
             assert handle.checkpoint_store is not None
-            if topology == "coprocess":
-                assert handle.reconciler is not None
-            else:
-                assert handle.reconciler is None
+            assert handle.reconciler is None
             worker._build_agent = _agent
 
             state = WorkerState(
@@ -410,9 +407,7 @@ async def _run() -> dict[str, object]:
         if topology == "managed":
             ingress = Path(settings.broker_ingress_root)
         else:
-            ingress = root / (
-                "i" if topology != "coprocess" else "x/.workspace-ingress"
-            )
+            ingress = root / "i"
         assert not (ingress / broker_job_id).exists()
         return {
             "broker_job_id": broker_job_id,

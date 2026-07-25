@@ -21,7 +21,7 @@
 # env_file values during merges, so broker-side secrets must never enter
 # `.env.runtime` in the first place.
 #
-# This override keeps Docker authority in the broker service only.
+# This override keeps Docker authority inside the adapter/broker trust boundary.
 
 x-openloop-build: &openloop-build
   context: .
@@ -30,6 +30,43 @@ x-openloop-build: &openloop-build
     OPENLOOP_DATA_GID: ${OPENLOOP_DATA_GID:-10777}
 
 services:
+  # This is a permission shim, not a Docker API policy boundary. Any process
+  # that can connect to its data UDS has root-equivalent daemon authority.
+  docker-socket-adapter:
+    image: haproxy@sha256:9f196dc9ec57310a1a430939221b33b36c14113497aca7ead9b13f4d5c2d37f5
+    user: "0:${OPENLOOP_DATA_GID:-10777}"
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - type: bind
+        source: ${DOCKER_SOCKET:-/var/run/docker.sock}
+        target: /var/run/docker.sock
+      - type: bind
+        source: ./ops/docker-socket-adapter/haproxy.cfg
+        target: /usr/local/etc/haproxy/haproxy.cfg
+        read_only: true
+      - type: volume
+        source: docker-socket-adapter-data
+        target: /run/openloop-docker
+    tmpfs:
+      - /run/openloop-health:rw,nosuid,nodev,noexec,size=64k,mode=0700
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          printf 'GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n'
+          | socat -t 3 - UNIX-CONNECT:/run/openloop-health/health.sock
+          | grep -q '^HTTP/1\.[01] 200'
+      interval: 2s
+      timeout: 4s
+      retries: 15
+      start_period: 2s
+    restart: unless-stopped
+
   broker-init:
     build: *openloop-build
     user: "0:0"
@@ -51,12 +88,12 @@ services:
     build: *openloop-build
     user: "${OPENLOOP_BROKER_UID:-10002}:${OPENLOOP_DATA_GID:-10777}"
     group_add:
-      - ${DOCKER_GID:?}
       - ${OPENLOOP_DATA_GID:-10777}
     env_file: .env.broker
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}@postgres:5432/${POSTGRES_DB:-openloop}
       PGPASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      DOCKER_HOST: unix:///run/openloop-docker/docker.sock
       BROKER_MODE: external
       BROKER_CONTROL_SOCKET_DIR: ${OPENLOOP_BROKER_ROOT:?}/control
       BROKER_STATE_ROOT: ${OPENLOOP_BROKER_ROOT:?}/state
@@ -73,6 +110,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
     command: openloop-broker
     depends_on:
+      docker-socket-adapter:
+        condition: service_healthy
       broker-init:
         condition: service_completed_successfully
       postgres:
@@ -85,9 +124,10 @@ services:
       start_period: 5s
     restart: unless-stopped
     volumes:
-      - type: bind
-        source: ${DOCKER_SOCKET:-/var/run/docker.sock}
-        target: /var/run/docker.sock
+      - type: volume
+        source: docker-socket-adapter-data
+        target: /run/openloop-docker
+        read_only: true
       - type: bind
         source: ${OPENLOOP_BROKER_ROOT:?}/control
         target: ${OPENLOOP_BROKER_ROOT:?}/control
@@ -155,3 +195,6 @@ services:
         target: ${OPENLOOP_BROKER_ROOT:?}/receipts
         bind:
           create_host_path: true
+
+volumes:
+  docker-socket-adapter-data:

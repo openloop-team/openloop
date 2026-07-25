@@ -46,6 +46,14 @@ cp .env.runtime.example .env.runtime
 docker compose up -d
 ```
 
+For the external OpenHands broker, also copy `.env.broker.example`, set an
+absolute `OPENLOOP_BROKER_ROOT`, then use `mise run compose-build` and
+`mise run compose-up`. The networkless HAProxy permission adapter—not the
+runtime or broker—mounts the raw Docker socket. The broker must retain
+`OPENLOOP_DATA_GID` to connect to the adapter's `root:OPENLOOP_DATA_GID` mode
+`0660` UDS through its read-only volume mount. Do not add `DOCKER_GID` or a TCP
+Docker endpoint; the adapter does not filter the root-equivalent Docker API.
+
 ## Pull requests
 
 - **Keep PRs small and focused.** One logical change per PR is easiest to

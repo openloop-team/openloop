@@ -235,6 +235,32 @@ openloop agents apply -f agents/dev-platform.yaml
 
 Nothing leaves your machine except calls to the providers/tools you configure.
 
+### External OpenHands broker
+
+The external-broker composition keeps Docker authority out of the application
+runtime. A digest-pinned, networkless HAProxy container is the only service
+that mounts the raw Docker socket. It forwards the unfiltered Docker API to a
+private named-volume UDS owned by
+`root:${OPENLOOP_DATA_GID:-10777}` with mode `0660`; the non-root broker keeps
+that data group and mounts the volume read-only. The adapter is a permission
+shim, not an API policy boundary—access to its forwarded socket remains
+root-equivalent Docker access.
+
+```bash
+cp .env.example .env
+cp .env.runtime.example .env.runtime
+cp .env.broker.example .env.broker
+# Set an absolute OPENLOOP_BROKER_ROOT in .env.
+mise run compose-build
+mise run compose-up
+```
+
+`DOCKER_SOCKET` may select a non-default upstream Unix socket. Do not configure
+`DOCKER_GID` or a TCP Docker endpoint. The adapter healthcheck uses a separate
+root-only UDS and blocks broker startup unless HAProxy's checked `/_ping`
+backend is available. Under its read-only root filesystem, only the forwarded
+socket volume, private health tmpfs, and mounted upstream socket are writable.
+
 ### Local development *(preliminary)*
 
 The runtime is a Python/FastAPI app. Local dev uses [mise](https://mise.jdx.dev)

@@ -34,14 +34,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates tmux curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Static docker CLI so CODING_WORKER_SANDBOX=docker works from inside this
-# container (sibling containers over the mounted /var/run/docker.sock — see
-# docker-compose.deploy.yml). CLI only, no daemon; major version pinned so a
-# breaking CLI change can't ride in on a rebuild. Without this binary the
-# sandbox probe fails at boot and the coding worker is disabled (fail-closed).
-# NOTE: at runtime the `openloop` user needs read/write on the mounted docker socket;
-# grant it by matching the host socket's group (e.g. compose `group_add`) since
-# that gid is host-specific and can't be baked in here.
+# Static Docker CLI for the trusted external broker. In the broker composition,
+# DOCKER_HOST points it at the HAProxy permission adapter's private UDS; only
+# that adapter mounts the raw host socket. The runtime image carries the same
+# binary because both services share this build, but receives no Docker
+# endpoint. CLI only, no daemon; major version pinned so a breaking CLI change
+# cannot ride in on a rebuild.
 COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 
 COPY pyproject.toml README.md ./

@@ -7,6 +7,8 @@ from pathlib import Path
 
 import yaml
 
+from openloop.tools.openhands_relay_profile import DEFAULT_HAPROXY_RELAY_IMAGE
+
 
 ROOT = Path(__file__).parents[2]
 OVERRIDE = ROOT / "docker-compose.broker.yml"
@@ -28,6 +30,11 @@ BUILD = {
         "OPENLOOP_DATA_GID": "${OPENLOOP_DATA_GID:-10777}",
     },
 }
+ADAPTER_CONFIG = "/usr/local/etc/haproxy/haproxy.cfg"
+ADAPTER_DATA = "/run/openloop-docker"
+ADAPTER_HEALTH = "/run/openloop-health"
+FORWARDED_SOCKET = f"{ADAPTER_DATA}/docker.sock"
+RAW_SOCKET = "/var/run/docker.sock"
 
 
 def _compose() -> dict:
@@ -61,24 +68,67 @@ def test_every_service_builds_the_same_configurable_numeric_identities():
         assert services[service]["build"] == BUILD
 
 
-def test_broker_alone_gets_docker_authority_and_receipts_are_read_only():
+def test_adapter_is_the_only_raw_socket_owner_and_is_stripped_down():
     services = _compose()["services"]
+    adapter = services["docker-socket-adapter"]
     broker = services["broker"]
     runtime = services["runtime"]
+    adapter_mounts = _mounts(adapter)
     broker_mounts = _mounts(broker)
     runtime_mounts = _mounts(runtime)
+
+    assert adapter["image"] == DEFAULT_HAPROXY_RELAY_IMAGE
+    assert adapter["user"] == "0:${OPENLOOP_DATA_GID:-10777}"
+    assert adapter["network_mode"] == "none"
+    assert "networks" not in adapter
+    assert "ports" not in adapter
+    assert "env_file" not in adapter
+    assert "environment" not in adapter
+    assert adapter["read_only"] is True
+    assert adapter["cap_drop"] == ["ALL"]
+    assert adapter["security_opt"] == ["no-new-privileges:true"]
+    assert adapter_mounts[RAW_SOCKET]["source"] == (
+        "${DOCKER_SOCKET:-/var/run/docker.sock}"
+    )
+    assert adapter_mounts[ADAPTER_CONFIG] == {
+        "type": "bind",
+        "source": "./ops/docker-socket-adapter/haproxy.cfg",
+        "target": ADAPTER_CONFIG,
+        "read_only": True,
+    }
+    assert adapter_mounts[ADAPTER_DATA] == {
+        "type": "volume",
+        "source": "docker-socket-adapter-data",
+        "target": ADAPTER_DATA,
+    }
+    assert adapter["tmpfs"] == [
+        f"{ADAPTER_HEALTH}:rw,nosuid,nodev,noexec,size=64k,mode=0700"
+    ]
+    assert adapter["healthcheck"]["test"] == [
+        "CMD-SHELL",
+        (
+            "printf 'GET /healthz HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' "
+            "| socat -t 3 - "
+            "UNIX-CONNECT:/run/openloop-health/health.sock "
+            "| grep -q '^HTTP/1\\.[01] 200'"
+        ),
+    ]
 
     assert broker["user"] == (
         "${OPENLOOP_BROKER_UID:-10002}:${OPENLOOP_DATA_GID:-10777}"
     )
-    assert broker["group_add"] == [
-        "${DOCKER_GID:?}",
-        "${OPENLOOP_DATA_GID:-10777}",
-    ]
-    assert broker_mounts["/var/run/docker.sock"]["source"] == (
-        "${DOCKER_SOCKET:-/var/run/docker.sock}"
-    )
-    assert "/var/run/docker.sock" not in runtime_mounts
+    assert broker["group_add"] == ["${OPENLOOP_DATA_GID:-10777}"]
+    assert RAW_SOCKET not in broker_mounts
+    assert broker_mounts[ADAPTER_DATA] == {
+        "type": "volume",
+        "source": "docker-socket-adapter-data",
+        "target": ADAPTER_DATA,
+        "read_only": True,
+    }
+    assert broker["environment"]["DOCKER_HOST"] == f"unix://{FORWARDED_SOCKET}"
+    assert RAW_SOCKET not in runtime_mounts
+    assert ADAPTER_DATA not in runtime_mounts
+    assert "DOCKER_HOST" not in runtime["environment"]
     assert broker_mounts[f"{BROKER_ROOT}/receipts"]["read_only"] is True
     for suffix in ("control", "state", "runtime", "ingress", "receipts"):
         assert broker_mounts[f"{BROKER_ROOT}/{suffix}"]["bind"] == {
@@ -86,6 +136,7 @@ def test_broker_alone_gets_docker_authority_and_receipts_are_read_only():
         }
     assert "user" not in runtime
     assert runtime["group_add"] == ["${OPENLOOP_DATA_GID:-10777}"]
+    assert _compose()["volumes"] == {"docker-socket-adapter-data": None}
 
 
 def test_broker_has_explicit_external_environment_health_and_ordering():
@@ -99,6 +150,7 @@ def test_broker_has_explicit_external_environment_health_and_ordering():
     assert broker["environment"]["BROKER_MODE"] == "external"
     assert runtime["environment"]["BROKER_MODE"] == "external"
     assert broker["depends_on"] == {
+        "docker-socket-adapter": {"condition": "service_healthy"},
         "broker-init": {"condition": "service_completed_successfully"},
         "postgres": {"condition": "service_healthy"},
     }
@@ -169,6 +221,7 @@ def test_example_files_document_and_preserve_the_secret_partition():
     assert "OPENAI_API_KEY" not in compose
     assert "BROKER_IDENTITY_PRIVATE_KEY" not in compose
     assert "BROKER_CAPABILITY_ROOTS" not in compose
+    assert "DOCKER_GID" not in compose
 
     assert "BROKER_IDENTITY_PRIVATE_KEY" in app
     assert "BROKER_RECEIPT_ROOTS" in app

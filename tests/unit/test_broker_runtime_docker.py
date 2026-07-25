@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
@@ -26,7 +27,9 @@ from openloop.broker_runtime.docker_policy import (
     EXPECTED_RELAY_ENTRYPOINT,
     LABEL_ROLE,
     derive_generation_names,
+    DockerCommand,
 )
+from openloop.broker_runtime.docker import _default_command_runner
 from openloop.tools.openhands_relay import RelayMode
 
 
@@ -350,6 +353,47 @@ def test_command_execution_repr_never_renders_retained_output():
 
     assert "sensitive" not in rendered
     assert "stdout=<bounded text" in rendered
+
+
+async def test_default_runner_inherits_ambient_docker_host(monkeypatch):
+    endpoint = "unix:///run/openloop-docker/docker.sock"
+    monkeypatch.setenv("DOCKER_HOST", endpoint)
+    command = DockerCommand(
+        (
+            sys.executable,
+            "-c",
+            "import os; print(os.environ.get('DOCKER_HOST', 'missing'))",
+        )
+    )
+
+    result = await _default_command_runner(command)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == endpoint
+
+
+async def test_default_runner_merges_command_environment_with_docker_host(
+    monkeypatch,
+):
+    endpoint = "unix:///run/openloop-docker/docker.sock"
+    monkeypatch.setenv("DOCKER_HOST", endpoint)
+    command = DockerCommand(
+        (
+            sys.executable,
+            "-c",
+            (
+                "import os; "
+                "print(os.environ.get('DOCKER_HOST', 'missing')); "
+                "print(os.environ.get('OPENLOOP_RUNNER_TEST', 'missing'))"
+            ),
+        ),
+        environment=(("OPENLOOP_RUNNER_TEST", "present"),),
+    )
+
+    result = await _default_command_runner(command)
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [endpoint, "present"]
 
 
 def test_describe_endpoint_is_pure_and_uses_host_socket(short_root):

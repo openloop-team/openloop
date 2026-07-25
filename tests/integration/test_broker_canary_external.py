@@ -6,6 +6,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import time
@@ -58,6 +59,12 @@ def _compose_files(project: Path, workspace: Path) -> tuple[Path, Path, Path]:
 
     broker_path = project / "docker-compose.broker.yml"
     broker_path.write_text((workspace / "docker-compose.broker.yml").read_text())
+    adapter_config = project / "ops/docker-socket-adapter/haproxy.cfg"
+    adapter_config.parent.mkdir(parents=True)
+    shutil.copy2(
+        workspace / "ops/docker-socket-adapter/haproxy.cfg",
+        adapter_config,
+    )
 
     canary_path = project / "docker-compose.canary.yml"
     canary_path.write_text(
@@ -82,39 +89,8 @@ def _compose_files(project: Path, workspace: Path) -> tuple[Path, Path, Path]:
                     },
                     "broker": {
                         "build": {"context": str(workspace)},
-                        "environment": {
-                            # Docker Desktop's VM-local socket is root:root 0755,
-                            # so its numeric GID cannot authorize the non-root
-                            # broker. This canary-only bridge is the same adapter
-                            # used by the established Phase-5 Docker canary.
-                            "DOCKER_HOST": "tcp://docker-proxy:2375"
-                        },
-                        "depends_on": {
-                            "docker-proxy": {"condition": "service_started"}
-                        },
                     },
                     "broker-init": {"build": {"context": str(workspace)}},
-                    "docker-proxy": {
-                        "image": "python:3.12-slim",
-                        "user": "0:0",
-                        "command": [
-                            "python",
-                            "/workspace/openloop/tests/support/docker_socket_proxy.py",
-                        ],
-                        "volumes": [
-                            {
-                                "type": "bind",
-                                "source": str(workspace),
-                                "target": "/workspace/openloop",
-                                "read_only": True,
-                            },
-                            {
-                                "type": "bind",
-                                "source": "${DOCKER_SOCKET:-/var/run/docker.sock}",
-                                "target": "/var/run/docker.sock",
-                            },
-                        ],
-                    },
                 }
             },
             sort_keys=False,
@@ -338,13 +314,11 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
         _write_partitioned_environments(project)
         environment = os.environ.copy()
         docker_socket = environment.get("DOCKER_SOCKET", "/var/run/docker.sock")
-        docker_gid = os.stat(docker_socket).st_gid if Path(docker_socket).exists() else 0
         environment.update(
             {
                 "OPENLOOP_BROKER_ROOT": str(broker_root),
                 "OPENLOOP_BROKER_UID": "10002",
                 "OPENLOOP_DATA_GID": "10777",
-                "DOCKER_GID": str(docker_gid),
                 "DOCKER_SOCKET": docker_socket,
             }
         )
@@ -368,6 +342,7 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
                     "logs",
                     "--no-color",
                     "broker-init",
+                    "docker-socket-adapter",
                     "broker",
                 )
                 raise AssertionError(
@@ -389,6 +364,117 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
                     "version",
                 )
             )
+            socket_state = _assert_success(
+                _compose(
+                    project,
+                    files,
+                    project_name,
+                    environment,
+                    "exec",
+                    "-T",
+                    "docker-socket-adapter",
+                    "stat",
+                    "-c",
+                    "%u:%g:%a:%F",
+                    "/run/openloop-docker/docker.sock",
+                    "/run/openloop-health/health.sock",
+                )
+            ).splitlines()
+            assert socket_state == [
+                "0:10777:660:socket",
+                "0:10777:600:socket",
+            ]
+
+            adapter_id = _assert_success(
+                _compose(
+                    project,
+                    files,
+                    project_name,
+                    environment,
+                    "ps",
+                    "-q",
+                    "docker-socket-adapter",
+                )
+            ).strip()
+            adapter_document = json.loads(
+                _assert_success(
+                    subprocess.run(
+                        ["docker", "inspect", adapter_id],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                )
+            )[0]
+            adapter_host = adapter_document["HostConfig"]
+            assert adapter_document["Config"]["User"] == "0:10777"
+            assert adapter_host["NetworkMode"] == "none"
+            assert adapter_host["ReadonlyRootfs"] is True
+            assert adapter_host["CapDrop"] == ["ALL"]
+            assert adapter_host["CapAdd"] is None
+            assert adapter_host["SecurityOpt"] == ["no-new-privileges:true"]
+            assert adapter_host["PortBindings"] == {}
+            adapter_mounts = {
+                mount["Destination"]: mount
+                for mount in adapter_document["Mounts"]
+            }
+            assert adapter_mounts["/var/run/docker.sock"]["Type"] == "bind"
+            assert adapter_mounts["/run/openloop-docker"]["Type"] == "volume"
+            assert adapter_mounts["/run/openloop-docker"]["RW"] is True
+            broker_id = _assert_success(
+                _compose(
+                    project,
+                    files,
+                    project_name,
+                    environment,
+                    "ps",
+                    "-q",
+                    "broker",
+                )
+            ).strip()
+            runtime_id = _assert_success(
+                _compose(
+                    project,
+                    files,
+                    project_name,
+                    environment,
+                    "ps",
+                    "-q",
+                    "runtime",
+                )
+            ).strip()
+            broker_document = json.loads(
+                _assert_success(
+                    subprocess.run(
+                        ["docker", "inspect", broker_id],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                )
+            )[0]
+            runtime_document = json.loads(
+                _assert_success(
+                    subprocess.run(
+                        ["docker", "inspect", runtime_id],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                )
+            )[0]
+            broker_mounts = {
+                mount["Destination"]: mount
+                for mount in broker_document["Mounts"]
+            }
+            runtime_mounts = {
+                mount["Destination"]: mount
+                for mount in runtime_document["Mounts"]
+            }
+            assert "/var/run/docker.sock" not in broker_mounts
+            assert broker_mounts["/run/openloop-docker"]["RW"] is False
+            assert "/var/run/docker.sock" not in runtime_mounts
+            assert "/run/openloop-docker" not in runtime_mounts
 
             canary_root = broker_root / "canary"
             for command in (
@@ -440,6 +526,7 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
                     environment,
                     "logs",
                     "--no-color",
+                    "docker-socket-adapter",
                     "broker",
                 )
                 audit = _compose(
@@ -497,6 +584,20 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
                 "/var/run/docker.sock",
             )
             _assert_success(no_socket)
+            no_forwarded_socket = _compose(
+                project,
+                files,
+                project_name,
+                environment,
+                "exec",
+                "-T",
+                "runtime",
+                "test",
+                "!",
+                "-e",
+                "/run/openloop-docker/docker.sock",
+            )
+            _assert_success(no_forwarded_socket)
             runtime_uid = _assert_success(
                 _compose(
                     project,
@@ -536,9 +637,25 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
                     "-g",
                 )
             ).strip()
+            broker_groups = set(
+                _assert_success(
+                    _compose(
+                        project,
+                        files,
+                        project_name,
+                        environment,
+                        "exec",
+                        "-T",
+                        "broker",
+                        "id",
+                        "-G",
+                    )
+                ).split()
+            )
             assert runtime_uid == "1000"
             assert broker_uid == "10002"
             assert broker_gid == "10777"
+            assert "10777" in broker_groups
             assert runtime_uid != broker_uid
 
             runtime_env = set(
@@ -571,10 +688,17 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
             )
             expected_database_url = (
                 "DATABASE_URL="
-                "postgresql://openloop:change-me@postgres:5432/openloop"
+                "postgresql://openloop@postgres:5432/openloop"
             )
             assert expected_database_url in runtime_env
             assert expected_database_url in broker_env
+            assert (
+                "DOCKER_HOST=unix:///run/openloop-docker/docker.sock"
+                in broker_env
+            )
+            assert not any(
+                line.startswith("DOCKER_HOST=") for line in runtime_env
+            )
             assert not any(
                 line.startswith(("BROKER_CAPABILITY_ROOTS=", "BROKER_RUNTIME_ROOTS="))
                 for line in runtime_env
