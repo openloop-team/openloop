@@ -320,6 +320,7 @@ def _provider_key(settings: Settings, model: str) -> str | None:
         "openai": settings.openai_api_key,
         "anthropic": settings.anthropic_api_key,
         "gemini": settings.gemini_api_key,
+        "groq": settings.groq_api_key,
         "openrouter": settings.openrouter_api_key,
     }.get(provider)
 

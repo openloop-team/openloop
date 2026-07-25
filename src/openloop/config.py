@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
+    groq_api_key: str | None = None
     openrouter_api_key: str | None = None
     ollama_base_url: str = "http://localhost:11434"
 
@@ -230,9 +231,10 @@ class Settings(BaseSettings):
     coding_worker_warm_capacity: int = 8
 
     # Storage / queue
-    database_url: str = (
-        "postgresql://openloop:change-me@localhost:5432/openloop_agents"
-    )
+    # Names the same database Compose provisions from POSTGRES_DB, so the bare
+    # default and a Compose-provisioned Postgres agree instead of the app
+    # quietly opening a second database.
+    database_url: str = "postgresql://openloop:change-me@localhost:5432/openloop"
     # One ordinary-query pool per runtime process. The Postgres coordination
     # backend intentionally owns a separate small pool because advisory locks
     # hold connections for the lifetime of a lease.
@@ -328,6 +330,8 @@ class Settings(BaseSettings):
             providers.append("anthropic")
         if self.gemini_api_key:
             providers.append("gemini")
+        if self.groq_api_key:
+            providers.append("groq")
         if self.openrouter_api_key:
             providers.append("openrouter")
         return providers
