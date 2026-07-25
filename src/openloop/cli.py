@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import Any
 
 from openloop.agents import load_agent
 from openloop.agents.loader import AgentConfigError
@@ -219,6 +220,80 @@ def _insert_metadata_id(text: str, minted: str) -> tuple[str, str] | None:
     return "".join(new_lines), preview
 
 
+def _cmd_broker_keys(args: argparse.Namespace) -> int:
+    """Emit the broker-side PUBLIC key maps derived from app-side material.
+
+    `.env.broker` needs the public halves of two secrets that live app-side in
+    `.env.runtime`. Neither is free-choice: the identity public is the public
+    half of ``BROKER_IDENTITY_PRIVATE_KEY``, and each receipt public is the
+    public half of the HKDF-derived per-version key rooted at
+    ``BROKER_RECEIPT_ROOTS``. Random stand-ins pass every startup check and then
+    fail at verification time, so this derives them with the same helpers the
+    runtime uses — the two can never drift apart.
+
+    Only public bytes are printed; the seeds and roots never leave the process.
+    """
+    import base64
+    import json
+
+    from openloop.config import Settings
+    from openloop.wiring.broker import (
+        _decode_identity_seed,
+        _decode_roots,
+        _derive_receipt_key,
+    )
+
+    settings = Settings()
+
+    def public_of(private: Any) -> str:
+        return base64.b64encode(private.public_key().public_bytes_raw()).decode()
+
+    for field, env_name in (
+        ("broker_identity_private_key", "BROKER_IDENTITY_PRIVATE_KEY"),
+        ("broker_receipt_roots", "BROKER_RECEIPT_ROOTS"),
+    ):
+        if not getattr(settings, field):
+            print(
+                f"error: {env_name} is not set — the broker's public maps are "
+                f"derived from it, so set it in .env.runtime first",
+                file=sys.stderr,
+            )
+            return 1
+
+    # Derive everything before printing, so a malformed value can't leave a
+    # half-written map that looks paste-ready.
+    try:
+        identity = {
+            settings.broker_identity_key_id: public_of(
+                _decode_identity_seed(settings.broker_identity_private_key)
+            )
+        }
+        # Validate through the runtime's own decoder rather than decoding here:
+        # HKDF accepts any input length, so an unvalidated root would derive a
+        # plausible key that verifies nothing — the failure this command exists
+        # to prevent.
+        roots = _decode_roots(
+            "receipt",
+            settings.broker_receipt_roots,
+            settings.broker_receipt_current_version,
+        )
+        # Every configured version, not just the current one: the broker
+        # verifies material signed before a rotation as well as after it.
+        receipts = {
+            version: public_of(
+                _derive_receipt_key(root, settings.broker_receipt_domain, version)
+            )
+            for version, root in roots.items()
+        }
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"BROKER_IDENTITY_PUBLIC_KEYS={json.dumps(identity)}")
+    print(f"BROKER_RECEIPT_PUBLIC_KEYS={json.dumps(receipts)}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="openloop")
     sub = parser.add_subparsers(dest="group", required=True)
@@ -241,6 +316,14 @@ def main(argv: list[str] | None = None) -> int:
         "-y", "--yes", action="store_true", help="insert without prompting"
     )
     issue.set_defaults(func=_cmd_agents_id_issue)
+
+    # A group so sibling actions (e.g. `broker keys --check`) can land later.
+    broker = sub.add_parser("broker", help="external broker operator commands")
+    broker_sub = broker.add_subparsers(dest="action", required=True)
+    keys = broker_sub.add_parser(
+        "keys", help="derive the broker public key maps from runtime"
+    )
+    keys.set_defaults(func=_cmd_broker_keys)
 
     slack = sub.add_parser("slack", help="run the Slack surface")
     slack_sub = slack.add_subparsers(dest="action", required=True)
