@@ -150,10 +150,17 @@ async def run_broker(
                 log.warning("broker startup: DEVELOPMENT in-memory state enabled")
             else:
                 log.info("broker startup: opening Postgres pool")
+                pool_kwargs = {
+                    "min_size": settings.postgres_pool_min_size,
+                    "max_size": settings.postgres_pool_max_size,
+                }
+                if settings.postgres_password is not None:
+                    pool_kwargs["password"] = (
+                        settings.postgres_password.get_secret_value()
+                    )
                 pool = await create_pool(
                     settings.database_url,
-                    min_size=settings.postgres_pool_min_size,
-                    max_size=settings.postgres_pool_max_size,
+                    **pool_kwargs,
                 )
                 stack.push_async_callback(pool.close)
 

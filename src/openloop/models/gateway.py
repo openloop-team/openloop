@@ -9,6 +9,7 @@ completion against a LiteLLM-style model id (e.g. ``openai/gpt-4o-mini``,
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 
@@ -38,6 +39,9 @@ class ModelResponse:
 class ModelGateway:
     """Executes completions and reports token/cost usage for the audit trail."""
 
+    def __init__(self, provider_api_keys: Mapping[str, str] | None = None) -> None:
+        self._provider_api_keys = dict(provider_api_keys or {})
+
     async def complete(
         self,
         model: str,
@@ -57,6 +61,12 @@ class ModelGateway:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        provider = model.split("/", 1)[0]
+        api_key = self._provider_api_keys.get(provider)
+        if api_key:
+            # Pass mounted keys explicitly. LiteLLM's environment lookup remains
+            # a fallback for callers that construct a bare gateway themselves.
+            kwargs["api_key"] = api_key
         if tools:
             kwargs["tools"] = tools
 

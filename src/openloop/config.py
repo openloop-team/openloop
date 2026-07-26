@@ -1,4 +1,4 @@
-"""Runtime configuration loaded from environment / ``.env.runtime``.
+"""Runtime configuration loaded from mounted secrets, environment, or dotenv.
 
 Mirrors the keys documented in ``.env.runtime.example``. Only what the first
 vertical slice needs is wired up here; more lands as the runtime grows.
@@ -6,16 +6,21 @@ vertical slice needs is wired up here; more lands as the runtime grows.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
 
 
 class Settings(BaseSettings):
-    """Runtime configuration, loaded from the environment and ``.env.runtime``.
+    """Runtime configuration loaded from explicit, secret, and ambient sources.
 
     Construct one at a process entrypoint and pass it down; every consumer
     takes it as an argument rather than reaching for a global. Tests construct
@@ -25,12 +30,48 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env.runtime",
         env_file_encoding="utf-8",
+        secrets_dir="/run/secrets",
         extra="ignore",
         hide_input_in_errors=True,
     )
 
-    # Model providers — LiteLLM reads these from the environment directly, but we
-    # surface them here so the runtime can report which providers are configured.
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Keep test overrides first, then prefer mounted production secrets.
+
+        Pydantic's default order puts environment and dotenv values ahead of
+        its Docker-secrets source. OpenLoop reverses that part deliberately:
+        once Compose grants a secret file to the service, an old environment
+        value must not silently replace it. The standard mount is optional so
+        ordinary local runs do not warn when ``/run/secrets`` is absent.
+        """
+        del settings_cls
+        configured = getattr(file_secret_settings, "secrets_dir", None)
+        secret_dirs = (
+            (configured,)
+            if isinstance(configured, (str, Path))
+            else tuple(configured or ())
+        )
+        external_sources: tuple[PydanticBaseSettingsSource, ...]
+        if any(Path(path).expanduser().exists() for path in secret_dirs):
+            external_sources = (
+                file_secret_settings,
+                env_settings,
+                dotenv_settings,
+            )
+        else:
+            external_sources = (env_settings, dotenv_settings)
+        return (init_settings, *external_sources)
+
+    # Model providers. Wiring passes these explicitly to LiteLLM so mounted
+    # secret files work without copying credentials into process environment.
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
@@ -93,6 +134,10 @@ class Settings(BaseSettings):
     coding_worker_deadline_seconds: float = 600.0
     # Path to the `claude` CLI for CODING_WORKER_BACKEND=claude.
     coding_worker_claude_bin: str = "claude"
+    # Optional long-lived Claude Code subscription token. Kept out of the
+    # process environment when loaded from /run/secrets and exposed only to the
+    # child `claude` process.
+    claude_code_oauth_token: SecretStr | None = None
     # Headless permission handling for the claude backend. "acceptEdits" (default)
     # auto-accepts file edits; "bypassPermissions" grants full autonomy (shell,
     # tests) at higher risk — recommended only inside a sandbox.
@@ -242,6 +287,9 @@ class Settings(BaseSettings):
     # default and a Compose-provisioned Postgres agree instead of the app
     # quietly opening a second database.
     database_url: str = "postgresql://openloop:change-me@localhost:5432/openloop"
+    # Allows the DSN to remain non-secret. Compose can grant the same mounted
+    # password file to Postgres, runtime, and broker without exporting it.
+    postgres_password: SecretStr | None = None
     # One ordinary-query pool per runtime process. The Postgres coordination
     # backend intentionally owns a separate small pool because advisory locks
     # hold connections for the lifetime of a lease.

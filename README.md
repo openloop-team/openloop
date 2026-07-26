@@ -261,6 +261,16 @@ root-only UDS and blocks broker startup unless HAProxy's checked `/_ping`
 backend is available. Under its read-only root filesystem, only the forwarded
 socket volume, private health tmpfs, and mounted upstream socket are writable.
 
+### Mounted secrets
+
+OpenLoop reads secret files directly from `/run/secrets`. Use the
+lowercase `Settings` field name as the filename; for example,
+`/run/secrets/openai_api_key`, `/run/secrets/slack_bot_token`, or
+`/run/secrets/broker_capability_roots`. PostgreSQL can use
+`/run/secrets/postgres_password`, while Claude Code can use
+`/run/secrets/claude_code_oauth_token`. File contents are type-validated exactly
+like environment values, including JSON decoding for dictionaries and lists.
+
 ### Local development *(preliminary)*
 
 The runtime is a Python/FastAPI app. Local dev uses [mise](https://mise.jdx.dev)
@@ -491,8 +501,9 @@ account.
   externally, or deleting anything.
 - **Scoped tokens:** use fine-grained, per-integration tokens.
 - **Memory isolation:** scope memory per channel so context doesn't leak.
-- **Secrets:** keep Compose, runtime, and broker credentials in their gitignored
-  `.env`, `.env.runtime`, and `.env.broker` files, or use a secrets manager.
+- **Secrets:** use service-scoped files mounted at `/run/secrets` in production.
+  Gitignored `.env`, `.env.runtime`, and `.env.broker` files remain supported
+  for local development.
 - **Inspect:** self-host the runtime to see exactly what the agent does.
 
 Early-stage software, no warranty. Don't connect sensitive production systems

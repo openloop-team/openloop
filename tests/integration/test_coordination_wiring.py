@@ -76,6 +76,18 @@ def test_build_lock_explicit_overrides_memory_backend():
     assert isinstance(forced_pg, PostgresLock)
 
 
+def test_build_lock_passes_the_mounted_postgres_password():
+    lock = builders.build_lock(
+        Settings(
+            lock_backend="postgres",
+            postgres_password="mounted-db-secret",
+        )
+    )
+
+    assert isinstance(lock, PostgresLock)
+    assert lock._password == "mounted-db-secret"
+
+
 class _FailingSetupLock:
     async def setup(self):
         raise RuntimeError("coordination backend down")

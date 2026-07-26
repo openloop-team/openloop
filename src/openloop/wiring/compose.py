@@ -147,11 +147,18 @@ async def compose(
         pool = None
         if mode in ("auto", "postgres"):
             pool_factory = selected.get("pool_factory", create_pool)
+            pool_kwargs: dict[str, Any] = {
+                "min_size": settings.postgres_pool_min_size,
+                "max_size": settings.postgres_pool_max_size,
+            }
+            if settings.postgres_password is not None:
+                pool_kwargs["password"] = (
+                    settings.postgres_password.get_secret_value()
+                )
             try:
                 pool = await pool_factory(
                     settings.database_url,
-                    min_size=settings.postgres_pool_min_size,
-                    max_size=settings.postgres_pool_max_size,
+                    **pool_kwargs,
                 )
             except Exception:
                 if mode == "postgres":
@@ -312,7 +319,11 @@ async def compose(
             tools=tools,
             engine=engine,
             limiter=limiter,
-            model_gateway=selected.get("model_gateway"),
+            model_gateway=_override_or(
+                selected,
+                "model_gateway",
+                lambda: builders.build_model_gateway(settings),
+            ),
         )
         slack_app: AsyncApp | None = None
         session_runner = None

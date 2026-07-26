@@ -47,10 +47,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
+
+from pydantic import SecretStr
 
 from openloop.tools.coding_worker import StepCallback, WorkerEdit, WorkerRunAborted
 
@@ -91,6 +94,7 @@ class ClaudeCodeCodingWorker:
         model: str,
         *,
         claude_bin: str = "claude",
+        auth_token: str | None = None,
         max_turns: int = 100,
         deadline_seconds: float | None = 600.0,
         permission_mode: str = "acceptEdits",
@@ -99,6 +103,7 @@ class ClaudeCodeCodingWorker:
     ) -> None:
         self.model = model
         self.claude_bin = claude_bin
+        self._claude_auth = SecretStr(auth_token) if auth_token else None
         # --max-turns: the agent-turn ceiling. One half of the load-bearing bound.
         self.max_turns = max_turns
         # Hard wall-clock kill for one run (None/0 → unbounded, which probe()
@@ -284,11 +289,18 @@ class ClaudeCodeCodingWorker:
         the OpenHands host mode, this backend owns the subprocess, so a frozen run
         cannot outlive its ceiling.
         """
+        child_env = None
+        if self._claude_auth is not None:
+            child_env = dict(os.environ)
+            child_env["CLAUDE_CODE_OAUTH_TOKEN"] = (
+                self._claude_auth.get_secret_value()
+            )
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=child_env,
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)

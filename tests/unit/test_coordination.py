@@ -272,3 +272,52 @@ async def test_postgres_lock_setup_probes_lazy_pool(monkeypatch):
 
     assert queries == ["SELECT 1"]
     assert lock._pool is pool
+
+
+async def test_postgres_lock_forwards_an_explicit_password(monkeypatch):
+    calls = []
+
+    class Connection:
+        async def fetchval(self, query):
+            return 1
+
+    class Acquire:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+        async def close(self):
+            pass
+
+    async def create_pool(*args, **kwargs):
+        calls.append((args, kwargs))
+        return Pool()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "asyncpg",
+        types.SimpleNamespace(create_pool=create_pool),
+    )
+    lock = PostgresLock(
+        "postgresql://test",
+        password="mounted-db-secret",
+    )
+
+    await lock.setup()
+
+    assert calls == [
+        (
+            ("postgresql://test",),
+            {
+                "min_size": 0,
+                "max_size": 2,
+                "password": "mounted-db-secret",
+            },
+        )
+    ]

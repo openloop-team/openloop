@@ -33,6 +33,7 @@ from openloop.coordination import (
 )
 from openloop.memory import Embedder, InMemoryStore, LiteLLMEmbedder, MemoryStore
 from openloop.memory.postgres import PostgresMemoryStore
+from openloop.models.gateway import ModelGateway
 from openloop.sessions import (
     InMemorySurfaceSessionStore,
     InMemoryThreadRecordStore,
@@ -91,7 +92,21 @@ def build_embedder(settings: Settings) -> Embedder | None:
             settings.embedding_provider,
         )
         return None
-    return LiteLLMEmbedder(settings.embedding_model)
+    return LiteLLMEmbedder(
+        settings.embedding_model,
+        api_key=_provider_key(settings, settings.embedding_model),
+    )
+
+
+def build_model_gateway(settings: Settings) -> ModelGateway:
+    """Build a gateway that receives provider keys from validated Settings."""
+    return ModelGateway(
+        {
+            provider: key
+            for provider in settings.configured_providers
+            if (key := _provider_key(settings, provider))
+        }
+    )
 
 
 def build_memory_store(settings: Settings) -> MemoryStore:
@@ -167,7 +182,11 @@ def build_lock(settings: Settings) -> DistributedLock:
     """
     backend = _resolve_lock_backend(settings)
     if backend == "postgres":
-        return PostgresLock(settings.database_url)
+        password = settings.postgres_password
+        return PostgresLock(
+            settings.database_url,
+            password=password.get_secret_value() if password is not None else None,
+        )
     if backend == "redis":
         try:
             return RedisLock.from_url(settings.redis_url)
@@ -356,7 +375,11 @@ def build_coding_worker(
             settings.coding_worker_model,
             settings.coding_worker_sandbox,
         )
-        return BuiltinCodingWorker(model=settings.coding_worker_model, sandbox=sandbox)
+        return BuiltinCodingWorker(
+            model=settings.coding_worker_model,
+            gateway=build_model_gateway(settings),
+            sandbox=sandbox,
+        )
     if backend == "openhands":
         if settings.coding_worker_sandbox not in ("host", "docker"):
             log.error(
@@ -495,6 +518,11 @@ def build_coding_worker(
         claude_worker = ClaudeCodeCodingWorker(
             settings.coding_worker_model,
             claude_bin=settings.coding_worker_claude_bin,
+            auth_token=(
+                settings.claude_code_oauth_token.get_secret_value()
+                if settings.claude_code_oauth_token is not None
+                else None
+            ),
             max_turns=settings.coding_worker_max_iterations,
             deadline_seconds=settings.coding_worker_deadline_seconds or None,
             permission_mode=settings.coding_worker_claude_permission_mode,
@@ -663,10 +691,10 @@ def build_tool_gateway(
                     ledger=ledger,
                     warm_pool=warm_pool,
                 )
-                # Read-only investigation profile (Task 13): its gateway
-                # param is left default so it lazily builds the real
-                # ModelGateway on first use — never constructed eagerly here.
-                investigator = RepoInvestigator(settings.coding_worker_model)
+                investigator = RepoInvestigator(
+                    settings.coding_worker_model,
+                    gateway=build_model_gateway(settings),
+                )
                 gateway.register(
                     CodingWorkerConnector(
                         orchestrator,

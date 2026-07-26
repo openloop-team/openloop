@@ -190,3 +190,32 @@ def test_defaults_are_the_safe_ones():
     assert worker.max_turns == 100
     assert worker.deadline_seconds == 600.0
     assert worker.permission_mode == "acceptEdits"
+
+
+async def test_mounted_auth_is_exposed_only_to_the_claude_child(
+    monkeypatch, tmp_path
+):
+    captured = {}
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            return b"ok", b""
+
+    async def create_subprocess_exec(*cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs["env"]
+        return Process()
+
+    monkeypatch.setattr(
+        "openloop.tools.claude_worker.asyncio.create_subprocess_exec",
+        create_subprocess_exec,
+    )
+    worker = ClaudeCodeCodingWorker("m", auth_token="mounted-claude-secret")
+
+    result = await worker._default_runner(["claude", "-p", "prompt"], tmp_path, 1)
+
+    assert result == (0, "ok", "", False)
+    assert captured["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "mounted-claude-secret"
+    assert "mounted-claude-secret" not in repr(vars(worker))

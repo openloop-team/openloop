@@ -47,6 +47,40 @@ async def test_create_pool_forwards_explicit_bounds(monkeypatch):
     assert await create_pool("postgresql://test", min_size=2, max_size=9) is pool
 
 
+async def test_create_pool_forwards_an_explicit_password(monkeypatch):
+    pool = _Pool()
+    calls = []
+
+    async def asyncpg_create_pool(dsn, **kwargs):
+        calls.append((dsn, kwargs))
+        return pool
+
+    monkeypatch.setitem(
+        sys.modules,
+        "asyncpg",
+        SimpleNamespace(create_pool=asyncpg_create_pool),
+    )
+
+    created = await create_pool(
+        "postgresql://test",
+        min_size=2,
+        max_size=9,
+        password="mounted-db-secret",
+    )
+
+    assert created is pool
+    assert calls == [
+        (
+            "postgresql://test",
+            {
+                "min_size": 2,
+                "max_size": 9,
+                "password": "mounted-db-secret",
+            },
+        )
+    ]
+
+
 def test_stores_no_longer_accept_a_dsn():
     with pytest.raises(TypeError):
         PostgresUsageStore("postgresql://test")

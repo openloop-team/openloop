@@ -56,16 +56,18 @@ class _Pool:
         self.close_calls += 1
 
 
-def _settings(tmp_path) -> Settings:
-    return Settings(
-                memory_backend="postgres",
-        lock_backend="memory",
-        agents_dir=str(tmp_path),
-        embeddings_enabled=False,
-        recovery_interval_seconds=0,
-        postgres_pool_min_size=2,
-        postgres_pool_max_size=7,
-    )
+def _settings(tmp_path, **overrides) -> Settings:
+    values = {
+        "memory_backend": "postgres",
+        "lock_backend": "memory",
+        "agents_dir": str(tmp_path),
+        "embeddings_enabled": False,
+        "recovery_interval_seconds": 0,
+        "postgres_pool_min_size": 2,
+        "postgres_pool_max_size": 7,
+    }
+    values.update(overrides)
+    return Settings(**values)
 
 
 def test_lifespan_creates_and_closes_one_shared_pool(monkeypatch, tmp_path):
@@ -127,3 +129,26 @@ def test_pool_creation_failure_uses_fallbacks_without_store_pool_attempts(
         assert isinstance(ctx.workflows, InMemoryWorkflowStore)
         assert isinstance(ctx.sessions, InMemorySurfaceSessionStore)
         assert isinstance(ctx.threads, InMemoryThreadRecordStore)
+
+
+def test_lifespan_passes_the_mounted_postgres_password(monkeypatch, tmp_path):
+    settings = _settings(tmp_path, postgres_password="mounted-db-secret")
+    pool = _Pool()
+    create_calls = []
+
+    async def create_pool(dsn, *, min_size, max_size, password):
+        create_calls.append((dsn, min_size, max_size, password))
+        return pool
+
+    monkeypatch.setattr(composemod, "create_pool", create_pool)
+
+    app = appmod.create_app(settings=settings)
+    with TestClient(app):
+        assert create_calls == [
+            (
+                settings.database_url,
+                2,
+                7,
+                "mounted-db-secret",
+            )
+        ]

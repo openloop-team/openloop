@@ -352,6 +352,20 @@ def test_claude_registers_in_host_mode(monkeypatch):
     assert worker.deadline_seconds == 600.0
 
 
+def test_claude_receives_mounted_auth_without_repr_leak(monkeypatch):
+    monkeypatch.setattr(ClaudeCodeCodingWorker, "probe", lambda self: None)
+    gateway = _gateway(
+        _settings(
+            coding_worker_backend="claude",
+            claude_code_oauth_token="mounted-claude-secret",
+        )
+    )
+
+    worker = gateway._tools["workspace_task"].orchestrator.worker
+    assert worker._claude_auth.get_secret_value() == "mounted-claude-secret"
+    assert "mounted-claude-secret" not in repr(vars(worker))
+
+
 def test_claude_docker_mode_fails_closed(monkeypatch, caplog):
     # Docker isolation for the claude backend is not implemented: requesting it
     # must disable the worker loudly, never silently run on the host.

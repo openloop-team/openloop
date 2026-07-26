@@ -41,9 +41,16 @@ class BorrowedPostgresStore:
 
 
 async def create_pool(
-    dsn: str, *, min_size: int, max_size: int
+    dsn: str,
+    *,
+    min_size: int,
+    max_size: int,
+    password: str | None = None,
 ) -> Any:
     """Create an asyncpg pool without importing asyncpg at module import time."""
     import asyncpg
 
-    return await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size)
+    kwargs = {"min_size": min_size, "max_size": max_size}
+    if password is not None:
+        kwargs["password"] = password
+    return await asyncpg.create_pool(dsn, **kwargs)

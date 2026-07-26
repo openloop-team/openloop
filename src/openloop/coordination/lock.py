@@ -237,9 +237,16 @@ class PostgresLock:
     the stores' pools so a long-held lock never starves query traffic.
     """
 
-    def __init__(self, dsn: str, *, max_size: int = 2) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        max_size: int = 2,
+        password: str | None = None,
+    ) -> None:
         self.dsn = dsn
         self._max_size = max_size
+        self._password = password
         self._pool = None  # asyncpg.Pool, created in setup()
         self._held: dict[str, object] = {}  # token -> checked-out Connection
 
@@ -248,9 +255,10 @@ class PostgresLock:
 
         # min_size=0 keeps idle usage at zero, so explicitly borrow once here:
         # pool construction is lazy and is not itself a connectivity probe.
-        pool = await asyncpg.create_pool(
-            self.dsn, min_size=0, max_size=self._max_size
-        )
+        kwargs = {"min_size": 0, "max_size": self._max_size}
+        if self._password is not None:
+            kwargs["password"] = self._password
+        pool = await asyncpg.create_pool(self.dsn, **kwargs)
         try:
             async with pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
