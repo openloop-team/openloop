@@ -251,6 +251,7 @@ cp .env.example .env
 cp .env.runtime.example .env.runtime
 cp .env.broker.example .env.broker
 # Set an absolute OPENLOOP_BROKER_ROOT in .env.
+# Render every file listed in ops/compose-secrets.md.
 mise run compose-build
 mise run compose-up
 ```
@@ -263,13 +264,23 @@ socket volume, private health tmpfs, and mounted upstream socket are writable.
 
 ### Mounted secrets
 
-OpenLoop reads secret files directly from `/run/secrets`. Use the
-lowercase `Settings` field name as the filename; for example,
-`/run/secrets/openai_api_key`, `/run/secrets/slack_bot_token`, or
-`/run/secrets/broker_capability_roots`. PostgreSQL can use
-`/run/secrets/postgres_password`, while Claude Code can use
-`/run/secrets/claude_code_oauth_token`. File contents are type-validated exactly
-like environment values, including JSON decoding for dictionaries and lists.
+Secret files should be mounted at `/run/secrets/<lowercase-settings-field>`. The
+GitHub App PEM is mounted as `/run/secrets/github_app_private_key`, with its
+non-secret path configured automatically. File contents are type-validated
+exactly like environment values, including JSON decoding for dictionaries.
+
+Compose uses one flat secret inventory rooted at
+`${OPENLOOP_SECRETS_ROOT:-./secrets}`. Files such as `postgres_password`,
+`openai_api_key`, and `broker_capability_roots` live directly in that directory.
+Compose still grants only the required files to each container:
+
+- Postgres receives only `postgres_password`.
+- Runtime receives the database password, application credentials, and
+  app-side broker secrets.
+- Broker receives the database password and broker-owned root maps.
+
+See
+[`ops/compose-secrets.md`](ops/compose-secrets.md) for the complete inventory.
 
 ### Local development *(preliminary)*
 
@@ -381,11 +392,9 @@ user-token scope `chat:write` (OAuth & Permissions → **User Token Scopes**) an
 reinstall to get an `xoxp-…` token:
 
 ```bash
-export E2E_LIVE=1
-export SLACK_BOT_TOKEN=xoxb-…         # bot scopes listed above
-export SLACK_APP_TOKEN=xapp-…         # connections:write, Socket Mode enabled
-export E2E_SLACK_USER_TOKEN=xoxp-…    # user-token chat:write — posts the mention
-export E2E_SLACK_CHANNEL=C0…          # a channel the bot and that user are both in
+cp .env.e2e.example .env.e2e
+# Set E2E_SLACK_USER_TOKEN and E2E_SLACK_CHANNEL in .env.e2e.
+# The task reads SLACK_BOT_TOKEN and SLACK_APP_TOKEN from secrets/.
 export E2E_CONFIRM=1
 mise run test-e2e-slack-live
 ```
@@ -501,9 +510,10 @@ account.
   externally, or deleting anything.
 - **Scoped tokens:** use fine-grained, per-integration tokens.
 - **Memory isolation:** scope memory per channel so context doesn't leak.
-- **Secrets:** use service-scoped files mounted at `/run/secrets` in production.
-  Gitignored `.env`, `.env.runtime`, and `.env.broker` files remain supported
-  for local development.
+- **Secrets:** keep source files in one flat host directory and use per-service
+  Compose grants to mount only the required files at `/run/secrets` in
+  production. Gitignored `.env`, `.env.runtime`, and `.env.broker` files remain
+  supported for local development.
 - **Inspect:** self-host the runtime to see exactly what the agent does.
 
 Early-stage software, no warranty. Don't connect sensitive production systems

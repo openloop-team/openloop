@@ -96,6 +96,21 @@ E2E_LIVE=1 python -m pytest tests/e2e/test_runtime_github_live.py -v
 [tasks.test-e2e-slack-live]
 description = "Run opt-in Slack Socket Mode live E2E with a stubbed model"
 run = """
+if [ ! -f .env.e2e ]; then
+  echo "Missing .env.e2e. Copy .env.e2e.example and fill in the test values."
+  exit 1
+fi
+set -a
+. ./.env.e2e
+set +a
+openloop_secrets_root="${OPENLOOP_SECRETS_ROOT:-./secrets}"
+if [ ! -s "$openloop_secrets_root/slack_bot_token" ] || [ ! -s "$openloop_secrets_root/slack_app_token" ]; then
+  echo "Missing Slack bot/app secret files under $openloop_secrets_root."
+  exit 1
+fi
+IFS= read -r SLACK_BOT_TOKEN < "$openloop_secrets_root/slack_bot_token"
+IFS= read -r SLACK_APP_TOKEN < "$openloop_secrets_root/slack_app_token"
+export SLACK_BOT_TOKEN SLACK_APP_TOKEN
 if [ "${E2E_CONFIRM:-}" != "1" ]; then
   echo "Refusing to run Slack live E2E. Set E2E_CONFIRM=1 after choosing a test channel."
   exit 1

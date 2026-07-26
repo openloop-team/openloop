@@ -115,6 +115,28 @@ def _write_partitioned_environments(project: Path) -> None:
         .public_key()
         .public_bytes_raw()
     )
+    secrets = project / "secrets"
+    (secrets / "postgres_password").write_text("change-me\n")
+    (secrets / "broker_identity_private_key").write_text(
+        base64.b64encode(identity_seed).decode() + "\n"
+    )
+    (secrets / "broker_receipt_roots").write_text(
+        json.dumps(
+            {"receipt-key-v1": base64.b64encode(receipt_root).decode()},
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    (secrets / "broker_capability_roots").write_text(
+        json.dumps({"cap-key-v1": _root(1)}, separators=(",", ":")) + "\n"
+    )
+    (secrets / "broker_runtime_roots").write_text(
+        json.dumps(
+            {"runtime-key-v1": _root(2)},
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
     (project / ".env").write_text(
         "\n".join(
             (
@@ -131,16 +153,8 @@ def _write_partitioned_environments(project: Path) -> None:
                 "STORAGE_MODE=memory",
                 "CODING_WORKER_ENABLED=false",
                 "BROKER_IDENTITY_KEY_ID=identity-v1",
-                f"BROKER_IDENTITY_PRIVATE_KEY={base64.b64encode(identity_seed).decode()}",
                 "BROKER_RECEIPT_CURRENT_VERSION=receipt-key-v1",
                 "BROKER_RECEIPT_DOMAIN=broker-receipt",
-                "BROKER_RECEIPT_ROOTS="
-                + json.dumps(
-                    {
-                        "receipt-key-v1": base64.b64encode(receipt_root).decode()
-                    },
-                    separators=(",", ":"),
-                ),
                 "",
             )
         )
@@ -148,13 +162,7 @@ def _write_partitioned_environments(project: Path) -> None:
     (project / ".env.broker").write_text(
         "\n".join(
             (
-                "BROKER_CAPABILITY_ROOTS="
-                + json.dumps({"cap-key-v1": _root(1)}, separators=(",", ":")),
                 "BROKER_CAPABILITY_CURRENT_VERSION=cap-key-v1",
-                "BROKER_RUNTIME_ROOTS="
-                + json.dumps(
-                    {"runtime-key-v1": _root(2)}, separators=(",", ":")
-                ),
                 "BROKER_RUNTIME_CURRENT_VERSION=runtime-key-v1",
                 "BROKER_IDENTITY_PUBLIC_KEYS="
                 + json.dumps(
@@ -699,14 +707,19 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
             assert not any(
                 line.startswith("DOCKER_HOST=") for line in runtime_env
             )
-            assert not any(
-                line.startswith(("BROKER_CAPABILITY_ROOTS=", "BROKER_RUNTIME_ROOTS="))
-                for line in runtime_env
+            secret_environment_names = (
+                "PGPASSWORD=",
+                "POSTGRES_PASSWORD=",
+                "BROKER_CAPABILITY_ROOTS=",
+                "BROKER_RUNTIME_ROOTS=",
+                "BROKER_IDENTITY_PRIVATE_KEY=",
+                "BROKER_RECEIPT_ROOTS=",
             )
-            assert not any(
-                line.startswith(("BROKER_IDENTITY_PRIVATE_KEY=", "BROKER_RECEIPT_ROOTS="))
-                for line in broker_env
-            )
+            for container_env in (runtime_env, broker_env):
+                assert not any(
+                    line.startswith(secret_environment_names)
+                    for line in container_env
+                )
         finally:
             _compose(
                 project,

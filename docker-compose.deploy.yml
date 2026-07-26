@@ -8,7 +8,8 @@
 #
 # Usage on the server:
 #   cp .env.example .env                   # Compose/deployment values
-#   cp .env.runtime.example .env.runtime   # then fill in tokens/keys
+#   cp .env.runtime.example .env.runtime   # non-secret runtime configuration
+#   # Render every declared secret directly under ./secrets/
 #   docker compose -f docker-compose.deploy.yml up -d --build
 #   docker compose -f docker-compose.deploy.yml logs -f runtime
 #
@@ -21,8 +22,10 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-openloop}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       POSTGRES_DB: ${POSTGRES_DB:-openloop}
+    secrets:
+      - postgres_password
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -40,11 +43,27 @@ services:
     # localhost example value can't leak in.
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}@postgres:5432/${POSTGRES_DB:-openloop}
-      # Keep the raw password outside the URI so URL-significant characters are
-      # passed to PostgreSQL unchanged.
-      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github_app_private_key
       LOG_LEVEL: ${LOG_LEVEL:-info}
       STORAGE_MODE: postgres
+    secrets:
+      - postgres_password
+      - openai_api_key
+      - anthropic_api_key
+      # Uncomment when GEMINI_API_KEY has been migrated to secrets/gemini_api_key.
+      # - gemini_api_key
+      - groq_api_key
+      - openrouter_api_key
+      - slack_bot_token
+      # Uncomment for HTTP Slack events; Socket Mode does not require it.
+      # - slack_signing_secret
+      - slack_app_token
+      - github_token
+      - github_app_private_key
+      - claude_code_oauth_token
+      - coding_worker_openhands_state_master_key
+      - broker_identity_private_key
+      - broker_receipt_roots
     # Socket Mode opens an OUTBOUND WebSocket to Slack — no inbound port.
     command: openloop slack socket
     depends_on:
@@ -53,9 +72,38 @@ services:
     # Edit agents/*.yaml and `docker compose ... restart runtime` — no rebuild.
     volumes:
       - ./agents:/app/agents:ro
-      # GitHub App auth: mount the App private key and set
-      # GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app.pem in .env.runtime.
-      - ./secrets/github-app.pem:/run/secrets/github-app.pem:ro
 
 volumes:
   pgdata:
+
+secrets:
+  postgres_password:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/postgres_password
+  openai_api_key:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/openai_api_key
+  anthropic_api_key:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/anthropic_api_key
+  # gemini_api_key:
+  #   file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/gemini_api_key
+  groq_api_key:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/groq_api_key
+  openrouter_api_key:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/openrouter_api_key
+  slack_bot_token:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/slack_bot_token
+  # slack_signing_secret:
+  #   file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/slack_signing_secret
+  slack_app_token:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/slack_app_token
+  github_token:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/github_token
+  github_app_private_key:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/github_app_private_key
+  claude_code_oauth_token:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/claude_code_oauth_token
+  coding_worker_openhands_state_master_key:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/coding_worker_openhands_state_master_key
+  broker_identity_private_key:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/broker_identity_private_key
+  broker_receipt_roots:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/broker_receipt_roots

@@ -2,8 +2,9 @@
 #
 # Usage:
 #   cp .env.example .env
-#   cp .env.runtime.example .env.runtime
-#   cp .env.broker.example .env.broker
+#   cp .env.runtime.example .env.runtime   # non-secret app configuration
+#   cp .env.broker.example .env.broker     # non-secret broker configuration
+#   # Render every declared secret directly under ./secrets/
 #   docker compose -f docker-compose.yml -f docker-compose.broker.yml up --build
 #
 # OPENLOOP_BROKER_ROOT must be an absolute host path. The one-shot init service
@@ -11,15 +12,10 @@
 # distinct-uid/shared-gid ownership matrix before either long-running service
 # starts.
 #
-# TRUST PARTITION: `.env.runtime` belongs to runtime and may contain only
-# app-side broker material (BROKER_IDENTITY_PRIVATE_KEY and
-# BROKER_RECEIPT_ROOTS). `.env.broker` belongs to broker and may contain only
-# broker-side roots/publics
-# (BROKER_CAPABILITY_ROOTS, BROKER_RUNTIME_ROOTS,
-# BROKER_IDENTITY_PUBLIC_KEYS, BROKER_RECEIPT_PUBLIC_KEYS). The Postgres DSN is
-# injected from Compose-owned POSTGRES_* values in `.env`. Compose appends
-# env_file values during merges, so broker-side secrets must never enter
-# `.env.runtime` in the first place.
+# TRUST PARTITION: `.env.runtime` and `.env.broker` contain non-secret
+# configuration only. Secret source files share one flat host directory, while
+# the grants below keep app-side material in runtime and broker-side roots in
+# broker. Public verification maps stay in `.env.broker`.
 #
 # This override keeps Docker authority inside the adapter/broker trust boundary.
 
@@ -92,7 +88,6 @@ services:
     env_file: .env.broker
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}@postgres:5432/${POSTGRES_DB:-openloop}
-      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me}
       DOCKER_HOST: unix:///run/openloop-docker/docker.sock
       BROKER_MODE: external
       BROKER_CONTROL_SOCKET_DIR: ${OPENLOOP_BROKER_ROOT:?}/control
@@ -108,6 +103,10 @@ services:
       BROKER_GENERATION_DEADLINE_SECONDS: ${BROKER_GENERATION_DEADLINE_SECONDS:-1800}
       BROKER_RECONCILE_INTERVAL_SECONDS: ${BROKER_RECONCILE_INTERVAL_SECONDS:-300}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+    secrets:
+      - postgres_password
+      - broker_capability_roots
+      - broker_runtime_roots
     command: openloop-broker
     depends_on:
       docker-socket-adapter:
@@ -171,6 +170,10 @@ services:
       BROKER_EXECUTION_LEASE_SECONDS: ${BROKER_EXECUTION_LEASE_SECONDS:-900}
       BROKER_GENERATION_DEADLINE_SECONDS: ${BROKER_GENERATION_DEADLINE_SECONDS:-1800}
       CODING_WORKER_OPENHANDS_BROKER_ENABLED: "true"
+    secrets:
+      - postgres_password
+      - broker_identity_private_key
+      - broker_receipt_roots
     depends_on:
       broker:
         condition: service_healthy
@@ -198,3 +201,15 @@ services:
 
 volumes:
   docker-socket-adapter-data:
+
+secrets:
+  postgres_password:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/postgres_password
+  broker_identity_private_key:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/broker_identity_private_key
+  broker_receipt_roots:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/broker_receipt_roots
+  broker_capability_roots:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/broker_capability_roots
+  broker_runtime_roots:
+    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/broker_runtime_roots
