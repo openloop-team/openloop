@@ -12,10 +12,10 @@ description = "Install the runtime with dependencies exercised by the test suite
 run = "uv pip install -e '.[dev,broker,openhands]'"
 
 [tasks.compose-build]
-description = "Fetch the pinned Docker adapter and build runtime/broker images"
+description = "Fetch the pinned Docker adapter and build the shared OpenLoop image"
 run = """
 docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml pull docker-socket-adapter
-docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml build broker-init broker runtime
+docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml build runtime
 """
 
 [tasks.compose-up]

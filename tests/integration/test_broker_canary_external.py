@@ -87,10 +87,6 @@ def _compose_files(project: Path, workspace: Path) -> tuple[Path, Path, Path]:
                             }
                         ],
                     },
-                    "broker": {
-                        "build": {"context": str(workspace)},
-                    },
-                    "broker-init": {"build": {"context": str(workspace)}},
                 }
             },
             sort_keys=False,
@@ -327,6 +323,7 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
                 "OPENLOOP_BROKER_ROOT": str(broker_root),
                 "OPENLOOP_BROKER_UID": "10002",
                 "OPENLOOP_DATA_GID": "10777",
+                "OPENLOOP_IMAGE": f"{project_name}-openloop:canary",
                 "DOCKER_SOCKET": docker_socket,
             }
         )
@@ -471,6 +468,7 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
                     )
                 )
             )[0]
+            assert broker_document["Image"] == runtime_document["Image"]
             broker_mounts = {
                 mount["Destination"]: mount
                 for mount in broker_document["Mounts"]

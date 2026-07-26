@@ -25,6 +25,13 @@ x-openloop-build: &openloop-build
     OPENLOOP_BROKER_UID: ${OPENLOOP_BROKER_UID:-10002}
     OPENLOOP_DATA_GID: ${OPENLOOP_DATA_GID:-10777}
 
+x-openloop-image: &openloop-image
+  image: ${OPENLOOP_IMAGE:-openloop:local}
+
+x-openloop-runtime-image: &openloop-runtime-image
+  <<: *openloop-image
+  build: *openloop-build
+
 services:
   # This is a permission shim, not a Docker API policy boundary. Any process
   # that can connect to its data UDS has root-equivalent daemon authority.
@@ -64,7 +71,7 @@ services:
     restart: unless-stopped
 
   broker-init:
-    build: *openloop-build
+    <<: *openloop-image
     user: "0:0"
     command: python -m openloop.broker_provision
     environment:
@@ -81,7 +88,7 @@ services:
     restart: "no"
 
   broker:
-    build: *openloop-build
+    <<: *openloop-image
     user: "${OPENLOOP_BROKER_UID:-10002}:${OPENLOOP_DATA_GID:-10777}"
     group_add:
       - ${OPENLOOP_DATA_GID:-10777}
@@ -155,7 +162,7 @@ services:
           create_host_path: true
 
   runtime:
-    build: *openloop-build
+    <<: *openloop-runtime-image
     group_add:
       - ${OPENLOOP_DATA_GID:-10777}
     environment:
