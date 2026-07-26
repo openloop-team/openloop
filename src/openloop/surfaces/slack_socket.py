@@ -11,16 +11,16 @@ from __future__ import annotations
 
 import logging
 
+from openloop.config import Settings
+
 logger = logging.getLogger("openloop.slack_socket")
 
 
-async def run_socket() -> None:
+async def run_socket(settings: Settings) -> None:
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
-    from openloop.config import get_settings
     from openloop.wiring import compose
 
-    settings = get_settings()
     if not settings.slack_app_token:
         raise SystemExit(
             "Socket Mode needs SLACK_APP_TOKEN (xapp-…). Set it in .env.runtime."
@@ -38,10 +38,13 @@ async def run_socket() -> None:
 
 
 def main() -> None:
+    """Process entrypoint: load configuration once, then compose with it."""
     import asyncio
 
+    from openloop.config import Settings
+
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(run_socket())
+    asyncio.run(run_socket(Settings()))
 
 
 if __name__ == "__main__":

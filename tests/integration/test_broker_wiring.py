@@ -20,7 +20,6 @@ from openloop.broker_control.local_receipts import LocalCheckpointReceiptStore
 from openloop.broker_control.receipts import CheckpointReceiptIssuer
 from openloop.broker_runtime import DockerOpenHandsRuntimeDriver
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
-from openloop.config import Settings
 from openloop.tools.openhands_artifacts import WorkspaceArtifactStore
 from openloop.tools.openhands_state import OpenHandsKeyDeriver, OpenHandsStateLayout
 from openloop.wiring.broker import (
@@ -30,6 +29,7 @@ from openloop.wiring.broker import (
     build_broker_client,
     build_broker_service,
 )
+from tests.support.settings import IsolatedSettings as Settings
 
 _DSN = os.environ.get(
     "OPENLOOP_TEST_DATABASE_URL",

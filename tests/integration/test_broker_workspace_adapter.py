@@ -19,7 +19,6 @@ import pytest
 
 from openloop.broker.models import JobState, VerifiedCheckpointReceipt
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
-from openloop.config import Settings
 from openloop.openhands.workspace_protocol import ArchiveStreamResult
 from openloop.tools.openhands_broker_workspace import (
     BrokerWorkspaceAdapter,
@@ -38,6 +37,7 @@ from openloop.tools.openhands_worker import (
 from openloop.tools.coding_worker import WorkerState
 from openloop.tools.openhands_relay_client import RelayClientEndpoint, RelayMode
 from openloop.wiring.broker import build_broker
+from tests.support.settings import IsolatedSettings as Settings
 
 
 @pytest.fixture

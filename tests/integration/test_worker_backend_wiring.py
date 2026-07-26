@@ -14,7 +14,6 @@ from openloop.wiring import builders as appmod
 from openloop.agents import load_agent
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
-from openloop.config import Settings
 from openloop.models.gateway import ModelResponse
 from openloop.tasks.investigation import RepoInvestigator
 from openloop.tasks.outcomes import EvidenceBundle
@@ -26,14 +25,14 @@ from openloop.tools.openhands_worker import (
 )
 from openloop.usage import InMemoryUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
+from tests.support.settings import IsolatedSettings as Settings
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 
 def _settings(**kwargs):
     return Settings(
-        _env_file=None,
-        coding_worker_enabled=True,
+                coding_worker_enabled=True,
         github_token="t",
         **kwargs,
     )
@@ -70,7 +69,7 @@ def test_default_backend_is_the_builtin_diff_worker_with_ledger_attached():
 
 
 def test_openhands_cold_resume_flag_defaults_on():
-    settings = Settings(_env_file=None)
+    settings = Settings()
 
     assert settings.coding_worker_openhands_cold_resume_enabled is True
 

@@ -12,10 +12,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from openloop.config import Settings
 from openloop.tools.openhands_broker_workspace import BrokerWorkspaceAdapter
 from openloop.wiring import builders
 from openloop.wiring.builders import build_coding_worker
+from tests.support.settings import IsolatedSettings as Settings
 
 _MASTER_KEY = base64.b64encode(b"x" * 32).decode()
 

@@ -8,9 +8,9 @@ from openloop.agents.schema import Agent
 from openloop.wiring.builders import build_github_credentials, build_tool_gateway
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
-from openloop.config import Settings
 from openloop.credentials import EnvCredentialResolver, GitHubAppResolver
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
+from tests.support.settings import IsolatedSettings as Settings
 
 
 def _settings(**kwargs) -> Settings:
@@ -21,7 +21,7 @@ def _settings(**kwargs) -> Settings:
         "github_app_installation_id": None,
     }
     values.update(kwargs)
-    return Settings(_env_file=None, **values)
+    return Settings(**values)
 
 
 def test_token_only_selects_env_resolver():

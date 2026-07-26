@@ -15,6 +15,13 @@ from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
 
 
 class Settings(BaseSettings):
+    """Runtime configuration, loaded from the environment and ``.env.runtime``.
+
+    Construct one at a process entrypoint and pass it down; every consumer
+    takes it as an argument rather than reaching for a global. Tests construct
+    one directly with the parameters they care about.
+    """
+
     model_config = SettingsConfigDict(
         env_file=".env.runtime",
         env_file_encoding="utf-8",
@@ -342,14 +349,3 @@ class Settings(BaseSettings):
         if self.storage_mode is not None:
             return self.storage_mode
         return "auto" if self.memory_backend == "postgres" else "memory"
-
-
-_settings: Settings | None = None
-
-
-def get_settings() -> Settings:
-    """Return a process-wide cached Settings instance."""
-    global _settings
-    if _settings is None:
-        _settings = Settings()
-    return _settings

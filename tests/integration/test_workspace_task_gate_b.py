@@ -33,7 +33,6 @@ from pathlib import Path
 from openloop.agents import load_agent
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
-from openloop.config import Settings
 from openloop.deliverable import Artifact, Prose
 from openloop.models.gateway import ModelResponse
 from openloop.tasks import EvidenceBundle, PullRequest, WorkspaceTask, to_deliverable
@@ -44,6 +43,7 @@ from openloop.tools.openhands_worker import OpenHandsCodingWorker
 from openloop.usage import InMemoryUsageStore
 from openloop.wiring import builders as appmod
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
+from tests.support.settings import IsolatedSettings as Settings
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
@@ -80,8 +80,7 @@ def test_outcome_type_not_welded_to_profile():
 
 def _settings(**kwargs):
     return Settings(
-        _env_file=None,
-        coding_worker_enabled=True,
+                coding_worker_enabled=True,
         github_token="t",
         **kwargs,
     )

@@ -12,6 +12,7 @@ from openloop.sessions.postgres import PostgresSurfaceSessionStore
 from openloop.surfaces.slack import build_slack_app
 from openloop.surfaces.slack_socket import run_socket
 from openloop.testing import in_memory_workflow_engine
+from tests.support.settings import IsolatedSettings as Settings
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
@@ -35,22 +36,18 @@ def test_build_slack_app_http_mode_with_signing_secret():
     assert isinstance(app, AsyncApp)
 
 
-def test_session_store_fallback_settles_before_slack_runner_is_built(monkeypatch):
+def test_session_store_fallback_settles_before_slack_runner_is_built(settings):
     # No runner exists before startup. The composition root settles the fallback
     # first, then builds the runner against that final instance.
     from openloop import app as appmod
-    from openloop.config import get_settings
-
-    monkeypatch.setattr(
-        get_settings(), "slack_bot_token", "xoxb-test", raising=False
-    )
 
     class FailingPgSessions(PostgresSurfaceSessionStore):
         async def setup(self, pool):
             raise RuntimeError("no postgres")
 
     app = appmod.create_app(
-        compose_overrides={"sessions": FailingPgSessions()}
+        settings=settings.model_copy(update={"slack_bot_token": "xoxb-test"}),
+        compose_overrides={"sessions": FailingPgSessions()},
     )
     assert getattr(app.state, "ctx", None) is None
 
@@ -61,10 +58,9 @@ def test_session_store_fallback_settles_before_slack_runner_is_built(monkeypatch
         assert ctx.session_runner.sessions is ctx.sessions
 
 
-async def test_run_socket_requires_app_token(monkeypatch):
+async def test_run_socket_requires_app_token():
     # No SLACK_APP_TOKEN configured → exits before opening a socket.
-    from openloop.config import get_settings
-
-    monkeypatch.setattr(get_settings(), "slack_app_token", None, raising=False)
+    # An explicit argument outranks the environment, so this holds even when
+    # the developer's .env.runtime or shell sets SLACK_APP_TOKEN.
     with pytest.raises(SystemExit):
-        await run_socket()
+        await run_socket(Settings(slack_app_token=None))

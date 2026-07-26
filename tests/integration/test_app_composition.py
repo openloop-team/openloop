@@ -13,7 +13,6 @@ from pydantic import SecretStr
 from openloop.agents import load_agent
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 from openloop.checkpoints import InMemoryCheckpointStore
-from openloop.config import Settings
 from openloop.coordination import InProcessLock, PostgresLock
 from openloop.postgres import BorrowedPostgresStore
 from openloop.tools import ToolGateway
@@ -21,34 +20,34 @@ from openloop.tools.openhands_broker_workspace import BrokerWorkspaceAdapter
 from openloop.wiring import compose
 from openloop.wiring import builders
 from openloop.wiring.broker import _derive_receipt_key, build_broker_service
+from tests.support.settings import IsolatedSettings as Settings
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 composemod = importlib.import_module("openloop.wiring.compose")
 
 
 def test_effective_storage_mode_precedence_and_legacy_mapping():
-    assert Settings(_env_file=None).effective_storage_mode == "memory"
+    assert Settings().effective_storage_mode == "memory"
     assert (
-        Settings(_env_file=None, memory_backend="postgres").effective_storage_mode
+        Settings(memory_backend="postgres").effective_storage_mode
         == "auto"
     )
     assert (
         Settings(
-            _env_file=None,
-            storage_mode="memory",
+                        storage_mode="memory",
             memory_backend="postgres",
         ).effective_storage_mode
         == "memory"
     )
     assert isinstance(
         builders.build_lock(
-            Settings(_env_file=None, storage_mode="postgres", lock_backend="auto")
+            Settings(storage_mode="postgres", lock_backend="auto")
         ),
         PostgresLock,
     )
     assert isinstance(
         builders.build_lock(
-            Settings(_env_file=None, storage_mode="memory", lock_backend="auto")
+            Settings(storage_mode="memory", lock_backend="auto")
         ),
         InProcessLock,
     )
@@ -57,7 +56,7 @@ def test_effective_storage_mode_precedence_and_legacy_mapping():
 async def test_precomposed_gateway_override_is_rejected():
     with pytest.raises(TypeError, match="tools_factory"):
         async with compose(
-            Settings(_env_file=None, storage_mode="memory"),
+            Settings(storage_mode="memory"),
             {},
             overrides={"tools": ToolGateway()},
         ):
@@ -69,8 +68,7 @@ async def test_broker_handle_is_a_recognized_override():
     # threads through to build_tool_gateway without an "unknown override" error.
     async with compose(
         Settings(
-            _env_file=None,
-            storage_mode="memory",
+                        storage_mode="memory",
             coding_worker_openhands_broker_enabled=True,
             broker_mode="external",
         ),
@@ -92,8 +90,7 @@ async def test_app_composition_refuses_coprocess_broker_mode(monkeypatch, caplog
     with caplog.at_level("ERROR"):
         async with compose(
             Settings(
-                _env_file=None,
-                storage_mode="memory",
+                                storage_mode="memory",
                 coding_worker_openhands_broker_enabled=True,
                 broker_mode="coprocess",
             ),
@@ -132,8 +129,7 @@ async def test_external_broker_mode_wires_adapter_without_app_reconciler(
         path.chmod(0o2750)
 
     settings = Settings(
-        _env_file=None,
-        storage_mode="memory",
+                storage_mode="memory",
         embeddings_enabled=False,
         recovery_interval_seconds=0,
         coding_worker_enabled=True,
@@ -203,8 +199,7 @@ async def test_auto_fallback_settles_every_capture_before_wiring(monkeypatch):
 
     agent = load_agent(AGENT_YAML)
     settings = Settings(
-        _env_file=None,
-        storage_mode="auto",
+                storage_mode="auto",
         lock_backend="memory",
         embeddings_enabled=False,
         recovery_interval_seconds=0,
@@ -261,8 +256,7 @@ async def test_postgres_store_setup_failure_unwinds_pool_once():
     with pytest.raises(RuntimeError, match="schema setup failed"):
         async with compose(
             Settings(
-                _env_file=None,
-                storage_mode="postgres",
+                                storage_mode="postgres",
                 embeddings_enabled=False,
                 recovery_interval_seconds=0,
             ),
@@ -275,3 +269,19 @@ async def test_postgres_store_setup_failure_unwinds_pool_once():
             pass
 
     assert pool.close_calls == 1
+
+
+def test_create_app_composes_with_the_settings_it_is_given(tmp_path):
+    """The composition root takes its configuration rather than loading its
+    own. Pointing it at an empty agents directory must yield no agents, where
+    ambient configuration would have loaded the repo's own."""
+    from fastapi.testclient import TestClient
+
+    from openloop import app as appmod
+
+    created = appmod.create_app(
+        settings=Settings(agents_dir=str(tmp_path), storage_mode="memory")
+    )
+
+    with TestClient(created):
+        assert list(created.state.ctx.agents.loaded) == []

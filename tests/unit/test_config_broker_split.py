@@ -9,7 +9,8 @@ the app. See `.superpowers/sdd/phase-A-brief.md`.
 import pytest
 from pydantic import ValidationError, field_validator
 
-from openloop.config import Settings
+from openloop.config import Settings as RuntimeSettings
+from tests.support.settings import IsolatedSettings as Settings
 
 
 def test_default_settings_load_runtime_dotenv_without_legacy_fallback(
@@ -21,14 +22,14 @@ def test_default_settings_load_runtime_dotenv_without_legacy_fallback(
     runtime_file = tmp_path / ".env.runtime"
     runtime_file.write_text("OLLAMA_BASE_URL=http://runtime.example\n")
 
-    assert Settings().ollama_base_url == "http://runtime.example"
+    assert RuntimeSettings().ollama_base_url == "http://runtime.example"
 
     runtime_file.unlink()
-    assert Settings().ollama_base_url == "http://localhost:11434"
+    assert RuntimeSettings().ollama_base_url == "http://localhost:11434"
 
 
 def test_defaults_are_coprocess_with_all_split_fields_unset():
-    settings = Settings(_env_file=None)
+    settings = Settings()
 
     assert settings.broker_mode == "coprocess"
     assert settings.broker_identity_private_key is None
@@ -45,7 +46,7 @@ def test_defaults_are_coprocess_with_all_split_fields_unset():
 
 def test_broker_mode_rejects_unknown_value():
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, broker_mode="banana")
+        Settings(broker_mode="banana")
 
 
 def test_settings_validation_errors_hide_all_input_values():
@@ -76,7 +77,7 @@ def test_settings_validation_errors_hide_all_input_values():
 @pytest.mark.parametrize("value", [0, -5])
 def test_broker_reconcile_interval_seconds_rejects_non_positive(value):
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, broker_reconcile_interval_seconds=value)
+        Settings(broker_reconcile_interval_seconds=value)
 
 
 def test_broker_identity_public_keys_round_trips_through_env_json(monkeypatch):
@@ -84,7 +85,7 @@ def test_broker_identity_public_keys_round_trips_through_env_json(monkeypatch):
         "BROKER_IDENTITY_PUBLIC_KEYS", '{"identity-v1": "cHVibGljLWtleQ=="}'
     )
 
-    settings = Settings(_env_file=None)
+    settings = RuntimeSettings(_env_file=None)
 
     assert settings.broker_identity_public_keys == {
         "identity-v1": "cHVibGljLWtleQ=="
@@ -96,7 +97,7 @@ def test_broker_receipt_public_keys_round_trips_through_env_json(monkeypatch):
         "BROKER_RECEIPT_PUBLIC_KEYS", '{"receipt-key-v1": "cmVjZWlwdC1rZXk="}'
     )
 
-    settings = Settings(_env_file=None)
+    settings = RuntimeSettings(_env_file=None)
 
     assert settings.broker_receipt_public_keys == {
         "receipt-key-v1": "cmVjZWlwdC1rZXk="
@@ -107,7 +108,7 @@ def test_shared_data_gid_and_expected_app_uid_round_trip_through_env(monkeypatch
     monkeypatch.setenv("BROKER_SHARED_DATA_GID", "2000")
     monkeypatch.setenv("BROKER_EXPECTED_APP_UID", "1000")
 
-    settings = Settings(_env_file=None)
+    settings = RuntimeSettings(_env_file=None)
 
     assert settings.broker_shared_data_gid == 2000
     assert settings.broker_expected_app_uid == 1000
@@ -117,7 +118,7 @@ def test_broker_identity_private_key_is_masked_in_repr(monkeypatch):
     seed = "c" * 43 + "="
     monkeypatch.setenv("BROKER_IDENTITY_PRIVATE_KEY", seed)
 
-    settings = Settings(_env_file=None)
+    settings = RuntimeSettings(_env_file=None)
 
     assert settings.broker_identity_private_key is not None
     assert settings.broker_identity_private_key.get_secret_value() == seed

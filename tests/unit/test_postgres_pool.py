@@ -6,9 +6,9 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from openloop.config import Settings
 from openloop.postgres import BorrowedPostgresStore, create_pool
 from openloop.usage.postgres import PostgresUsageStore
+from tests.support.settings import IsolatedSettings as Settings
 
 
 class _Pool:
@@ -62,4 +62,4 @@ def test_stores_no_longer_accept_a_dsn():
 )
 def test_invalid_pool_sizes_fail_during_settings_construction(kwargs):
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, **kwargs)
+        Settings(**kwargs)

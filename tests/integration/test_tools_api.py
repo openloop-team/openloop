@@ -10,10 +10,11 @@ from openloop.testing import FakeGitHub
 
 
 @pytest.fixture
-def client():
+def client(settings):
     # Inject a gateway with a fake GitHub client (no network).
     fake = FakeGitHub()
     app = create_app(
+        settings=settings,
         compose_overrides={
             "tools_factory": lambda stores: ToolGateway(
                 tools=[GitHubConnector(fake)], approvals=stores.approvals

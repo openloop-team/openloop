@@ -6,13 +6,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from openloop import app as appmod
-from openloop.config import Settings
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.memory import InMemoryStore
 from openloop.sessions import InMemorySurfaceSessionStore, InMemoryThreadRecordStore
 from openloop.usage import InMemoryUsageStore
 from openloop.workflows import InMemoryWorkflowStore
+from tests.support.settings import IsolatedSettings as Settings
 
 composemod = importlib.import_module("openloop.wiring.compose")
 
@@ -58,8 +58,7 @@ class _Pool:
 
 def _settings(tmp_path) -> Settings:
     return Settings(
-        _env_file=None,
-        memory_backend="postgres",
+                memory_backend="postgres",
         lock_backend="memory",
         agents_dir=str(tmp_path),
         embeddings_enabled=False,
@@ -78,10 +77,9 @@ def test_lifespan_creates_and_closes_one_shared_pool(monkeypatch, tmp_path):
         create_calls.append((dsn, min_size, max_size))
         return pool
 
-    monkeypatch.setattr(appmod, "get_settings", lambda: settings)
     monkeypatch.setattr(composemod, "create_pool", create_pool)
 
-    app = appmod.create_app()
+    app = appmod.create_app(settings=settings)
     with pytest.raises(RuntimeError, match="exceptional shutdown"):
         with TestClient(app):
             assert create_calls == [(settings.database_url, 2, 7)]
@@ -115,10 +113,9 @@ def test_pool_creation_failure_uses_fallbacks_without_store_pool_attempts(
         calls += 1
         raise RuntimeError("database unavailable")
 
-    monkeypatch.setattr(appmod, "get_settings", lambda: settings)
     monkeypatch.setattr(composemod, "create_pool", create_pool)
 
-    app = appmod.create_app()
+    app = appmod.create_app(settings=settings)
     with TestClient(app):
         assert calls == 1
         ctx = app.state.ctx

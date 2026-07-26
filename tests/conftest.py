@@ -1,19 +1,23 @@
-"""Suite-wide test environment.
+"""Shared fixtures for hermetic tests."""
 
-``openloop.app`` still loads route-shaping agent metadata at import time. Point
-it at the test fixture before any test module imports the ASGI shell, keeping
-tests decoupled from ``agents/dev-platform.yaml``.
-"""
-
-import os
-from pathlib import Path
 import shutil
 
 import pytest
 
 from tests.support.socket_paths import create_short_socket_root
+from tests.support.settings import IsolatedSettings, build_test_settings
 
-os.environ["AGENTS_DIR"] = str(Path(__file__).parent / "integration" / "data")
+
+@pytest.fixture
+def settings_factory():
+    """Return a factory for validated, environment-independent settings."""
+    return build_test_settings
+
+
+@pytest.fixture
+def settings(settings_factory) -> IsolatedSettings:
+    """Default process-local configuration for composition-root tests."""
+    return settings_factory()
 
 
 @pytest.fixture

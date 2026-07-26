@@ -8,9 +8,9 @@ from openloop.usage import InMemoryUsageStore, UsageRecord
 
 
 @pytest.fixture
-def client():
+def client(settings):
     usage = InMemoryUsageStore()
-    app = create_app(compose_overrides={"usage": usage})
+    app = create_app(settings=settings, compose_overrides={"usage": usage})
     with TestClient(app) as c:
         c.usage = usage  # type: ignore[attr-defined]
         yield c

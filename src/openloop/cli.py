@@ -243,7 +243,7 @@ def _cmd_broker_keys(args: argparse.Namespace) -> int:
         _derive_receipt_key,
     )
 
-    settings = Settings()
+    settings = Settings()   # entrypoint: load from .env.runtime + env
 
     def public_of(private: Any) -> str:
         return base64.b64encode(private.public_key().public_bytes_raw()).decode()

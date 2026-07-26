@@ -25,9 +25,9 @@ from openloop.broker_control import RecoveryPassReport
 from openloop.broker_main import healthcheck, run_broker
 from openloop.broker_rpc.client import BrokerRpcClientProblem
 from openloop.broker_rpc.server import SocketPathProblem, take_over_stale_socket
-from openloop.config import Settings
 from openloop.wiring.broker import _derive_receipt_key, build_broker_client
 from tests.support.processes import cleanup_processes
+from tests.support.settings import IsolatedSettings as Settings
 
 
 _IDENTITY_SEED = bytes(range(1, 33))
@@ -35,6 +35,17 @@ _RECEIPT_ROOT = bytes([3]) * 32
 _POSTGRES_DSN = os.environ.get(
     "OPENLOOP_TEST_DATABASE_URL",
     "postgresql://openloop:change-me@localhost:5432/openloop",
+)
+_SUBPROCESS_ENV_ALLOWLIST = (
+    "LANG",
+    "LC_ALL",
+    "PATH",
+    "PYTHONPATH",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "TZ",
+    "VIRTUAL_ENV",
 )
 
 
@@ -279,7 +290,11 @@ async def test_signal_handlers_remain_installed_through_service_teardown(
 
 
 def _subprocess_env(settings: Settings) -> dict[str, str]:
-    env = os.environ.copy()
+    env = {
+        name: value
+        for name in _SUBPROCESS_ENV_ALLOWLIST
+        if (value := os.environ.get(name)) is not None
+    }
     env.update(
         {
             "BROKER_MODE": "external",
@@ -311,9 +326,8 @@ def _subprocess_env(settings: Settings) -> dict[str, str]:
             "BROKER_RECEIPT_PUBLIC_KEYS": json.dumps(
                 settings.broker_receipt_public_keys
             ),
-            # The broker process owns only public app trust material. Blank any
-            # ambient app/provider credentials inherited from the developer
-            # shell so this test exercises the intended external topology.
+            # The broker process owns only public app trust material. Explicit
+            # empty values also make that boundary visible in diagnostics.
             "BROKER_IDENTITY_PRIVATE_KEY": "",
             "BROKER_RECEIPT_ROOTS": "{}",
             "OPENAI_API_KEY": "",
@@ -382,7 +396,7 @@ async def test_two_process_client_seam_lock_and_signal_shutdown(broker_dir):
     try:
         first = subprocess.Popen(
             [sys.executable, "-m", "openloop.broker_main"],
-            cwd=Path(__file__).parents[2],
+            cwd=broker_dir,
             env=env,
             text=True,
             stdout=subprocess.PIPE,
@@ -393,7 +407,7 @@ async def test_two_process_client_seam_lock_and_signal_shutdown(broker_dir):
         healthy = await asyncio.to_thread(
             subprocess.run,
             [sys.executable, "-m", "openloop.broker_main", "--healthcheck"],
-            cwd=Path(__file__).parents[2],
+            cwd=broker_dir,
             env=env,
             capture_output=True,
             text=True,
@@ -422,7 +436,7 @@ async def test_two_process_client_seam_lock_and_signal_shutdown(broker_dir):
 
         second = subprocess.Popen(
             [sys.executable, "-m", "openloop.broker_main"],
-            cwd=Path(__file__).parents[2],
+            cwd=broker_dir,
             env=env,
             text=True,
             stdout=subprocess.PIPE,
@@ -444,7 +458,7 @@ async def test_two_process_client_seam_lock_and_signal_shutdown(broker_dir):
         unhealthy = await asyncio.to_thread(
             subprocess.run,
             [sys.executable, "-m", "openloop.broker_main", "--healthcheck"],
-            cwd=Path(__file__).parents[2],
+            cwd=broker_dir,
             env=env,
             capture_output=True,
             text=True,
@@ -461,7 +475,7 @@ async def test_serving_sigterm_drains_and_exits_zero(broker_dir):
     try:
         process = subprocess.Popen(
             [sys.executable, "-m", "openloop.broker_main"],
-            cwd=Path(__file__).parents[2],
+            cwd=broker_dir,
             env=_subprocess_env(settings),
             text=True,
             stdout=subprocess.PIPE,
@@ -485,7 +499,7 @@ def test_entrypoint_refuses_cross_boundary_root_reuse(broker_dir):
     )
     refused = subprocess.run(
         [sys.executable, "-m", "openloop.broker_main"],
-        cwd=Path(__file__).parents[2],
+        cwd=broker_dir,
         env=env,
         capture_output=True,
         text=True,
@@ -519,7 +533,7 @@ async def test_postgres_entrypoint_owns_broker_migrations(broker_dir):
     try:
         process = subprocess.Popen(
             [sys.executable, "-m", "openloop.broker_main"],
-            cwd=Path(__file__).parents[2],
+            cwd=broker_dir,
             env=env,
             text=True,
             stdout=subprocess.PIPE,

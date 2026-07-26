@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from openloop.agents import load_agents
 from openloop.agents.schema import Agent
-from openloop.config import get_settings
+from openloop.config import Settings
 from openloop.tools import Invocation
 from openloop.usage import budget_scope_key
 from openloop.wiring import AppContext, compose
@@ -58,9 +58,18 @@ def _require_primary(request: Request) -> Agent:
     return agent
 
 
-def create_app(*, compose_overrides: Mapping[str, Any] | None = None) -> FastAPI:
-    """Create the sync ASGI shell; all store-capturing wiring happens at startup."""
-    settings = get_settings()
+def create_app(
+    *,
+    settings: Settings | None = None,
+    compose_overrides: Mapping[str, Any] | None = None,
+) -> FastAPI:
+    """Create the sync ASGI shell; all store-capturing wiring happens at startup.
+
+    ``settings`` is the composition root's configuration. It defaults to a
+    freshly loaded :class:`Settings` for the process entrypoint below; callers
+    pass their own — tests especially — get exactly what they passed.
+    """
+    settings = settings or Settings()
     logging.basicConfig(level=settings.log_level.upper())
     agents = load_agents(settings.agents_dir)
     log.info("loaded %d agent(s): %s", len(agents), ", ".join(agents) or "none")

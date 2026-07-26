@@ -8,9 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from openloop import app as appmod
-from openloop.config import Settings
 from openloop.coordination import InProcessLock, PostgresLock, RedisLock
 from openloop.wiring import builders
+from tests.support.settings import IsolatedSettings as Settings
 
 pytestmark = pytest.mark.integration
 
@@ -127,14 +127,14 @@ class _PingFailRedis:
         pass
 
 
-def test_lifespan_falls_back_when_redis_ping_fails(monkeypatch):
+def test_lifespan_falls_back_when_redis_ping_fails(monkeypatch, settings):
     # A configured-but-unreachable Redis must not break startup: the lifespan pings,
     # falls back to an in-process lock, and still runs recovery as the leader.
     monkeypatch.setattr(
         builders, "build_lock", lambda settings: RedisLock(_PingFailRedis())
     )
 
-    app = appmod.create_app()
+    app = appmod.create_app(settings=settings)
     with TestClient(app):  # runs the lifespan → ping fails → fallback
         assert isinstance(app.state.ctx.coordinator, InProcessLock)
 

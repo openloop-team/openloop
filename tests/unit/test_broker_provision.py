@@ -11,6 +11,20 @@ import pytest
 from openloop.broker_provision import main
 
 
+@pytest.fixture(autouse=True)
+def _cli_owns_its_environment(monkeypatch):
+    """Clear developer-exported paths that the CLI reads as argparse defaults."""
+    for name in (
+        "OPENLOOP_BROKER_ROOT",
+        "BROKER_CONTROL_SOCKET_DIR",
+        "BROKER_INGRESS_ROOT",
+        "BROKER_RUNTIME_ROOT",
+        "BROKER_STATE_ROOT",
+        "BROKER_CHECKPOINT_RECEIPT_ROOT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 

@@ -284,11 +284,20 @@ def _log_settings_validation(error: ValidationError) -> None:
         )
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Console entrypoint for the broker service and active health probe."""
+def main(
+    argv: list[str] | None = None,
+    *,
+    load_settings: Callable[[], Settings] = Settings,
+) -> int:
+    """Console entrypoint for the broker service and active health probe.
+
+    ``load_settings`` is the one ambient read. It is a parameter so that the
+    failure paths below — which must never echo secret-bearing config into the
+    log — can be exercised by composing a failing loader.
+    """
     args = _parser().parse_args(argv)
     try:
-        settings = Settings()
+        settings = load_settings()
     except ValidationError as error:
         logging.basicConfig(level=logging.INFO)
         _log_settings_validation(error)
