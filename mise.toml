@@ -1,6 +1,7 @@
 [tools]
 python = "3.12"
-uv = "latest"
+uv = "0.11.32"
+doppler = "3.76.1"
 
 # Auto-create and activate a project virtualenv when entering the directory.
 [env]
@@ -21,6 +22,10 @@ docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml build b
 description = "Recreate the Docker adapter, broker, and runtime"
 run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml up -d --force-recreate docker-socket-adapter broker runtime --remove-orphans"
 
+[tasks.compose-stop]
+description = "Stop the Docker containers"
+run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml stop"
+
 [tasks.compose-down]
 description = "Bring down the containers and project volumes"
 run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml down --remove-orphans --volumes"
@@ -40,6 +45,15 @@ run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml 
 [tasks.compose-python]
 description = "Open a Python shell in the runtime container"
 run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml exec runtime python"
+
+[tasks.doppler]
+description = "Invoke a command with doppler secrets"
+run = """
+doppler run \
+  --project openloop-deploy \
+  --config dev_personal \
+  --
+"""
 
 [tasks.test]
 description = "Run unit and integration tests"
