@@ -87,6 +87,15 @@ def test_main_omits_validator_controlled_message_text(caplog):
     assert "rejected database URL" not in caplog.text
 
 
+def test_healthcheck_does_not_construct_full_settings(monkeypatch, tmp_path):
+    monkeypatch.setenv("BROKER_CONTROL_SOCKET_DIR", str(tmp_path))
+
+    def fail_if_loaded() -> Settings:
+        raise AssertionError("healthcheck consumed mounted settings")
+
+    assert broker_main.main(["--healthcheck"], load_settings=fail_if_loaded) == 1
+
+
 def test_main_keyboard_interrupt_before_serving_returns_130(monkeypatch):
     def interrupt(awaitable):
         awaitable.close()

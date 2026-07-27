@@ -31,7 +31,6 @@ services:
   runtime:
     image: ${OPENLOOP_IMAGE:-openloop:local}
     build: .
-    env_file: .env.runtime
     environment:
       # Compose owns database bootstrap values in .env. Override the localhost
       # URL used by direct Python execution with the in-network service host.
@@ -48,6 +47,12 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      - type: bind
+        source: ./.env.runtime
+        target: /app/.env.runtime
+        read_only: true
+        bind:
+          create_host_path: false
       - ./agents:/app/agents:ro
       # GitHub App auth: mount the App private key and set
       # GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app.pem in .env.runtime.

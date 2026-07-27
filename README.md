@@ -272,7 +272,16 @@ exactly like environment values, including JSON decoding for dictionaries.
 Compose uses one flat secret inventory rooted at
 `${OPENLOOP_SECRETS_ROOT:-./secrets}`. Files such as `postgres_password`,
 `openai_api_key`, and `broker_capability_roots` live directly in that directory.
-Compose still grants only the required files to each container:
+Compose still grants only the required files to each container.
+
+The Compose services also bind-mount the gitignored `.env.runtime` and
+`.env.broker` dotenv bundles read-only at `/app/.env.runtime`; Compose does not
+inject their contents through `env_file:`. These paths may be regular files or
+Linux FIFOs produced by deployment tooling. Individual `/run/secrets` files
+override process environment and dotenv values, while explicit Compose
+environment values override the dotenv bundle.
+
+The individual file grants are:
 
 - Postgres receives only `postgres_password`.
 - Runtime receives the database password, application credentials, and
@@ -510,10 +519,10 @@ account.
   externally, or deleting anything.
 - **Scoped tokens:** use fine-grained, per-integration tokens.
 - **Memory isolation:** scope memory per channel so context doesn't leak.
-- **Secrets:** keep source files in one flat host directory and use per-service
-  Compose grants to mount only the required files at `/run/secrets` in
-  production. Gitignored `.env`, `.env.runtime`, and `.env.broker` files remain
-  supported for local development.
+- **Secrets:** keep source files in one flat host directory and use Compose
+  grants to mount required files at `/run/secrets`, or provide the gitignored
+  `.env.runtime` and `.env.broker` paths as read-only dotenv bundles. Never
+  commit real values.
 - **Inspect:** self-host the runtime to see exactly what the agent does.
 
 Early-stage software, no warranty. Don't connect sensitive production systems

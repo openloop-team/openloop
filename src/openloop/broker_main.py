@@ -60,12 +60,12 @@ def _acquire_broker_lock(path: Path) -> int:
         raise
 
 
-def healthcheck(settings: Settings) -> int:
+def _healthcheck_socket(control_socket_dir: str | None) -> int:
     """Return zero only when the broker control socket accepts a connection."""
     try:
-        if not settings.broker_control_socket_dir:
+        if not control_socket_dir:
             return 1
-        path = Path(settings.broker_control_socket_dir) / "control.sock"
+        path = Path(control_socket_dir) / "control.sock"
         probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             probe.settimeout(2.0)
@@ -75,6 +75,11 @@ def healthcheck(settings: Settings) -> int:
     except (OSError, TypeError, ValueError):
         return 1
     return 0
+
+
+def healthcheck(settings: Settings) -> int:
+    """Probe the control socket from an already constructed settings object."""
+    return _healthcheck_socket(settings.broker_control_socket_dir)
 
 
 def _log_recovery_report(prefix: str, report: Any) -> None:
@@ -298,11 +303,14 @@ def main(
 ) -> int:
     """Console entrypoint for the broker service and active health probe.
 
-    ``load_settings`` is the one ambient read. It is a parameter so that the
-    failure paths below — which must never echo secret-bearing config into the
-    log — can be exercised by composing a failing loader.
+    The recurring healthcheck reads only its non-secret socket directory from
+    the environment so it never consumes a mounted settings FIFO. For service
+    startup, ``load_settings`` is the one ambient read. It is a parameter so
+    the secret-safe failure paths can be exercised with a failing loader.
     """
     args = _parser().parse_args(argv)
+    if args.healthcheck:
+        return _healthcheck_socket(os.environ.get("BROKER_CONTROL_SOCKET_DIR"))
     try:
         settings = load_settings()
     except ValidationError as error:
@@ -317,8 +325,6 @@ def main(
         )
         return 1
     logging.basicConfig(level=settings.log_level.upper())
-    if args.healthcheck:
-        return healthcheck(settings)
     try:
         return asyncio.run(run_broker(settings))
     except KeyboardInterrupt:

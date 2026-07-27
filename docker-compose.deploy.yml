@@ -8,7 +8,7 @@
 #
 # Usage on the server:
 #   cp .env.example .env                   # Compose/deployment values
-#   cp .env.runtime.example .env.runtime   # non-secret runtime configuration
+#   cp .env.runtime.example .env.runtime   # gitignored runtime settings
 #   # Render every declared secret directly under ./secrets/
 #   docker compose -f docker-compose.deploy.yml up -d --build
 #   docker compose -f docker-compose.deploy.yml logs -f runtime
@@ -38,7 +38,6 @@ services:
     image: ${OPENLOOP_IMAGE:-openloop:local}
     build: .
     restart: unless-stopped
-    env_file: .env.runtime
     # Derive the DB URL from the same vars Postgres uses, pointed at the
     # in-network service host. Overrides any DATABASE_URL in .env.runtime so the
     # localhost example value can't leak in.
@@ -72,6 +71,12 @@ services:
         condition: service_healthy
     # Edit agents/*.yaml and `docker compose ... restart runtime` — no rebuild.
     volumes:
+      - type: bind
+        source: ./.env.runtime
+        target: /app/.env.runtime
+        read_only: true
+        bind:
+          create_host_path: false
       - ./agents:/app/agents:ro
 
 volumes:

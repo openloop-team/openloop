@@ -38,6 +38,7 @@ ADAPTER_DATA = "/run/openloop-docker"
 ADAPTER_HEALTH = "/run/openloop-health"
 FORWARDED_SOCKET = f"{ADAPTER_DATA}/docker.sock"
 RAW_SOCKET = "/var/run/docker.sock"
+DOTENV_TARGET = "/app/.env.runtime"
 
 
 def _compose() -> dict:
@@ -45,7 +46,11 @@ def _compose() -> dict:
 
 
 def _mounts(service: dict) -> dict[str, dict]:
-    return {mount["target"]: mount for mount in service["volumes"]}
+    return {
+        mount["target"]: mount
+        for mount in service["volumes"]
+        if isinstance(mount, dict)
+    }
 
 
 def _secret_grants(service: dict) -> dict[str, str]:
@@ -172,7 +177,14 @@ def test_broker_has_explicit_external_environment_health_and_ordering():
     broker = services["broker"]
     runtime = services["runtime"]
 
-    assert broker["env_file"] == ".env.broker"
+    assert "env_file" not in broker
+    assert _mounts(broker)[DOTENV_TARGET] == {
+        "type": "bind",
+        "source": "./.env.broker",
+        "target": DOTENV_TARGET,
+        "read_only": True,
+        "bind": {"create_host_path": False},
+    }
     assert broker["environment"]["DATABASE_URL"] == COMPOSE_DATABASE_URL
     assert "PGPASSWORD" not in broker["environment"]
     assert "POSTGRES_PASSWORD" not in broker["environment"]
@@ -191,10 +203,17 @@ def test_broker_has_explicit_external_environment_health_and_ordering():
     ]
 
 
-def test_runtime_compositions_use_runtime_environment_file():
+def test_runtime_compositions_bind_mount_runtime_dotenv():
     for path in RUNTIME_COMPOSITIONS:
         runtime = yaml.safe_load(path.read_text())["services"]["runtime"]
-        assert runtime["env_file"] == ".env.runtime"
+        assert "env_file" not in runtime
+        assert _mounts(runtime)[DOTENV_TARGET] == {
+            "type": "bind",
+            "source": "./.env.runtime",
+            "target": DOTENV_TARGET,
+            "read_only": True,
+            "bind": {"create_host_path": False},
+        }
         assert runtime["environment"]["DATABASE_URL"] == COMPOSE_DATABASE_URL
         assert runtime["environment"]["LOG_LEVEL"] == "${LOG_LEVEL:-info}"
 
@@ -383,3 +402,8 @@ def test_operator_commands_use_compose_default_environment_discovery():
     )
 
     assert "--env-file .env.runtime" not in guidance
+
+
+def test_compositions_do_not_receive_secret_manager_tokens():
+    for path in COMPOSITIONS:
+        assert "DOPPLER_TOKEN" not in path.read_text()

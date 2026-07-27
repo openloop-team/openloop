@@ -2,8 +2,8 @@
 #
 # Usage:
 #   cp .env.example .env
-#   cp .env.runtime.example .env.runtime   # non-secret app configuration
-#   cp .env.broker.example .env.broker     # non-secret broker configuration
+#   cp .env.runtime.example .env.runtime   # gitignored app settings
+#   cp .env.broker.example .env.broker     # gitignored broker settings
 #   # Render every declared secret directly under ./secrets/
 #   docker compose -f docker-compose.yml -f docker-compose.broker.yml up --build
 #
@@ -12,10 +12,11 @@
 # distinct-uid/shared-gid ownership matrix before either long-running service
 # starts.
 #
-# TRUST PARTITION: `.env.runtime` and `.env.broker` contain non-secret
-# configuration only. Secret source files share one flat host directory, while
-# the grants below keep app-side material in runtime and broker-side roots in
-# broker. Public verification maps stay in `.env.broker`.
+# `.env.runtime` and `.env.broker` are read-only dotenv bundles; they may carry
+# the same shared values. Separate host paths let runtime and broker each read
+# a FIFO without competing for one stream. Individual secret source files
+# remain supported under `/run/secrets`, and public verification maps stay in
+# `.env.broker`.
 #
 # This override keeps Docker authority inside the adapter/broker trust boundary.
 
@@ -92,7 +93,6 @@ services:
     user: "${OPENLOOP_BROKER_UID:-10002}:${OPENLOOP_DATA_GID:-10777}"
     group_add:
       - ${OPENLOOP_DATA_GID:-10777}
-    env_file: .env.broker
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}@postgres:5432/${POSTGRES_DB:-openloop}
       DOCKER_HOST: unix:///run/openloop-docker/docker.sock
@@ -130,6 +130,12 @@ services:
       start_period: 5s
     restart: unless-stopped
     volumes:
+      - type: bind
+        source: ./.env.broker
+        target: /app/.env.runtime
+        read_only: true
+        bind:
+          create_host_path: false
       - type: volume
         source: docker-socket-adapter-data
         target: /run/openloop-docker
