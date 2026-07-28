@@ -16,7 +16,7 @@ from openloop.agents import load_agents
 from openloop.agents.schema import Agent
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
-from openloop.config import Settings
+from openloop.config import RuntimeSettings
 from openloop.memory import InMemoryStore
 from openloop.postgres import BorrowedPostgresStore, create_pool
 from openloop.sessions import InMemorySurfaceSessionStore, InMemoryThreadRecordStore
@@ -132,7 +132,7 @@ async def _reset_thread_claims(store: Any) -> None:
 
 @asynccontextmanager
 async def compose(
-    settings: Settings,
+    settings: RuntimeSettings,
     agents: dict[str, Agent] | None = None,
     *,
     overrides: Mapping[str, Any] | None = None,

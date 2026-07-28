@@ -1,8 +1,4 @@
-"""Runtime configuration loaded from mounted secrets, environment, or dotenv.
-
-Mirrors the keys documented in ``.runtime.env.example``. Only what the first
-vertical slice needs is wired up here; more lands as the runtime grows.
-"""
+"""Process-owned settings loaded from secrets, environment, or dotenv."""
 
 from __future__ import annotations
 
@@ -19,13 +15,26 @@ from pydantic_settings import (
 from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
 
 
-class Settings(BaseSettings):
-    """Runtime configuration loaded from explicit, secret, and ambient sources.
+DEFAULT_EXTERNAL_BROKER_CONTAINER_ROOT = Path("/var/lib/openloop/broker")
+DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR = (
+    DEFAULT_EXTERNAL_BROKER_CONTAINER_ROOT / "control"
+)
+DEFAULT_EXTERNAL_BROKER_STATE_ROOT = (
+    DEFAULT_EXTERNAL_BROKER_CONTAINER_ROOT / "state"
+)
+DEFAULT_EXTERNAL_BROKER_RUNTIME_ROOT = (
+    DEFAULT_EXTERNAL_BROKER_CONTAINER_ROOT / "runtime"
+)
+DEFAULT_EXTERNAL_BROKER_INGRESS_ROOT = (
+    DEFAULT_EXTERNAL_BROKER_CONTAINER_ROOT / "ingress"
+)
+DEFAULT_EXTERNAL_BROKER_CHECKPOINT_RECEIPT_ROOT = (
+    DEFAULT_EXTERNAL_BROKER_CONTAINER_ROOT / "receipts"
+)
 
-    Construct one at a process entrypoint and pass it down; every consumer
-    takes it as an argument rather than reaching for a global. Tests construct
-    one directly with the parameters they care about.
-    """
+
+class _OpenLoopSettings(BaseSettings):
+    """Common source policy for each independently loaded process schema."""
 
     model_config = SettingsConfigDict(
         env_file=".runtime.env",
@@ -69,6 +78,14 @@ class Settings(BaseSettings):
         else:
             external_sources = (env_settings, dotenv_settings)
         return (init_settings, *external_sources)
+
+
+class RuntimeSettings(_OpenLoopSettings):
+    """Unprivileged application-runtime settings.
+
+    This schema owns provider, surface, storage, worker, and external
+    broker-client inputs. Broker service authority is intentionally absent.
+    """
 
     # Model providers. Wiring passes these explicitly to LiteLLM so mounted
     # secret files work without copying credentials into process environment.
@@ -164,104 +181,41 @@ class Settings(BaseSettings):
     # replicas. It always stays outside Git checkouts.
     coding_worker_openhands_state_dir: str | None = None
     # Dedicated base64-encoded 32-byte master key. Required for Docker OpenHands;
-    # SecretStr keeps it out of Settings repr/logging. Never reuse another app,
-    # Slack, GitHub, or provider secret here.
+    # SecretStr keeps it out of RuntimeSettings repr/logging. Never reuse
+    # another app, Slack, GitHub, or provider secret here.
     coding_worker_openhands_state_master_key: SecretStr | None = None
     coding_worker_openhands_master_key_id: str = "key-v1"
     # OpenHands Docker runs park at confirmation boundaries and resume in a
     # fresh container by default. Set false only as an operational rollback;
     # the authenticated runtime and encrypted state foundation remain active.
     coding_worker_openhands_cold_resume_enabled: bool = True
-    # --- Container broker (architecture step 4, first wiring slice) ----------
+    # --- Container broker client ---------------------------------------------
     # Master flag. When true, docker-mode OpenHands routes container lifecycle
-    # through the broker over its UDS RPC boundary. FAIL-CLOSED: when true but the broker
-    # cannot be built (missing/invalid setting below), the coding worker is
-    # DISABLED loudly — it never falls back to the direct launch path.
+    # through the broker over its UDS RPC boundary. FAIL-CLOSED: when true but
+    # the client cannot be built, the coding worker is disabled loudly.
     coding_worker_openhands_broker_enabled: bool = False
-    # Parent directory for the broker control UDS (<dir>/control.sock). Required
-    # when the broker flag is on; the app must own and be able to bind it.
-    broker_control_socket_dir: str | None = None
-    # Durable-state root the broker's runtime driver owns (per-job isolation).
-    # Required when the broker flag is on; stays outside Git checkouts.
-    broker_state_root: str | None = None
-    # Runtime scratch root for the Docker runtime driver. DockerRuntimeConfig
-    # requires runtime_root and state_root to be DISJOINT (it validates this),
-    # so this is a separate path from broker_state_root. Required when on.
-    broker_runtime_root: str | None = None
-    # Separated key topology — ONE root ring per trust domain (never a shared
-    # master root; production splits client/broker/checkpoint-store into distinct
-    # trust domains). Each domain is a VERSION -> base64-32-byte-secret map plus a
-    # current_version, so keys rotate while old capabilities/durable digests/
-    # receipts still verify (overlapping verification) across a restart — the
-    # single-key form could not represent rotation. SecretStr keeps the values out
-    # of repr/logs. build_broker fail-closed-validates when the flag is on:
-    # non-empty map, current_version present, base64/32-byte, and NO reused root
-    # bytes within or across domains (a reused root is fake rotation / a shared
-    # trust line). Never reuse another app/Slack/GitHub/provider secret here.
-    #
-    # Identity (client-domain, workload-identity tokens): the Ed25519 keypair is
-    # generated EPHEMERALLY per-process this slice (tokens live <=300s and never
-    # outlive the process), so only the issuer/audience identifiers are config.
+    # Runtime-side mount targets. Compose may bind any host source to these
+    # stable paths; source and target paths are independent.
+    broker_control_socket_dir: str = str(
+        DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR
+    )
+    broker_ingress_root: str = str(DEFAULT_EXTERNAL_BROKER_INGRESS_ROOT)
+    broker_checkpoint_receipt_root: str = str(
+        DEFAULT_EXTERNAL_BROKER_CHECKPOINT_RECEIPT_ROOT
+    )
+    # Master switch for the client topology. A typo must fail validation.
+    broker_mode: str = "coprocess"  # "coprocess" | "external"
+    # External mode: the runtime signs short-lived workload identity tokens.
     broker_identity_issuer: str = "openloop-app"
     broker_identity_audience: str = "openloop-broker"
-    # Capability (broker-domain, CapabilityRootRing). Broker-only; the client
-    # receives per-job capabilities over RPC.
-    broker_capability_roots: dict[str, SecretStr] = Field(default_factory=dict)
-    broker_capability_current_version: str = "cap-key-v1"
-    # Runtime/durable (broker-domain, RuntimeSecretRootRing -> the coordinator's
-    # RuntimeSecretAuthority for session/relay/durable digests).
-    broker_runtime_roots: dict[str, SecretStr] = Field(default_factory=dict)
-    broker_runtime_current_version: str = "runtime-key-v1"
-    # Receipt (checkpoint-store-domain): a SEPARATE Ed25519 signing key is derived
-    # per version from these roots via RuntimeSecretRootRing under
-    # broker_receipt_domain — the decision-2 split. current_version's private half
-    # -> checkpoint store (signer); ALL versions' public halves -> broker verifier
-    # (overlapping verification keys). Reuses the rotation plumbing, not key bytes.
+    broker_identity_private_key: SecretStr | None = None
+    broker_identity_key_id: str = "identity-v1"
+    # Receipt roots belong to the checkpoint-store/client trust domain. The
+    # broker process receives public verification keys, never these roots.
     broker_receipt_roots: dict[str, SecretStr] = Field(default_factory=dict)
     broker_receipt_current_version: str = "receipt-key-v1"
     broker_receipt_domain: str = "broker-receipt"
-    # Segment execution lease and absolute in-container generation deadline.
-    # Both are bounded by the runtime driver's maximum lifetime (the coordinator
-    # rejects a lease that exceeds it at construction).
-    broker_execution_lease_seconds: int = 900
-    broker_generation_deadline_seconds: int = 1800
-    # --- Broker process split (phase 1): mode + trust-topology surfaces -----
-    # Master switch. "coprocess" (default, unchanged today) runs the broker
-    # graph in-process; "external" talks to a separate `openloop-broker`
-    # process over the same UDS RPC boundary. A typo here must not silently
-    # boot as coprocess, so this is validator-enforced below.
-    broker_mode: str = "coprocess"  # "coprocess" | "external"
-    # --- external mode, app side ---
-    # base64 32-byte Ed25519 seed; the app signs workload-identity tokens with
-    # it in external mode. SecretStr keeps it out of Settings repr/logging.
-    broker_identity_private_key: SecretStr | None = None
-    broker_identity_key_id: str = "identity-v1"
-    # --- external mode, broker side ---
-    # key_id -> base64 Ed25519 public. The broker verifies app-issued identity
-    # tokens against these; it never holds the private half.
-    broker_identity_public_keys: dict[str, str] = Field(default_factory=dict)
-    # version -> base64 Ed25519 public. The broker verifies checkpoint-store
-    # receipts against these; it never holds a receipt private half either.
-    broker_receipt_public_keys: dict[str, str] = Field(default_factory=dict)
-    # --- shared surfaces ---
-    # Dedicated receipts subtree, BOTH sides (identical absolute path; RO
-    # mount broker-side). REQUIRED app-side in external mode too: the client
-    # dual-writes the dedicated sidecar here — without it only the legacy
-    # in-artifact sidecar exists and broker recovery cannot locate receipts.
-    # (Refines the spec's `broker_checkpoint_root`: only receipts/ crosses
-    # the boundary, so the setting names exactly what gets mounted.)
-    broker_checkpoint_receipt_root: str | None = None
-    # App-owned sibling root; external-required, coprocess derives
-    # runtime_root/.workspace-ingress when unset.
-    broker_ingress_root: str | None = None
-    # Numeric identities only — group/user *names* never cross the container
-    # boundary.
     broker_shared_data_gid: int | None = None
-    broker_expected_app_uid: int | None = None
-    # 0/negative would busy-loop the periodic reconcile pass.
-    broker_reconcile_interval_seconds: int = Field(default=300, gt=0)
-    # Entrypoint only: in-memory repo/audit (tests/dev).
-    broker_dev_in_memory: bool = False
     # Execution authority marker. ``host`` uses the app's plain subprocess
     # executor. ``docker`` is accepted only by containerized OpenHands and means
     # the external broker owns execution; the app never launches containers.
@@ -397,3 +351,84 @@ class Settings(BaseSettings):
         if self.storage_mode is not None:
             return self.storage_mode
         return "auto" if self.memory_backend == "postgres" else "memory"
+
+
+class BrokerSettings(_OpenLoopSettings):
+    """Privileged external-broker process settings.
+
+    Runtime provider credentials, Slack/GitHub credentials, worker controls,
+    and receipt signing roots are deliberately not part of this schema.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".broker.env",
+        env_file_encoding="utf-8",
+        secrets_dir="/run/secrets",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+    # Stable container targets. Deployments choose host sources independently.
+    broker_control_socket_dir: str = str(
+        DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR
+    )
+    broker_state_root: str = str(DEFAULT_EXTERNAL_BROKER_STATE_ROOT)
+    broker_runtime_root: str = str(DEFAULT_EXTERNAL_BROKER_RUNTIME_ROOT)
+    broker_ingress_root: str = str(DEFAULT_EXTERNAL_BROKER_INGRESS_ROOT)
+    broker_checkpoint_receipt_root: str = str(
+        DEFAULT_EXTERNAL_BROKER_CHECKPOINT_RECEIPT_ROOT
+    )
+
+    broker_identity_issuer: str = "openloop-app"
+    broker_identity_audience: str = "openloop-broker"
+    broker_capability_roots: dict[str, SecretStr] = Field(default_factory=dict)
+    broker_capability_current_version: str = "cap-key-v1"
+    broker_runtime_roots: dict[str, SecretStr] = Field(default_factory=dict)
+    broker_runtime_current_version: str = "runtime-key-v1"
+    broker_identity_public_keys: dict[str, str] = Field(default_factory=dict)
+    broker_receipt_public_keys: dict[str, str] = Field(default_factory=dict)
+    broker_receipt_domain: str = "broker-receipt"
+
+    broker_shared_data_gid: int | None = None
+    broker_expected_app_uid: int | None = None
+    broker_execution_lease_seconds: int = 900
+    broker_generation_deadline_seconds: int = 1800
+    broker_reconcile_interval_seconds: int = Field(default=300, gt=0)
+    broker_dev_in_memory: bool = False
+
+    database_url: str = "postgresql://openloop:change-me@localhost:5432/openloop"
+    postgres_password: SecretStr | None = None
+    postgres_pool_min_size: int = Field(default=1, ge=0)
+    postgres_pool_max_size: int = Field(default=10, ge=1)
+    log_level: str = "info"
+
+    @model_validator(mode="after")
+    def _validate_postgres_pool_size(self) -> Self:
+        if self.postgres_pool_min_size > self.postgres_pool_max_size:
+            raise ValueError(
+                "postgres_pool_min_size must be less than or equal to "
+                "postgres_pool_max_size"
+            )
+        return self
+
+
+class CoprocessBrokerSettings(_OpenLoopSettings):
+    """Broker-service authority loaded only for an explicit coprocess topology.
+
+    Coprocess paths remain explicit so a local runtime cannot accidentally
+    claim the external container's fixed ``/var/lib/openloop/broker`` targets.
+    """
+
+    broker_control_socket_dir: str | None = None
+    broker_state_root: str | None = None
+    broker_runtime_root: str | None = None
+    broker_capability_roots: dict[str, SecretStr] = Field(default_factory=dict)
+    broker_capability_current_version: str = "cap-key-v1"
+    broker_runtime_roots: dict[str, SecretStr] = Field(default_factory=dict)
+    broker_runtime_current_version: str = "runtime-key-v1"
+    broker_identity_issuer: str = "openloop-app"
+    broker_identity_audience: str = "openloop-broker"
+    broker_receipt_domain: str = "broker-receipt"
+    broker_shared_data_gid: int | None = None
+    broker_execution_lease_seconds: int = 900
+    broker_generation_deadline_seconds: int = 1800

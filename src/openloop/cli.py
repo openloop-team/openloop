@@ -236,14 +236,14 @@ def _cmd_broker_keys(args: argparse.Namespace) -> int:
     import base64
     import json
 
-    from openloop.config import Settings
+    from openloop.config import RuntimeSettings
     from openloop.wiring.broker import (
         _decode_identity_seed,
         _decode_roots,
         _derive_receipt_key,
     )
 
-    settings = Settings()   # entrypoint: load from .runtime.env + env
+    settings = RuntimeSettings()   # entrypoint: load from .runtime.env + env
 
     def public_of(private: Any) -> str:
         return base64.b64encode(private.public_key().public_bytes_raw()).decode()

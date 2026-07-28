@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from openloop.config import Settings
+from openloop.config import RuntimeSettings
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -44,7 +44,9 @@ def test_analysis_product_modules_are_absent() -> None:
 
 def test_analysis_settings_are_absent() -> None:
     assert not {
-        name for name in Settings.model_fields if name.startswith("analysis_worker")
+        name
+        for name in RuntimeSettings.model_fields
+        if name.startswith("analysis_worker")
     }
 
 

@@ -47,7 +47,7 @@ class CredentialResolver(Protocol):
 class EnvCredentialResolver:
     """Today's behavior behind the seam: static secrets keyed by integration.
 
-    Built from ``Settings`` values (which pydantic reads from env /
+    Built from ``RuntimeSettings`` values (which pydantic reads from env /
     ``.runtime.env``). Missing or empty entries raise :class:`CredentialError`
     at resolve time — callers that register only when configured never hit
     that path.

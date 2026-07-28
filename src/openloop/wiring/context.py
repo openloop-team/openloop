@@ -8,7 +8,7 @@ from typing import Any
 from openloop.agents.schema import Agent
 from openloop.approvals import ApprovalStore
 from openloop.checkpoints import CheckpointStore
-from openloop.config import Settings
+from openloop.config import RuntimeSettings
 from openloop.coordination import DistributedLock
 from openloop.memory import Embedder, MemoryStore
 from openloop.runtime import Runtime
@@ -79,7 +79,7 @@ class AgentRuntimes:
 class AppContext:
     """Fully composed application graph and the resources that own its lifetime."""
 
-    settings: Settings
+    settings: RuntimeSettings
     agents: AgentRuntimes
     stores: SettledStores
     embedder: Embedder | None

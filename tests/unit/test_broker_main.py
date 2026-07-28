@@ -1,18 +1,18 @@
 """Secret-safe diagnostics and exit semantics for the broker CLI shell.
 
 Each case composes the loader it needs into ``main`` rather than swapping the
-module's ``Settings`` out from under it — the failure paths are the point, so
+module's ``BrokerSettings`` out from under it — the failure paths are the point, so
 they are supplied directly.
 """
 
 import logging
-from types import SimpleNamespace
+import os
 
 import pytest
 from pydantic import BaseModel, field_validator
 
 import openloop.broker_main as broker_main
-from tests.support.settings import IsolatedSettings as Settings
+from tests.support.settings import IsolatedBrokerSettings as Settings
 
 
 @pytest.fixture(autouse=True)
@@ -27,24 +27,21 @@ def _isolate_logging_configuration(monkeypatch):
 
 def test_main_logs_only_validation_location_and_type(caplog):
     database_secret = "postgresql://operator:database-secret@db/openloop"
-    provider_secret = "provider-secret-value"
 
-    def load_invalid_mode() -> Settings:
+    def load_invalid_settings() -> Settings:
         return Settings(
-            broker_mode="banana",
+            broker_reconcile_interval_seconds=0,
             database_url=database_secret,
-            gemini_api_key=provider_secret,
         )
 
     with caplog.at_level(logging.ERROR, logger="openloop.broker"):
-        code = broker_main.main([], load_settings=load_invalid_mode)
+        code = broker_main.main([], load_settings=load_invalid_settings)
 
     assert code == 1
-    assert 'loc=["broker_mode"]' in caplog.text
-    assert 'type="value_error"' in caplog.text
+    assert 'loc=["broker_reconcile_interval_seconds"]' in caplog.text
+    assert 'type="greater_than"' in caplog.text
     assert database_secret not in caplog.text
-    assert provider_secret not in caplog.text
-    assert "broker_mode must be" not in caplog.text
+    assert "greater than 0" not in caplog.text
     assert "Traceback" not in caplog.text
 
 
@@ -96,6 +93,24 @@ def test_healthcheck_does_not_construct_full_settings(monkeypatch, tmp_path):
     assert broker_main.main(["--healthcheck"], load_settings=fail_if_loaded) == 1
 
 
+def test_healthcheck_uses_default_control_path_without_full_settings(monkeypatch):
+    monkeypatch.delenv("BROKER_CONTROL_SOCKET_DIR", raising=False)
+    observed = []
+    monkeypatch.setattr(
+        broker_main,
+        "_healthcheck_socket",
+        lambda path: observed.append(path) or 0,
+    )
+
+    def fail_if_loaded() -> Settings:
+        raise AssertionError("healthcheck consumed mounted settings")
+
+    assert broker_main.main(["--healthcheck"], load_settings=fail_if_loaded) == 0
+    assert observed == [
+        os.fspath(broker_main.DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR)
+    ]
+
+
 def test_main_keyboard_interrupt_before_serving_returns_130(monkeypatch):
     def interrupt(awaitable):
         awaitable.close()
@@ -105,7 +120,13 @@ def test_main_keyboard_interrupt_before_serving_returns_130(monkeypatch):
 
     assert (
         broker_main.main(
-            [], load_settings=lambda: SimpleNamespace(log_level="info")
+            [],
+            load_settings=lambda: Settings(
+                broker_state_root="/host/state",
+                broker_runtime_root="/host/runtime",
+                broker_shared_data_gid=2000,
+                broker_expected_app_uid=1000,
+            ),
         )
         == 130
     )

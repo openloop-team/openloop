@@ -8,7 +8,9 @@
 # OPENLOOP_BROKER_ROOT must be an absolute host path. The one-shot init service
 # creates the root when absent, then provisions its five children with the exact
 # distinct-uid/shared-gid ownership matrix before either long-running service
-# starts.
+# starts. Control, ingress, and receipts use fixed /var/lib/openloop/broker/*
+# targets inside the long-running containers. Runtime and state remain
+# same-path mounts because the host Docker daemon consumes their descendants.
 #
 # `configs/prd/runtime.env` and `configs/prd/broker.env` contain non-secret
 # settings and are consumed through service-level `env_file`. True secrets are
@@ -95,12 +97,8 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}@postgres:5432/${POSTGRES_DB:-openloop}
       DOCKER_HOST: unix:///run/openloop-docker/docker.sock
-      BROKER_MODE: external
-      BROKER_CONTROL_SOCKET_DIR: ${OPENLOOP_BROKER_ROOT:?}/control
       BROKER_STATE_ROOT: ${OPENLOOP_BROKER_ROOT:?}/state
       BROKER_RUNTIME_ROOT: ${OPENLOOP_BROKER_ROOT:?}/runtime
-      BROKER_INGRESS_ROOT: ${OPENLOOP_BROKER_ROOT:?}/ingress
-      BROKER_CHECKPOINT_RECEIPT_ROOT: ${OPENLOOP_BROKER_ROOT:?}/receipts
       BROKER_SHARED_DATA_GID: ${OPENLOOP_DATA_GID:-10777}
       BROKER_EXPECTED_APP_UID: "1000"
       BROKER_IDENTITY_ISSUER: ${BROKER_IDENTITY_ISSUER:-openloop-app}
@@ -135,7 +133,7 @@ services:
         read_only: true
       - type: bind
         source: ${OPENLOOP_BROKER_ROOT:?}/control
-        target: ${OPENLOOP_BROKER_ROOT:?}/control
+        target: /var/lib/openloop/broker/control
         bind:
           create_host_path: true
       - type: bind
@@ -150,12 +148,12 @@ services:
           create_host_path: true
       - type: bind
         source: ${OPENLOOP_BROKER_ROOT:?}/ingress
-        target: ${OPENLOOP_BROKER_ROOT:?}/ingress
+        target: /var/lib/openloop/broker/ingress
         bind:
           create_host_path: true
       - type: bind
         source: ${OPENLOOP_BROKER_ROOT:?}/receipts
-        target: ${OPENLOOP_BROKER_ROOT:?}/receipts
+        target: /var/lib/openloop/broker/receipts
         read_only: true
         bind:
           create_host_path: true
@@ -166,15 +164,9 @@ services:
       - ${OPENLOOP_DATA_GID:-10777}
     environment:
       BROKER_MODE: external
-      BROKER_CONTROL_SOCKET_DIR: ${OPENLOOP_BROKER_ROOT:?}/control
-      BROKER_RUNTIME_ROOT: ${OPENLOOP_BROKER_ROOT:?}/runtime
-      BROKER_INGRESS_ROOT: ${OPENLOOP_BROKER_ROOT:?}/ingress
-      BROKER_CHECKPOINT_RECEIPT_ROOT: ${OPENLOOP_BROKER_ROOT:?}/receipts
       BROKER_SHARED_DATA_GID: ${OPENLOOP_DATA_GID:-10777}
       BROKER_IDENTITY_ISSUER: ${BROKER_IDENTITY_ISSUER:-openloop-app}
       BROKER_IDENTITY_AUDIENCE: ${BROKER_IDENTITY_AUDIENCE:-openloop-broker}
-      BROKER_EXECUTION_LEASE_SECONDS: ${BROKER_EXECUTION_LEASE_SECONDS:-900}
-      BROKER_GENERATION_DEADLINE_SECONDS: ${BROKER_GENERATION_DEADLINE_SECONDS:-1800}
       CODING_WORKER_OPENHANDS_BROKER_ENABLED: "true"
     secrets:
       - postgres_password
@@ -186,7 +178,7 @@ services:
     volumes:
       - type: bind
         source: ${OPENLOOP_BROKER_ROOT:?}/control
-        target: ${OPENLOOP_BROKER_ROOT:?}/control
+        target: /var/lib/openloop/broker/control
         bind:
           create_host_path: true
       - type: bind
@@ -196,12 +188,12 @@ services:
           create_host_path: true
       - type: bind
         source: ${OPENLOOP_BROKER_ROOT:?}/ingress
-        target: ${OPENLOOP_BROKER_ROOT:?}/ingress
+        target: /var/lib/openloop/broker/ingress
         bind:
           create_host_path: true
       - type: bind
         source: ${OPENLOOP_BROKER_ROOT:?}/receipts
-        target: ${OPENLOOP_BROKER_ROOT:?}/receipts
+        target: /var/lib/openloop/broker/receipts
         bind:
           create_host_path: true
 

@@ -13,7 +13,11 @@ from typing import Any
 
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 
-from openloop.config import Settings
+from openloop.config import (
+    BrokerSettings,
+    CoprocessBrokerSettings,
+    RuntimeSettings,
+)
 
 
 TEST_AGENTS_DIR = Path(__file__).parents[1] / "integration" / "data"
@@ -31,12 +35,8 @@ _PROFILES: Mapping[str, Mapping[str, Any]] = {
 }
 
 
-class IsolatedSettings(Settings):
-    """A ``Settings`` variant whose only external source is ``__init__``."""
-
-    # Test composition always uses fixture agents, never whichever files happen
-    # to be present in the working copy's ``agents/`` directory.
-    agents_dir: str = str(TEST_AGENTS_DIR)
+class _IsolatedSources:
+    """Settings source override shared by hermetic test schemas."""
 
     @classmethod
     def settings_customise_sources(
@@ -49,6 +49,25 @@ class IsolatedSettings(Settings):
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         del settings_cls, env_settings, dotenv_settings, file_secret_settings
         return (init_settings,)
+
+
+class IsolatedSettings(_IsolatedSources, RuntimeSettings):
+    """A ``RuntimeSettings`` variant whose only source is ``__init__``."""
+
+    # Test composition always uses fixture agents, never whichever files happen
+    # to be present in the working copy's ``agents/`` directory.
+    agents_dir: str = str(TEST_AGENTS_DIR)
+
+
+class IsolatedBrokerSettings(_IsolatedSources, BrokerSettings):
+    """A ``BrokerSettings`` variant whose only source is ``__init__``."""
+
+
+class IsolatedCoprocessBrokerSettings(
+    _IsolatedSources,
+    CoprocessBrokerSettings,
+):
+    """A ``CoprocessBrokerSettings`` variant using constructor inputs only."""
 
 
 def build_test_settings(

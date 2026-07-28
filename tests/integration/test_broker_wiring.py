@@ -16,6 +16,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import SecretStr
 
+from openloop.broker_config import BrokerClientConfig, BrokerServiceConfig
 from openloop.broker_control.local_receipts import LocalCheckpointReceiptStore
 from openloop.broker_control.receipts import CheckpointReceiptIssuer
 from openloop.broker_runtime import DockerOpenHandsRuntimeDriver
@@ -29,7 +30,11 @@ from openloop.wiring.broker import (
     build_broker_client,
     build_broker_service,
 )
-from tests.support.settings import IsolatedSettings as Settings
+from tests.support.settings import (
+    IsolatedBrokerSettings,
+    IsolatedCoprocessBrokerSettings,
+    IsolatedSettings as Settings,
+)
 
 _DSN = os.environ.get(
     "OPENLOOP_TEST_DATABASE_URL",
@@ -80,14 +85,21 @@ def _settings(tmp_path, sock_dir, **overrides):
         broker_execution_lease_seconds=300,
     )
     base.update(overrides)
-    return Settings(**base)
+    return (
+        Settings(**base),
+        IsolatedCoprocessBrokerSettings(**base),
+        IsolatedBrokerSettings(**base),
+    )
 
 
 async def test_build_broker_create_job_round_trip(tmp_path, sock_dir):
-    settings = _settings(tmp_path, sock_dir)
+    settings, coprocess, _broker = _settings(tmp_path, sock_dir)
     async with AsyncExitStack() as stack:
         handle = await build_broker(
-            settings, stack, runtime_driver=InMemoryRuntimeDriver()
+            settings,
+            stack,
+            coprocess_settings=coprocess,
+            runtime_driver=InMemoryRuntimeDriver(),
         )
         assert isinstance(handle, BrokerClientHandle)
 
@@ -116,33 +128,48 @@ async def test_build_broker_create_job_round_trip(tmp_path, sock_dir):
 
 
 async def test_build_broker_returns_none_when_flag_off(tmp_path, sock_dir):
-    settings = _settings(
+    settings, coprocess, _broker = _settings(
         tmp_path, sock_dir, coding_worker_openhands_broker_enabled=False
     )
     async with AsyncExitStack() as stack:
-        assert await build_broker(settings, stack) is None
+        assert (
+            await build_broker(
+                settings,
+                stack,
+                coprocess_settings=coprocess,
+            )
+            is None
+        )
 
 
 async def test_build_broker_fails_closed_on_reused_root(tmp_path, sock_dir):
     # Same bytes under two domains = a shared trust line; build must refuse.
-    settings = _settings(
+    settings, coprocess, _broker = _settings(
         tmp_path, sock_dir, broker_runtime_roots={"runtime-key-v1": _root(1)}
     )
     async with AsyncExitStack() as stack:
         assert (
             await build_broker(
-                settings, stack, runtime_driver=InMemoryRuntimeDriver()
+                settings,
+                stack,
+                coprocess_settings=coprocess,
+                runtime_driver=InMemoryRuntimeDriver(),
             )
             is None
         )
 
 
 async def test_build_broker_fails_closed_on_missing_root(tmp_path, sock_dir):
-    settings = _settings(tmp_path, sock_dir, broker_capability_roots={})
+    settings, coprocess, _broker = _settings(
+        tmp_path, sock_dir, broker_capability_roots={}
+    )
     async with AsyncExitStack() as stack:
         assert (
             await build_broker(
-                settings, stack, runtime_driver=InMemoryRuntimeDriver()
+                settings,
+                stack,
+                coprocess_settings=coprocess,
+                runtime_driver=InMemoryRuntimeDriver(),
             )
             is None
         )
@@ -153,25 +180,39 @@ async def test_generation_deadline_caps_the_real_runtime(tmp_path, sock_dir):
     # lifetime comes from broker_generation_deadline_seconds. A lease within the
     # deadline builds; a lease longer than the deadline is rejected by the
     # coordinator — proving the deadline is wired, not silently the 86400 default.
-    within = _settings(
+    within, within_coprocess, _broker = _settings(
         tmp_path,
         sock_dir,
         broker_execution_lease_seconds=300,
         broker_generation_deadline_seconds=900,
     )
     async with AsyncExitStack() as stack:
-        assert await build_broker(within, stack) is not None
+        assert (
+            await build_broker(
+                within,
+                stack,
+                coprocess_settings=within_coprocess,
+            )
+            is not None
+        )
 
 
 async def test_lease_longer_than_generation_deadline_fails_closed(tmp_path, sock_dir):
-    over = _settings(
+    over, over_coprocess, _broker = _settings(
         tmp_path,
         sock_dir,
         broker_execution_lease_seconds=1000,
         broker_generation_deadline_seconds=500,
     )
     async with AsyncExitStack() as stack:
-        assert await build_broker(over, stack) is None
+        assert (
+            await build_broker(
+                over,
+                stack,
+                coprocess_settings=over_coprocess,
+            )
+            is None
+        )
 
 
 async def test_bad_permission_state_root_fails_closed(tmp_path, sock_dir):
@@ -181,11 +222,18 @@ async def test_bad_permission_state_root_fails_closed(tmp_path, sock_dir):
     loose = tmp_path / "loose-state"
     loose.mkdir()
     loose.chmod(0o755)
-    settings = _settings(tmp_path, sock_dir, broker_state_root=str(loose))
+    settings, coprocess, _broker = _settings(
+        tmp_path,
+        sock_dir,
+        broker_state_root=str(loose),
+    )
     async with AsyncExitStack() as stack:
         assert (
             await build_broker(
-                settings, stack, runtime_driver=InMemoryRuntimeDriver()
+                settings,
+                stack,
+                coprocess_settings=coprocess,
+                runtime_driver=InMemoryRuntimeDriver(),
             )
             is None
         )
@@ -201,12 +249,16 @@ async def test_build_broker_uses_durable_audit_with_postgres(tmp_path, sock_dir)
         pytest.skip(f"no Postgres reachable at {_DSN}")
     import asyncpg
 
-    settings = _settings(tmp_path, sock_dir)
+    settings, coprocess, _broker = _settings(tmp_path, sock_dir)
     pool = await asyncpg.create_pool(_DSN, min_size=1, max_size=2)
     try:
         async with AsyncExitStack() as stack:
             handle = await build_broker(
-                settings, stack, pool=pool, runtime_driver=InMemoryRuntimeDriver()
+                settings,
+                stack,
+                coprocess_settings=coprocess,
+                pool=pool,
+                runtime_driver=InMemoryRuntimeDriver(),
             )
             assert isinstance(handle, BrokerClientHandle)
             created = await handle.client.create_job(
@@ -220,9 +272,8 @@ async def test_build_broker_uses_durable_audit_with_postgres(tmp_path, sock_dir)
 # --- external mode -------------------------------------------------------
 # The config-distributed key seam: the app signs identity tokens with a private
 # seed the broker only holds the public of, and derives receipt keys from roots
-# whose public halves the broker verifies with. These build both halves in one
-# process from ONE fully-populated Settings (two processes' config combined),
-# proving the seam without a subprocess.
+# whose public halves the broker verifies with. The test constructs each
+# process-owned settings schema separately, proving the seam without a subprocess.
 
 _EXTERNAL_SEED = bytes(range(1, 33))
 _EXTERNAL_RECEIPT_ROOT = bytes([4]) * 32
@@ -250,7 +301,9 @@ def _external_settings(tmp_path, sock_dir, **overrides):
         broker_identity_private_key=SecretStr(
             base64.b64encode(_EXTERNAL_SEED).decode()
         ),
-        broker_identity_public_keys={"identity-v1": base64.b64encode(identity_pub).decode()},
+        broker_identity_public_keys={
+            "identity-v1": base64.b64encode(identity_pub).decode()
+        },
         broker_receipt_roots={
             "receipt-key-v1": base64.b64encode(_EXTERNAL_RECEIPT_ROOT).decode()
         },
@@ -267,12 +320,14 @@ def _external_settings(tmp_path, sock_dir, **overrides):
 
 
 async def test_external_client_round_trips_against_built_service(tmp_path, sock_dir):
-    settings = _external_settings(tmp_path, sock_dir)
+    settings, _coprocess, broker_settings = _external_settings(tmp_path, sock_dir)
     async with AsyncExitStack() as stack:
         # Build + bind the service half separately (the openloop-broker process
         # in production); the caller registers stop after a successful bind.
         service = await build_broker_service(
-            settings, stack, runtime_driver=InMemoryRuntimeDriver()
+            BrokerServiceConfig.from_broker_settings(broker_settings),
+            stack,
+            runtime_driver=InMemoryRuntimeDriver(),
         )
         await service.bind()
         stack.push_async_callback(service.server.stop)
@@ -298,10 +353,13 @@ async def test_external_client_round_trips_against_built_service(tmp_path, sock_
 async def test_external_service_threads_shared_gid_into_docker_runtime(
     tmp_path, sock_dir
 ):
-    settings = _external_settings(tmp_path, sock_dir)
+    settings, _coprocess, broker_settings = _external_settings(tmp_path, sock_dir)
 
     async with AsyncExitStack() as stack:
-        service = await build_broker_service(settings, stack)
+        service = await build_broker_service(
+            BrokerServiceConfig.from_broker_settings(broker_settings),
+            stack,
+        )
 
     assert isinstance(service.runtime, DockerOpenHandsRuntimeDriver)
     assert service.runtime.config.shared_gid == os.getgid()
@@ -311,15 +369,17 @@ async def test_external_service_threads_shared_gid_into_docker_runtime(
     "missing_field",
     [
         "broker_identity_private_key",
-        "broker_ingress_root",
-        "broker_checkpoint_receipt_root",
         "broker_shared_data_gid",
     ],
 )
 async def test_external_missing_required_client_field_fails_closed(
     tmp_path, sock_dir, caplog, missing_field
 ):
-    settings = _external_settings(tmp_path, sock_dir, **{missing_field: None})
+    settings, _coprocess, _broker = _external_settings(
+        tmp_path,
+        sock_dir,
+        **{missing_field: None},
+    )
     async with AsyncExitStack() as stack:
         with caplog.at_level(logging.ERROR, logger="openloop"):
             handle = await build_broker(settings, stack)
@@ -332,7 +392,7 @@ async def test_external_missing_required_client_field_fails_closed(
 
 async def test_external_reused_receipt_root_fails_closed(tmp_path, sock_dir, caplog):
     reused = base64.b64encode(_EXTERNAL_RECEIPT_ROOT).decode()
-    settings = _external_settings(
+    settings, _coprocess, _broker = _external_settings(
         tmp_path,
         sock_dir,
         broker_receipt_roots={
@@ -353,9 +413,12 @@ async def test_external_reused_receipt_root_fails_closed(tmp_path, sock_dir, cap
 async def test_external_bind_checkpoint_store_leaves_reconciler_none(
     tmp_path, sock_dir
 ):
-    settings = _external_settings(tmp_path, sock_dir)
+    settings, _coprocess, _broker = _external_settings(tmp_path, sock_dir)
     async with AsyncExitStack() as stack:
-        handle = await build_broker_client(settings, stack)
+        handle = await build_broker_client(
+            BrokerClientConfig.from_runtime_settings(settings),
+            stack,
+        )
     assert handle._ledger is None
     assert handle._coordinator is None
 
@@ -371,12 +434,10 @@ async def test_external_bind_checkpoint_store_leaves_reconciler_none(
     assert handle.reconciler is None
 
 
-async def test_coprocess_receipt_root_without_shared_gid_fails_closed(
-    tmp_path, sock_dir, caplog
-):
+async def test_coprocess_ignores_external_receipt_mount_target(tmp_path, sock_dir):
     receipt_root = tmp_path / "misconfigured-receipts"
     receipt_root.mkdir()
-    settings = _settings(
+    settings, coprocess, _broker = _settings(
         tmp_path,
         sock_dir,
         broker_checkpoint_receipt_root=str(receipt_root),
@@ -384,18 +445,14 @@ async def test_coprocess_receipt_root_without_shared_gid_fails_closed(
     )
 
     async with AsyncExitStack() as stack:
-        with caplog.at_level(logging.ERROR, logger="openloop"):
-            handle = await build_broker(
-                settings, stack, runtime_driver=InMemoryRuntimeDriver()
-            )
-
-    assert handle is None
-    assert not (sock_dir / "control.sock").exists()
-    assert any(
-        "broker_shared_data_gid is required when "
-        "broker_checkpoint_receipt_root is set" in record.message
-        for record in caplog.records
-    )
+        handle = await build_broker(
+            settings,
+            stack,
+            coprocess_settings=coprocess,
+            runtime_driver=InMemoryRuntimeDriver(),
+        )
+        assert handle is not None
+        assert handle.receipt_root is None
 
 
 async def test_coprocess_client_failure_returns_none_and_no_listener(
@@ -404,7 +461,7 @@ async def test_coprocess_client_failure_returns_none_and_no_listener(
     # Force the client half to fail AFTER the service is constructed. Bind is the
     # last fallible act and happens only after client construction, so the socket
     # must never be bound: build_broker returns None and no inode exists.
-    settings = _settings(tmp_path, sock_dir)
+    settings, coprocess, _broker = _settings(tmp_path, sock_dir)
     import openloop.wiring.broker as broker_mod
 
     async def _boom(*args, **kwargs):
@@ -414,7 +471,10 @@ async def test_coprocess_client_failure_returns_none_and_no_listener(
     monkeypatch.setattr(broker_mod, "build_broker_client", _boom)
     async with AsyncExitStack() as stack:
         handle = await build_broker(
-            settings, stack, runtime_driver=InMemoryRuntimeDriver()
+            settings,
+            stack,
+            coprocess_settings=coprocess,
+            runtime_driver=InMemoryRuntimeDriver(),
         )
     assert handle is None
     assert not (sock_dir / "control.sock").exists()

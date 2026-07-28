@@ -17,7 +17,7 @@ from openloop.approvals import ApprovalStore, InMemoryApprovalStore
 from openloop.approvals.postgres import PostgresApprovalStore
 from openloop.checkpoints import CheckpointStore, InMemoryCheckpointStore
 from openloop.checkpoints.postgres import PostgresCheckpointStore
-from openloop.config import Settings
+from openloop.config import RuntimeSettings
 from openloop.credentials import (
     CredentialResolver,
     CredentialScope,
@@ -81,7 +81,7 @@ log = logging.getLogger("openloop")
 _INGRESS_STALE_SWEEP_SECONDS = 86_400
 
 
-def build_embedder(settings: Settings) -> Embedder | None:
+def build_embedder(settings: RuntimeSettings) -> Embedder | None:
     """Build an embedder only if enabled and its provider key is configured."""
     if not settings.embeddings_enabled:
         return None
@@ -98,8 +98,8 @@ def build_embedder(settings: Settings) -> Embedder | None:
     )
 
 
-def build_model_gateway(settings: Settings) -> ModelGateway:
-    """Build a gateway that receives provider keys from validated Settings."""
+def build_model_gateway(settings: RuntimeSettings) -> ModelGateway:
+    """Build a gateway that receives provider keys from validated RuntimeSettings."""
     return ModelGateway(
         {
             provider: key
@@ -109,56 +109,56 @@ def build_model_gateway(settings: Settings) -> ModelGateway:
     )
 
 
-def build_memory_store(settings: Settings) -> MemoryStore:
+def build_memory_store(settings: RuntimeSettings) -> MemoryStore:
     """Build the configured memory candidate; compose() settles it."""
     if settings.effective_storage_mode in ("auto", "postgres"):
         return PostgresMemoryStore(embedding_dim=settings.embedding_dim)
     return InMemoryStore()
 
 
-def build_usage_store(settings: Settings) -> UsageStore:
+def build_usage_store(settings: RuntimeSettings) -> UsageStore:
     """Pick a usage/audit backend. Postgres setup happens at startup."""
     if settings.effective_storage_mode in ("auto", "postgres"):
         return PostgresUsageStore()
     return InMemoryUsageStore()
 
 
-def build_approval_store(settings: Settings) -> ApprovalStore:
+def build_approval_store(settings: RuntimeSettings) -> ApprovalStore:
     """Pick an approval backend. Postgres setup happens at startup."""
     if settings.effective_storage_mode in ("auto", "postgres"):
         return PostgresApprovalStore()
     return InMemoryApprovalStore()
 
 
-def build_checkpoint_store(settings: Settings) -> CheckpointStore:
+def build_checkpoint_store(settings: RuntimeSettings) -> CheckpointStore:
     """Pick a worker-checkpoint backend. Postgres setup happens at startup."""
     if settings.effective_storage_mode in ("auto", "postgres"):
         return PostgresCheckpointStore()
     return InMemoryCheckpointStore()
 
 
-def build_workflow_store(settings: Settings) -> WorkflowStore:
+def build_workflow_store(settings: RuntimeSettings) -> WorkflowStore:
     """Pick a workflow-instance backend. Postgres setup happens at startup."""
     if settings.effective_storage_mode in ("auto", "postgres"):
         return PostgresWorkflowStore()
     return InMemoryWorkflowStore()
 
 
-def build_surface_session_store(settings: Settings) -> SurfaceSessionStore:
+def build_surface_session_store(settings: RuntimeSettings) -> SurfaceSessionStore:
     """Pick a surface-session backend (Phase D). Postgres setup at startup."""
     if settings.effective_storage_mode in ("auto", "postgres"):
         return PostgresSurfaceSessionStore()
     return InMemorySurfaceSessionStore()
 
 
-def build_thread_record_store(settings: Settings) -> ThreadRecordStore:
+def build_thread_record_store(settings: RuntimeSettings) -> ThreadRecordStore:
     """Pick a thread-record backend (Phase A). Postgres setup at startup."""
     if settings.effective_storage_mode in ("auto", "postgres"):
         return PostgresThreadRecordStore()
     return InMemoryThreadRecordStore()
 
 
-def _resolve_lock_backend(settings: Settings) -> str:
+def _resolve_lock_backend(settings: RuntimeSettings) -> str:
     """Resolve ``lock_backend``, expanding ``auto`` from the storage policy."""
     backend = settings.lock_backend
     if backend == "auto":
@@ -173,7 +173,7 @@ def _resolve_lock_backend(settings: Settings) -> str:
     return backend
 
 
-def build_lock(settings: Settings) -> DistributedLock:
+def build_lock(settings: RuntimeSettings) -> DistributedLock:
     """Pick a coordination backend; its store/connection is set up at startup.
 
     ``auto`` (default) follows ``effective_storage_mode``. ``postgres`` reuses
@@ -202,7 +202,7 @@ _COORD_LABEL = {RedisLock: "redis", PostgresLock: "postgres"}
 
 
 async def _setup_coordination(
-    coordinator: DistributedLock, settings: Settings
+    coordinator: DistributedLock, settings: RuntimeSettings
 ) -> DistributedLock:
     """Set up the coordination backend, degrading to in-process on failure.
 
@@ -239,7 +239,7 @@ async def _setup_coordination(
         return InProcessLock()
 
 
-def build_github_credentials(settings: Settings) -> CredentialResolver | None:
+def build_github_credentials(settings: RuntimeSettings) -> CredentialResolver | None:
     """Pick the GitHub auth backend behind the Phase 1 resolver seam.
 
     Prefers GitHub App installation tokens (short-lived, minted on demand) when
@@ -284,7 +284,7 @@ def build_github_credentials(settings: Settings) -> CredentialResolver | None:
     return None
 
 
-def _worker_workspace_root(settings: Settings) -> Path | None:
+def _worker_workspace_root(settings: RuntimeSettings) -> Path | None:
     """The one place the attempt-workspace root is derived from settings.
 
     Shared by the sandbox probe and the orchestrator so what boot verifies is
@@ -295,7 +295,7 @@ def _worker_workspace_root(settings: Settings) -> Path | None:
     return None
 
 
-def build_worker_sandbox(settings: Settings) -> "Sandbox | None":
+def build_worker_sandbox(settings: RuntimeSettings) -> "Sandbox | None":
     """Build the builtin worker's host-only command executor.
 
     ``docker`` remains a marker for broker-hosted OpenHands, not an
@@ -316,7 +316,7 @@ def build_worker_sandbox(settings: Settings) -> "Sandbox | None":
     return None
 
 
-def build_warm_workspace_pool(settings: Settings) -> "WarmWorkspacePool | None":
+def build_warm_workspace_pool(settings: RuntimeSettings) -> "WarmWorkspacePool | None":
     """The process-local warm-workspace pool (Phase B), or None when disabled.
 
     Off unless ``CODING_WORKER_WARM_CONTEXT`` is set. Shares the attempt-workspace
@@ -332,7 +332,7 @@ def build_warm_workspace_pool(settings: Settings) -> "WarmWorkspacePool | None":
     )
 
 
-def _provider_key(settings: Settings, model: str) -> str | None:
+def _provider_key(settings: RuntimeSettings, model: str) -> str | None:
     """The configured API key for a LiteLLM-style model's provider prefix."""
     provider = model.split("/", 1)[0]
     return {
@@ -345,7 +345,7 @@ def _provider_key(settings: Settings, model: str) -> str | None:
 
 
 def build_coding_worker(
-    settings: Settings, broker_handle: object | None = None
+    settings: RuntimeSettings, broker_handle: object | None = None
 ) -> "CodingWorker | None":
     """Pick the worker backend behind ``CODING_WORKER_BACKEND`` — fail-closed.
 
@@ -561,7 +561,7 @@ def _exposes_coding_worker(agent: Agent) -> bool:
 
 
 def _build_worker_ledger(
-    settings: Settings, agents: dict[str, Agent], usage: UsageStore
+    settings: RuntimeSettings, agents: dict[str, Agent], usage: UsageStore
 ) -> WorkerSpendLedger | None:
     """The worker spend ledger (Phases 4+5), attributing per invoking agent.
 
@@ -609,7 +609,7 @@ def _uncapped_worker_agents(
 
 
 def build_tool_gateway(
-    settings: Settings,
+    settings: RuntimeSettings,
     agents: dict[str, Agent],
     approvals: ApprovalStore,
     checkpoints: CheckpointStore,

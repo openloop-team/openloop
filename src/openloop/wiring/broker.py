@@ -48,7 +48,7 @@ import binascii
 import logging
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -67,6 +67,7 @@ from openloop.broker.ledger import BrokerLedger
 from openloop.broker.memory import InMemoryBrokerRepository
 from openloop.broker.models import BrokerOwner, IsolationMode
 from openloop.broker.postgres import PostgresBrokerRepository
+from openloop.broker_config import BrokerClientConfig, BrokerServiceConfig
 from openloop.broker_control.coordinator import BrokerSegmentCoordinator
 from openloop.broker_control.development import local_durable_adapter_for_docker
 from openloop.broker_control.local_receipts import LocalCheckpointReceiptStore
@@ -110,7 +111,7 @@ from openloop.broker_rpc.server import BrokerRpcServer, UnixSocketPolicy
 from openloop.broker_runtime.contract import RuntimeDriver
 from openloop.broker_runtime.docker import DockerOpenHandsRuntimeDriver
 from openloop.broker_runtime.docker_policy import DockerRuntimeConfig
-from openloop.config import Settings
+from openloop.config import CoprocessBrokerSettings, RuntimeSettings
 
 log = logging.getLogger("openloop")
 
@@ -223,7 +224,7 @@ class BrokerServiceHandle:
 
 
 def _decode_roots(
-    name: str, roots: dict[str, SecretStr], current_version: str
+    name: str, roots: Mapping[str, SecretStr], current_version: str
 ) -> dict[str, bytes]:
     """Decode a version→base64-32-byte root map, rejecting malformed input."""
     if not roots:
@@ -251,7 +252,7 @@ def _decode_roots(
 
 
 def _decode_public_keys(
-    name: str, keys: dict[str, str]
+    name: str, keys: Mapping[str, str]
 ) -> dict[str, Ed25519PublicKey]:
     """Decode a version→base64-32-byte Ed25519 public map (external mode).
 
@@ -392,7 +393,7 @@ def _default_clock(clock: Callable[[], datetime] | None) -> Callable[[], datetim
 
 
 async def build_broker_service(
-    settings: Settings,
+    config: BrokerServiceConfig,
     stack: Any,
     *,
     pool: Any | None = None,
@@ -405,31 +406,25 @@ async def build_broker_service(
 
     The identity verifier comes from ``identity_public_keys`` when injected
     (coprocess passes the ephemeral public) else from
-    ``settings.broker_identity_public_keys`` (external). The receipt verifier is
-    injected (coprocess) else built from ``settings.broker_receipt_public_keys``
+    ``config.identity_public_keys`` (external). The receipt verifier is
+    injected (coprocess) else built from ``config.receipt_public_keys``
     (external). External config additionally runs the decision-11 cross-boundary
     reuse gate. **Raises** on any invalid config — the entrypoint is the
     fail-fast caller; the coprocess dispatcher wraps this in its fail-closed try.
     """
+    if not isinstance(config, BrokerServiceConfig):
+        raise TypeError("config must be BrokerServiceConfig")
     now = _default_clock(clock)
-    for field_name in (
-        "broker_control_socket_dir",
-        "broker_state_root",
-        "broker_runtime_root",
-    ):
-        if not getattr(settings, field_name):
-            raise ValueError(f"{field_name} is required when the broker is enabled")
-
-    external = identity_public_keys is None or receipt_verifier is None
+    external = config.external
     capability_roots = _decode_roots(
         "capability",
-        settings.broker_capability_roots,
-        settings.broker_capability_current_version,
+        config.capability_roots,
+        config.capability_current_version,
     )
     runtime_roots = _decode_roots(
         "runtime",
-        settings.broker_runtime_roots,
-        settings.broker_runtime_current_version,
+        config.runtime_roots,
+        config.runtime_current_version,
     )
     # Within-broker-domain reuse (cap vs runtime) is rejected in every mode; the
     # coprocess dispatcher additionally checks receipt roots (which live here in
@@ -439,12 +434,12 @@ async def build_broker_service(
     # --- verification keys (publics only) --------------------------------
     if identity_public_keys is None:
         identity_public_keys = _decode_public_keys(
-            "identity", settings.broker_identity_public_keys
+            "identity", config.identity_public_keys
         )
     receipt_publics: dict[str, Ed25519PublicKey] | None = None
     if receipt_verifier is None:
         receipt_publics = _decode_public_keys(
-            "receipt", settings.broker_receipt_public_keys
+            "receipt", config.receipt_public_keys
         )
         receipt_verifier = CheckpointReceiptVerifier(
             public_keys=VerificationKeySet(receipt_publics),
@@ -455,42 +450,42 @@ async def build_broker_service(
         # identity/receipt public it trusts the app to sign with (decision 11).
         if receipt_publics is None:
             receipt_publics = _decode_public_keys(
-                "receipt", settings.broker_receipt_public_keys
+                "receipt", config.receipt_public_keys
             )
         _reject_cross_boundary_reuse(
             {"capability": capability_roots, "runtime": runtime_roots},
             receipt_publics,
             identity_public_keys,
-            receipt_domain=settings.broker_receipt_domain,
+            receipt_domain=config.receipt_domain,
         )
 
     # The configured generation deadline IS the runtime's absolute maximum
     # lifetime, so the coordinator enforces it and rejects a longer lease
     # (without this the cap silently defaulted to the driver's 86400s).
     runtime_config = DockerRuntimeConfig(
-        runtime_root=Path(settings.broker_runtime_root),
-        state_root=Path(settings.broker_state_root),
-        shared_gid=settings.broker_shared_data_gid,
-        maximum_lifetime_seconds=settings.broker_generation_deadline_seconds,
+        runtime_root=config.runtime_root,
+        state_root=config.state_root,
+        shared_gid=config.shared_data_gid,
+        maximum_lifetime_seconds=config.generation_deadline_seconds,
     )
 
     # --- key material (separated trust domains) --------------------------
     capability = JobCapabilityAuthority(
         CapabilityRootRing(
             capability_roots,
-            current_version=settings.broker_capability_current_version,
+            current_version=config.capability_current_version,
         )
     )
     secret_authority = RuntimeSecretAuthority(
         RuntimeSecretRootRing(
             runtime_roots,
-            current_version=settings.broker_runtime_current_version,
+            current_version=config.runtime_current_version,
         )
     )
     identity_verifier = WorkloadIdentityVerifier(
         public_keys=identity_public_keys,
-        issuer=settings.broker_identity_issuer,
-        audience=settings.broker_identity_audience,
+        issuer=config.identity_issuer,
+        audience=config.identity_audience,
         clock=now,
     )
 
@@ -514,23 +509,15 @@ async def build_broker_service(
         # External mode: the app stages across a uid boundary into the required
         # sibling root; the broker validates the app's ownership and keeps its
         # consumed/discarded markers in a broker-private sibling tree.
-        if not settings.broker_ingress_root:
-            raise ValueError("broker_ingress_root is required in external broker mode")
-        if settings.broker_expected_app_uid is None:
-            raise ValueError(
-                "broker_expected_app_uid is required in external broker mode"
-            )
         workspace_ingress = LocalWorkspaceIngress(
-            Path(settings.broker_ingress_root),
-            expected_stage_uid=settings.broker_expected_app_uid,
-            shared_gid=settings.broker_shared_data_gid,
-            marker_root=Path(settings.broker_runtime_root) / ".ingress-markers",
+            config.ingress_root,
+            expected_stage_uid=config.expected_app_uid,
+            shared_gid=config.shared_data_gid,
+            marker_root=config.runtime_root / ".ingress-markers",
         )
     else:
         # Co-process: one shared instance, unchanged owner-only construction.
-        workspace_ingress = LocalWorkspaceIngress(
-            runtime_config.runtime_root / ".workspace-ingress"
-        )
+        workspace_ingress = LocalWorkspaceIngress(config.ingress_root)
     # Share the whole-second clock so the driver and ledger agree on time.
     runtime = runtime_driver or DockerOpenHandsRuntimeDriver(
         runtime_config,
@@ -541,7 +528,7 @@ async def build_broker_service(
         _POLICY_PROFILE,
         _RUNTIME_DRIVER,
         _DURABLE_DRIVER,
-        settings.broker_execution_lease_seconds,
+        config.execution_lease_seconds,
     )
     coordinator = BrokerSegmentCoordinator(
         ledger=ledger,
@@ -562,15 +549,15 @@ async def build_broker_service(
     )
 
     # --- server (not yet bound) ------------------------------------------
-    socket_path = Path(settings.broker_control_socket_dir) / "control.sock"
+    socket_path = config.control_socket_dir / "control.sock"
     # A group-readable socket + shared gid lets a separate broker container's
     # relay reach the control UDS; owner-only otherwise (unchanged coprocess).
     server = BrokerRpcServer(
         application=application,
         socket_policy=UnixSocketPolicy(
             socket_path,
-            mode=0o660 if settings.broker_shared_data_gid is not None else 0o600,
-            gid=settings.broker_shared_data_gid,
+            mode=0o660 if config.shared_data_gid is not None else 0o600,
+            gid=config.shared_data_gid,
         ),
         peer_provider=_peer_credential_provider(),
         limits=BrokerRpcLimits(
@@ -592,7 +579,7 @@ async def build_broker_service(
 
 
 async def build_broker_client(
-    settings: Settings,
+    config: BrokerClientConfig,
     stack: Any,
     *,
     clock: Callable[[], datetime] | None = None,
@@ -603,73 +590,42 @@ async def build_broker_client(
     """Assemble the app-side broker client (issuer + RPC client + handle).
 
     The identity issuer signs with the injected ephemeral private key (coprocess)
-    or the decoded ``settings.broker_identity_private_key`` (external). Receipt
-    issuer+verifier are derived app-side from ``broker_receipt_roots`` (unchanged
+    or the decoded ``config.identity_private_key`` (external). Receipt
+    issuer+verifier are derived app-side from ``receipt_roots`` (unchanged
     derivation). The stage-side ingress is the injected instance (coprocess — one
     shared instance with the service, so their per-job lock maps stay unified) or
-    a plain handle on ``broker_ingress_root`` (external). **External mode requires
-    all four** of ``broker_identity_private_key``, ``broker_ingress_root``,
-    ``broker_checkpoint_receipt_root``, ``broker_shared_data_gid``; any missing
-    raises. **Raises** on any invalid config; the dispatcher's fail-closed wrapper
-    turns it into ``None`` + a specific log.
+    a plain handle on ``config.ingress_root`` (external). Role-specific
+    requiredness and defaults are resolved before construction. **Raises** on
+    any invalid config; the dispatcher's fail-closed wrapper turns it into
+    ``None`` + a specific log.
     """
+    del stack
+    if not isinstance(config, BrokerClientConfig):
+        raise TypeError("config must be BrokerClientConfig")
     now = _default_clock(clock)
-    external = settings.broker_mode == "external"
-    if not settings.broker_control_socket_dir:
-        raise ValueError(
-            "broker_control_socket_dir is required when the broker is enabled"
-        )
-    if (
-        settings.broker_checkpoint_receipt_root is not None
-        and settings.broker_shared_data_gid is None
-    ):
-        raise ValueError(
-            "broker_shared_data_gid is required when "
-            "broker_checkpoint_receipt_root is set"
-        )
-    if external:
-        missing = [
-            name
-            for name, value in (
-                ("broker_identity_private_key", settings.broker_identity_private_key),
-                ("broker_ingress_root", settings.broker_ingress_root),
-                (
-                    "broker_checkpoint_receipt_root",
-                    settings.broker_checkpoint_receipt_root,
-                ),
-                ("broker_shared_data_gid", settings.broker_shared_data_gid),
-            )
-            if value is None
-        ]
-        if missing:
-            raise ValueError(
-                f"external broker mode requires {', '.join(missing)} to be set"
-            )
 
     # --- identity issuer (client side holds the PRIVATE key) -------------
     if identity_private_key is None:
-        identity_private_key = _decode_identity_seed(
-            settings.broker_identity_private_key
-        )
+        identity_private_key = _decode_identity_seed(config.identity_private_key)
     if identity_key_id is None:
-        identity_key_id = settings.broker_identity_key_id
+        identity_key_id = config.identity_key_id
     identity_issuer = WorkloadIdentityIssuer(
         private_key=identity_private_key,
         key_id=identity_key_id,
-        issuer=settings.broker_identity_issuer,
-        audience=settings.broker_identity_audience,
+        issuer=config.identity_issuer,
+        audience=config.identity_audience,
         clock=now,
     )
 
     # --- receipt issuer (current PRIVATE) + verifier (all PUBLIC) --------
     receipt_roots = _decode_roots(
         "receipt",
-        settings.broker_receipt_roots,
-        settings.broker_receipt_current_version,
+        config.receipt_roots,
+        config.receipt_current_version,
     )
-    receipt_current = settings.broker_receipt_current_version
+    receipt_current = config.receipt_current_version
     receipt_keys = {
-        version: _derive_receipt_key(root, settings.broker_receipt_domain, version)
+        version: _derive_receipt_key(root, config.receipt_domain, version)
         for version, root in receipt_roots.items()
     }
     receipt_issuer = CheckpointReceiptIssuer(
@@ -689,18 +645,13 @@ async def build_broker_client(
     # injected (external) → a stage-side handle on the required sibling root that
     # writes group-shared modes for the broker to read across the boundary.
     if workspace_ingress is None:
-        ingress_root = (
-            Path(settings.broker_ingress_root)
-            if settings.broker_ingress_root
-            else Path(settings.broker_runtime_root) / ".workspace-ingress"
-        )
         workspace_ingress = LocalWorkspaceIngress(
-            ingress_root,
-            shared_gid=settings.broker_shared_data_gid,
+            config.ingress_root,
+            shared_gid=config.shared_data_gid,
         )
 
     # --- RPC client against the control socket ---------------------------
-    socket_path = Path(settings.broker_control_socket_dir) / "control.sock"
+    socket_path = config.control_socket_dir / "control.sock"
     owner = BrokerOwner(_OWNER_TENANT, _OWNER_SUBJECT)
     worker_instance_id: UUID = uuid4()
     assignment_id: UUID = uuid4()
@@ -721,11 +672,6 @@ async def build_broker_client(
         io_timeout_seconds=BROKER_RPC_APPLICATION_TIMEOUT_SECONDS + 5.0,
         total_timeout_seconds=BROKER_RPC_TOTAL_TIMEOUT_SECONDS,
     )
-    receipt_root = (
-        Path(settings.broker_checkpoint_receipt_root)
-        if settings.broker_checkpoint_receipt_root
-        else None
-    )
     return BrokerClientHandle(
         client=client,
         owner=owner,
@@ -733,15 +679,16 @@ async def build_broker_client(
         receipt_verifier=receipt_verifier,
         loop=asyncio.get_running_loop(),
         workspace_ingress=workspace_ingress,
-        shared_data_gid=settings.broker_shared_data_gid,
-        receipt_root=receipt_root,
+        shared_data_gid=config.shared_data_gid,
+        receipt_root=config.checkpoint_receipt_root,
     )
 
 
 async def build_broker(
-    settings: Settings,
+    settings: RuntimeSettings,
     stack: Any,
     *,
+    coprocess_settings: CoprocessBrokerSettings | None = None,
     pool: Any | None = None,
     runtime_driver: RuntimeDriver | None = None,
     clock: Callable[[], datetime] | None = None,
@@ -760,7 +707,8 @@ async def build_broker(
         # Only the client half lives here; the broker service is a separate,
         # fail-fast process. No ledger/coordinator app-side (broker owns recovery).
         try:
-            return await build_broker_client(settings, stack, clock=clock)
+            client_config = BrokerClientConfig.from_runtime_settings(settings)
+            return await build_broker_client(client_config, stack, clock=clock)
         except Exception as exc:  # noqa: BLE001 — boot gate: never crash app startup
             log.error("broker DISABLED: %s", exc)
             return None
@@ -771,37 +719,48 @@ async def build_broker(
     # loudly, never crashing app startup. The socket binds last (second try), so
     # a returned None never leaves a listener bound.
     try:
+        client_config = BrokerClientConfig.from_runtime_settings(
+            settings,
+            coprocess_settings=coprocess_settings,
+        )
+        if coprocess_settings is None:
+            raise ValueError(
+                "coprocess broker mode requires CoprocessBrokerSettings"
+            )
+        service_config = BrokerServiceConfig.from_coprocess_settings(
+            coprocess_settings
+        )
         # The full within-process reuse check across all three root rings — the
         # single-process invariant the split otherwise scatters. build_broker_service
         # re-decodes capability/runtime for authority construction; this decode
         # only feeds the cross-domain reuse gate + the injected receipt verifier.
         capability_roots = _decode_roots(
             "capability",
-            settings.broker_capability_roots,
-            settings.broker_capability_current_version,
+            service_config.capability_roots,
+            service_config.capability_current_version,
         )
         runtime_roots = _decode_roots(
             "runtime",
-            settings.broker_runtime_roots,
-            settings.broker_runtime_current_version,
+            service_config.runtime_roots,
+            service_config.runtime_current_version,
         )
         receipt_roots = _decode_roots(
             "receipt",
-            settings.broker_receipt_roots,
-            settings.broker_receipt_current_version,
+            client_config.receipt_roots,
+            client_config.receipt_current_version,
         )
         _reject_reused_roots(capability_roots, runtime_roots, receipt_roots)
 
         # Ephemeral identity keypair: private -> issuer (client), public ->
         # verifier (service). Nothing at rest; tokens live <=300s in-process.
         identity_key = Ed25519PrivateKey.generate()
-        identity_key_id = settings.broker_identity_key_id
+        identity_key_id = client_config.identity_key_id
 
         # The service verifies receipts with PUBLIC keys only; derive them here
         # from the shared roots and inject the verifier (decision-2 receipt split).
         receipt_keys = {
             version: _derive_receipt_key(
-                root, settings.broker_receipt_domain, version
+                root, client_config.receipt_domain, version
             )
             for version, root in receipt_roots.items()
         }
@@ -813,7 +772,7 @@ async def build_broker(
         )
 
         service = await build_broker_service(
-            settings,
+            service_config,
             stack,
             pool=pool,
             runtime_driver=runtime_driver,
@@ -825,7 +784,7 @@ async def build_broker(
         # independent per-job lock maps, silently breaking today's stage/materialize
         # serialization in-process. Inject the service's instance into the client.
         client = await build_broker_client(
-            settings,
+            client_config,
             stack,
             clock=clock,
             identity_private_key=identity_key,

@@ -22,8 +22,12 @@ from openloop.broker_control import (
     BrokerLifecycleReconciler,
     ReadOnlyCheckpointReceiptLocator,
 )
+from openloop.broker_config import (
+    DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR,
+    BrokerServiceConfig,
+)
 from openloop.broker_rpc.server import take_over_stale_socket
-from openloop.config import Settings
+from openloop.config import BrokerSettings
 from openloop.postgres import create_pool
 from openloop.wiring.broker import build_broker_service
 
@@ -77,9 +81,11 @@ def _healthcheck_socket(control_socket_dir: str | None) -> int:
     return 0
 
 
-def healthcheck(settings: Settings) -> int:
-    """Probe the control socket from an already constructed settings object."""
-    return _healthcheck_socket(settings.broker_control_socket_dir)
+def healthcheck(config: BrokerServiceConfig) -> int:
+    """Probe the control socket from an already constructed service config."""
+    if not isinstance(config, BrokerServiceConfig):
+        raise TypeError("config must be BrokerServiceConfig")
+    return _healthcheck_socket(os.fspath(config.control_socket_dir))
 
 
 def _log_recovery_report(prefix: str, report: Any) -> None:
@@ -123,24 +129,20 @@ async def _periodic_reconcile(
 
 
 async def run_broker(
-    settings: Settings,
+    settings: BrokerSettings,
     *,
     _reconciler_factory: Callable[..., Any] | None = None,
     _shutdown_event: asyncio.Event | None = None,
 ) -> int:
     """Recover, bind, and serve the external broker until a stop signal."""
-    if not isinstance(settings, Settings):
-        raise TypeError("settings must be Settings")
-    if settings.broker_mode != "external":
-        log.error("openloop-broker requires BROKER_MODE=external")
-        return 2
+    if not isinstance(settings, BrokerSettings):
+        raise TypeError("settings must be BrokerSettings")
 
     signal_loop: asyncio.AbstractEventLoop | None = None
     installed_signals: list[signal.Signals] = []
     try:
-        if not settings.broker_control_socket_dir:
-            raise ValueError("broker_control_socket_dir is required")
-        socket_dir = Path(settings.broker_control_socket_dir)
+        config = BrokerServiceConfig.from_broker_settings(settings)
+        socket_dir = config.control_socket_dir
         socket_path = socket_dir / "control.sock"
         lock_path = socket_dir / "broker.lock"
 
@@ -170,31 +172,16 @@ async def run_broker(
                 stack.push_async_callback(pool.close)
 
             log.info("broker startup: building unbound service graph")
-            service = await build_broker_service(settings, stack, pool=pool)
+            service = await build_broker_service(config, stack, pool=pool)
 
-            receipt_root = settings.broker_checkpoint_receipt_root
-            expected_uid = settings.broker_expected_app_uid
-            expected_gid = settings.broker_shared_data_gid
-            if receipt_root is None:
-                raise ValueError(
-                    "broker_checkpoint_receipt_root is required in external mode"
-                )
-            if expected_uid is None:
-                raise ValueError(
-                    "broker_expected_app_uid is required in external mode"
-                )
-            if expected_gid is None:
-                raise ValueError(
-                    "broker_shared_data_gid is required in external mode"
-                )
             log.info(
                 "broker startup: building receipt locator and lifecycle reconciler"
             )
             locator = ReadOnlyCheckpointReceiptLocator(
-                root=Path(receipt_root),
+                root=config.checkpoint_receipt_root,
                 verifier=service.receipt_verifier,
-                expected_uid=expected_uid,
-                expected_gid=expected_gid,
+                expected_uid=config.expected_app_uid,
+                expected_gid=config.shared_data_gid,
             )
             factory = _reconciler_factory or BrokerLifecycleReconciler
             reconciler = factory(
@@ -235,9 +222,7 @@ async def run_broker(
                 tasks.create_task(
                     _periodic_reconcile(
                         reconciler,
-                        interval_seconds=(
-                            settings.broker_reconcile_interval_seconds
-                        ),
+                        interval_seconds=settings.broker_reconcile_interval_seconds,
                         shutdown=shutdown,
                     )
                 )
@@ -299,7 +284,7 @@ def _log_settings_validation(error: ValidationError) -> None:
 def main(
     argv: list[str] | None = None,
     *,
-    load_settings: Callable[[], Settings] = Settings,
+    load_settings: Callable[[], BrokerSettings] = BrokerSettings,
 ) -> int:
     """Console entrypoint for the broker service and active health probe.
 
@@ -310,7 +295,12 @@ def main(
     """
     args = _parser().parse_args(argv)
     if args.healthcheck:
-        return _healthcheck_socket(os.environ.get("BROKER_CONTROL_SOCKET_DIR"))
+        return _healthcheck_socket(
+            os.environ.get(
+                "BROKER_CONTROL_SOCKET_DIR",
+                os.fspath(DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR),
+            )
+        )
     try:
         settings = load_settings()
     except ValidationError as error:

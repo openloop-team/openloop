@@ -21,7 +21,7 @@ from openhands.sdk import Agent, LLM, Tool
 from openhands.tools.file_editor import FileEditorTool
 from openhands.tools.terminal import TerminalTool
 
-from openloop.config import Settings
+from openloop.config import BrokerSettings, RuntimeSettings
 from openloop.tools.coding_worker import WorkerState
 from openloop.tools.openhands_resume import ResumeDecision, WorkerPaused
 from openloop.wiring.broker import _derive_receipt_key, build_broker
@@ -62,7 +62,10 @@ def _repository(root: Path) -> tuple[Path, str]:
     return source, base_commit
 
 
-def _settings(root: Path, socket_root: Path) -> Settings:
+def _settings(
+    root: Path,
+    socket_root: Path,
+) -> tuple[RuntimeSettings, BrokerSettings]:
     topology = os.environ.get("OPENLOOP_CANARY_BROKER_MODE", "subprocess")
     if topology not in _BROKER_TOPOLOGIES:
         raise RuntimeError(f"unsupported canary broker topology: {topology}")
@@ -149,14 +152,14 @@ def _settings(root: Path, socket_root: Path) -> Settings:
             },
             broker_reconcile_interval_seconds=60,
         )
-    return Settings(**values)
+    return RuntimeSettings(**values), BrokerSettings(**values)
 
 
 def _secret_map(values) -> dict[str, str]:
     return {name: secret.get_secret_value() for name, secret in values.items()}
 
 
-def _broker_environment(settings: Settings) -> dict[str, str]:
+def _broker_environment(settings: BrokerSettings) -> dict[str, str]:
     environment = os.environ.copy()
     for name in (
         "BROKER_IDENTITY_PRIVATE_KEY",
@@ -176,7 +179,6 @@ def _broker_environment(settings: Settings) -> dict[str, str]:
         environment.pop(name, None)
     environment.update(
         {
-            "BROKER_MODE": "external",
             "BROKER_DEV_IN_MEMORY": "1",
             "BROKER_CONTROL_SOCKET_DIR": settings.broker_control_socket_dir,
             "BROKER_STATE_ROOT": settings.broker_state_root,
@@ -211,7 +213,10 @@ def _broker_environment(settings: Settings) -> dict[str, str]:
     return environment
 
 
-def _wait_for_broker(settings: Settings, process: subprocess.Popen | None) -> None:
+def _wait_for_broker(
+    settings: RuntimeSettings,
+    process: subprocess.Popen | None,
+) -> None:
     socket_path = Path(settings.broker_control_socket_dir) / "control.sock"
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
@@ -305,11 +310,11 @@ async def _run() -> dict[str, object]:
     broker_process: subprocess.Popen | None = None
     try:
         source, base_commit = _repository(root)
-        settings = _settings(root, socket_root)
+        settings, broker_settings = _settings(root, socket_root)
         if topology == "subprocess":
             broker_process = subprocess.Popen(
                 [sys.executable, "-m", "openloop.broker_main"],
-                env=_broker_environment(settings),
+                env=_broker_environment(broker_settings),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

@@ -1,11 +1,11 @@
-"""Provider credentials loaded by Settings reach each LiteLLM call explicitly."""
+"""Provider credentials loaded by RuntimeSettings reach each LiteLLM call explicitly."""
 
 from __future__ import annotations
 
 import sys
 from types import SimpleNamespace
 
-from openloop.config import Settings
+from openloop.config import RuntimeSettings
 from openloop.memory.embeddings import LiteLLMEmbedder
 from openloop.models.gateway import ModelGateway
 from openloop.wiring.builders import build_embedder, build_model_gateway
@@ -88,7 +88,7 @@ def test_builders_transfer_a_mounted_key_to_model_clients(tmp_path):
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
     (secrets_dir / "openai_api_key").write_text("mounted-openai-secret\n")
-    settings = Settings(_env_file=None, _secrets_dir=secrets_dir)
+    settings = RuntimeSettings(_env_file=None, _secrets_dir=secrets_dir)
 
     gateway = build_model_gateway(settings)
     embedder = build_embedder(settings)

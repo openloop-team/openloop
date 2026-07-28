@@ -21,13 +21,17 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import SecretStr
 
 import openloop.broker_main as broker_entrypoint
+from openloop.broker_config import BrokerClientConfig, BrokerServiceConfig
 from openloop.broker_control import RecoveryPassReport
 from openloop.broker_main import healthcheck, run_broker
 from openloop.broker_rpc.client import BrokerRpcClientProblem
 from openloop.broker_rpc.server import SocketPathProblem, take_over_stale_socket
 from openloop.wiring.broker import _derive_receipt_key, build_broker_client
 from tests.support.processes import cleanup_processes
-from tests.support.settings import IsolatedSettings as Settings
+from tests.support.settings import (
+    IsolatedBrokerSettings as Settings,
+    IsolatedSettings as RuntimeSettings,
+)
 
 
 _IDENTITY_SEED = bytes(range(1, 33))
@@ -89,18 +93,6 @@ def _settings(root: Path, **overrides) -> Settings:
     ingress.chmod(0o2750)
     receipts.chmod(0o2750)
     values = dict(
-        openai_api_key="",
-        anthropic_api_key="",
-        gemini_api_key="",
-        openrouter_api_key="",
-        slack_bot_token=None,
-        slack_signing_secret=None,
-        slack_app_token=None,
-        github_token=None,
-        github_app_id=None,
-        github_app_private_key_path=None,
-        github_app_installation_id=None,
-        broker_mode="external",
         broker_dev_in_memory=True,
         broker_control_socket_dir=str(control),
         broker_state_root=str(state),
@@ -111,12 +103,6 @@ def _settings(root: Path, **overrides) -> Settings:
         broker_expected_app_uid=os.getuid(),
         broker_capability_roots={"cap-key-v1": _root(1)},
         broker_runtime_roots={"runtime-key-v1": _root(2)},
-        broker_receipt_roots={
-            "receipt-key-v1": base64.b64encode(_RECEIPT_ROOT).decode()
-        },
-        broker_identity_private_key=SecretStr(
-            base64.b64encode(_IDENTITY_SEED).decode()
-        ),
         broker_identity_public_keys={
             "identity-v1": base64.b64encode(identity_public).decode()
         },
@@ -127,6 +113,26 @@ def _settings(root: Path, **overrides) -> Settings:
     )
     values.update(overrides)
     return Settings(**values)
+
+
+def _client_settings(settings: Settings, **overrides) -> RuntimeSettings:
+    values = dict(
+        broker_mode="external",
+        broker_control_socket_dir=settings.broker_control_socket_dir,
+        broker_ingress_root=settings.broker_ingress_root,
+        broker_checkpoint_receipt_root=(
+            settings.broker_checkpoint_receipt_root
+        ),
+        broker_shared_data_gid=settings.broker_shared_data_gid,
+        broker_identity_private_key=SecretStr(
+            base64.b64encode(_IDENTITY_SEED).decode()
+        ),
+        broker_receipt_roots={
+            "receipt-key-v1": base64.b64encode(_RECEIPT_ROOT).decode()
+        },
+    )
+    values.update(overrides)
+    return RuntimeSettings(**values)
 
 
 def _empty_report(*, failed_closed: int = 0, error: int = 0):
@@ -204,10 +210,8 @@ async def test_startup_recovery_exception_prevents_bind(broker_dir):
     assert not (Path(settings.broker_control_socket_dir) / "control.sock").exists()
 
 
-async def test_separate_process_refuses_coprocess_mode_before_lock(broker_dir):
-    settings = _settings(broker_dir, broker_mode="coprocess")
-    assert await run_broker(settings) == 2
-    assert not (Path(settings.broker_control_socket_dir) / "broker.lock").exists()
+def test_external_broker_settings_have_no_runtime_mode_switch():
+    assert "broker_mode" not in Settings.model_fields
 
 
 async def test_failed_closed_report_allows_bind_and_clean_shutdown(broker_dir):
@@ -297,7 +301,6 @@ def _subprocess_env(settings: Settings) -> dict[str, str]:
     }
     env.update(
         {
-            "BROKER_MODE": "external",
             "BROKER_DEV_IN_MEMORY": "1",
             "BROKER_CONTROL_SOCKET_DIR": settings.broker_control_socket_dir,
             "BROKER_STATE_ROOT": settings.broker_state_root,
@@ -326,21 +329,6 @@ def _subprocess_env(settings: Settings) -> dict[str, str]:
             "BROKER_RECEIPT_PUBLIC_KEYS": json.dumps(
                 settings.broker_receipt_public_keys
             ),
-            # The broker process owns only public app trust material. Explicit
-            # empty values also make that boundary visible in diagnostics.
-            "BROKER_IDENTITY_PRIVATE_KEY": "",
-            "BROKER_RECEIPT_ROOTS": "{}",
-            "OPENAI_API_KEY": "",
-            "ANTHROPIC_API_KEY": "",
-            "GEMINI_API_KEY": "",
-            "OPENROUTER_API_KEY": "",
-            "SLACK_BOT_TOKEN": "",
-            "SLACK_SIGNING_SECRET": "",
-            "SLACK_APP_TOKEN": "",
-            "GITHUB_TOKEN": "",
-            "GITHUB_APP_ID": "",
-            "GITHUB_APP_PRIVATE_KEY_PATH": "",
-            "GITHUB_APP_INSTALLATION_ID": "",
             "BROKER_RECONCILE_INTERVAL_SECONDS": "60",
             "LOG_LEVEL": "info",
         }
@@ -356,7 +344,7 @@ def _wait_until_healthy(settings: Settings, process: subprocess.Popen) -> None:
             pytest.fail(
                 f"broker exited {process.returncode} before healthy:\n{error}"
             )
-        if healthcheck(settings) == 0:
+        if healthcheck(BrokerServiceConfig.from_broker_settings(settings)) == 0:
             return
         time.sleep(0.05)
     pytest.fail("broker did not become healthy")
@@ -416,21 +404,28 @@ async def test_two_process_client_seam_lock_and_signal_shutdown(broker_dir):
         assert healthy.returncode == 0, healthy.stderr
 
         async with AsyncExitStack() as stack:
-            client = await build_broker_client(settings, stack)
+            client_settings = _client_settings(settings)
+            client = await build_broker_client(
+                BrokerClientConfig.from_runtime_settings(client_settings),
+                stack,
+            )
             created = await client.client.create_job("entrypoint-process-seam-0001")
             inspected = await client.client.inspect_job(
                 created.ticket.job_id, created.capability
             )
             assert inspected.snapshot.job_id == created.ticket.job_id
 
-        bad_settings = _settings(
-            broker_dir,
+        bad_settings = _client_settings(
+            settings,
             broker_identity_private_key=SecretStr(
                 base64.b64encode(bytes([9]) * 32).decode()
             ),
         )
         async with AsyncExitStack() as stack:
-            bad_client = await build_broker_client(bad_settings, stack)
+            bad_client = await build_broker_client(
+                BrokerClientConfig.from_runtime_settings(bad_settings),
+                stack,
+            )
             with pytest.raises(BrokerRpcClientProblem):
                 await bad_client.client.create_job("entrypoint-bad-identity-0001")
 
@@ -507,7 +502,9 @@ def test_entrypoint_refuses_cross_boundary_root_reuse(broker_dir):
     )
     assert refused.returncode == 1
     assert "reuse across the process boundary" in refused.stderr
-    assert healthcheck(settings) == 1
+    assert (
+        healthcheck(BrokerServiceConfig.from_broker_settings(settings)) == 1
+    )
 
 
 @pytest.mark.postgres

@@ -1,6 +1,6 @@
 """Where configuration values come from, and which source wins.
 
-`Settings` loads from mounted secret files, the environment, and
+`RuntimeSettings` loads from mounted secret files, the environment, and
 `.runtime.env`. One is constructed at each process entrypoint and passed down;
 consumers take it as an argument rather than reaching for a global.
 
@@ -11,7 +11,7 @@ arguments and declared defaults but ignores ambient sources entirely.
 
 import pytest
 
-from openloop.config import Settings
+from openloop.config import BrokerSettings, RuntimeSettings
 from tests.support.settings import IsolatedSettings
 
 
@@ -28,19 +28,19 @@ def ambient(monkeypatch, tmp_path):
 
 
 def test_reads_the_dotenv_regular_file(ambient):
-    assert Settings().ollama_base_url == "http://from-dotenv:1111"
+    assert RuntimeSettings().ollama_base_url == "http://from-dotenv:1111"
 
 
 def test_dotenv_parses_complex_field_json(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".runtime.env").write_text(
+    (tmp_path / ".broker.env").write_text(
         "BROKER_CAPABILITY_ROOTS='"
         '{"cap-key-v1":"dotenv-root"}'
         "'\n"
     )
     monkeypatch.delenv("BROKER_CAPABILITY_ROOTS", raising=False)
 
-    settings = Settings(_secrets_dir=tmp_path / "missing-secrets")
+    settings = BrokerSettings(_secrets_dir=tmp_path / "missing-secrets")
 
     assert settings.broker_capability_roots[
         "cap-key-v1"
@@ -48,13 +48,13 @@ def test_dotenv_parses_complex_field_json(monkeypatch, tmp_path):
 
 
 def test_reads_the_process_environment(ambient):
-    assert Settings().storage_mode == "postgres"
+    assert RuntimeSettings().storage_mode == "postgres"
 
 
 def test_the_environment_outranks_the_dotenv_file(ambient, monkeypatch):
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://from-environ:2222")
 
-    assert Settings().ollama_base_url == "http://from-environ:2222"
+    assert RuntimeSettings().ollama_base_url == "http://from-environ:2222"
 
 
 def test_reads_a_mounted_secret_file(ambient, tmp_path):
@@ -62,7 +62,7 @@ def test_reads_a_mounted_secret_file(ambient, tmp_path):
     secrets_dir.mkdir()
     (secrets_dir / "openai_api_key").write_text("mounted-provider-secret\n")
 
-    settings = Settings(_secrets_dir=secrets_dir)
+    settings = RuntimeSettings(_secrets_dir=secrets_dir)
 
     assert settings.openai_api_key == "mounted-provider-secret"
 
@@ -74,7 +74,7 @@ def test_mounted_secret_parses_complex_field_json(ambient, tmp_path):
         '{"cap-key-v1":"mounted-root"}\n'
     )
 
-    settings = Settings(_secrets_dir=secrets_dir)
+    settings = BrokerSettings(_secrets_dir=secrets_dir)
 
     assert settings.broker_capability_roots["cap-key-v1"].get_secret_value() == (
         "mounted-root"
@@ -89,7 +89,7 @@ def test_sensitive_mounted_values_are_masked_in_settings_repr(ambient, tmp_path)
         "mounted-claude-secret\n"
     )
 
-    settings = Settings(_secrets_dir=secrets_dir)
+    settings = RuntimeSettings(_secrets_dir=secrets_dir)
 
     assert settings.postgres_password is not None
     assert settings.postgres_password.get_secret_value() == "mounted-db-secret"
@@ -110,7 +110,7 @@ def test_a_mounted_secret_outranks_environment_and_dotenv(
     (secrets_dir / "ollama_base_url").write_text("http://from-secret:4444\n")
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://from-environ:2222")
 
-    settings = Settings(_secrets_dir=secrets_dir)
+    settings = RuntimeSettings(_secrets_dir=secrets_dir)
 
     assert settings.ollama_base_url == "http://from-secret:4444"
 
@@ -124,7 +124,7 @@ def test_an_explicit_argument_outranks_all_external_sources(
     (secrets_dir / "ollama_base_url").write_text("http://from-secret:4444\n")
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://from-environ:2222")
 
-    settings = Settings(
+    settings = RuntimeSettings(
         _secrets_dir=secrets_dir,
         ollama_base_url="http://explicit:3333",
         storage_mode="memory",
@@ -137,7 +137,7 @@ def test_an_explicit_argument_outranks_all_external_sources(
 def test_env_file_none_still_reads_the_environment(ambient):
     """`_env_file=None` silences the dotenv file only — a common misreading,
     since the environment remains a source."""
-    settings = Settings(_env_file=None)
+    settings = RuntimeSettings(_env_file=None)
 
     assert settings.ollama_base_url == "http://localhost:11434"
     assert settings.storage_mode == "postgres"
@@ -147,7 +147,7 @@ def test_missing_secret_file_falls_back_to_ambient_sources(ambient, tmp_path):
     secrets_dir = tmp_path / "empty-secrets"
     secrets_dir.mkdir()
 
-    settings = Settings(_secrets_dir=secrets_dir)
+    settings = RuntimeSettings(_secrets_dir=secrets_dir)
 
     assert settings.ollama_base_url == "http://from-dotenv:1111"
     assert settings.storage_mode == "postgres"

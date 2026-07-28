@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from openloop.config import Settings
+from openloop.config import RuntimeSettings
 from openloop.memory.embeddings import Embedder
 from openloop.models.gateway import ModelResponse, ToolCall
 from openloop.tasks.outcomes import EvidenceBundle
@@ -25,7 +25,7 @@ def in_memory_workflow_engine() -> WorkflowEngine:
 
 @asynccontextmanager
 async def memory_context(
-    settings: Settings | None = None,
+    settings: RuntimeSettings | None = None,
     agents=None,
     *,
     overrides: dict[str, Any] | None = None,
@@ -33,7 +33,7 @@ async def memory_context(
     """Compose the real application graph with explicitly process-local stores."""
     from openloop.wiring import compose
 
-    configured = (settings or Settings()).model_copy(
+    configured = (settings or RuntimeSettings()).model_copy(
         update={"storage_mode": "memory"}
     )
     async with compose(configured, agents, overrides=overrides) as ctx:

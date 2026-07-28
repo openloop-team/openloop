@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import logging
 
-from openloop.config import Settings
+from openloop.config import RuntimeSettings
 
 logger = logging.getLogger("openloop.slack_socket")
 
 
-async def run_socket(settings: Settings) -> None:
+async def run_socket(settings: RuntimeSettings) -> None:
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
     from openloop.wiring import compose
@@ -41,10 +41,10 @@ def main() -> None:
     """Process entrypoint: load configuration once, then compose with it."""
     import asyncio
 
-    from openloop.config import Settings
+    from openloop.config import RuntimeSettings
 
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(run_socket(Settings()))
+    asyncio.run(run_socket(RuntimeSettings()))
 
 
 if __name__ == "__main__":

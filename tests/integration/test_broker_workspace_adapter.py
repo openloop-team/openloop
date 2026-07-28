@@ -37,7 +37,10 @@ from openloop.tools.openhands_worker import (
 from openloop.tools.coding_worker import WorkerState
 from openloop.tools.openhands_relay_client import RelayClientEndpoint, RelayMode
 from openloop.wiring.broker import build_broker
-from tests.support.settings import IsolatedSettings as Settings
+from tests.support.settings import (
+    IsolatedCoprocessBrokerSettings,
+    IsolatedSettings as Settings,
+)
 
 
 @pytest.fixture
@@ -66,7 +69,7 @@ def _settings(tmp_path, sock_dir, **overrides):
         broker_execution_lease_seconds=300,
     )
     base.update(overrides)
-    return Settings(**base)
+    return Settings(**base), IsolatedCoprocessBrokerSettings(**base)
 
 
 class _FakeWorkspace:
@@ -74,12 +77,18 @@ class _FakeWorkspace:
         self.endpoint = endpoint
 
 
-async def _broker_adapter(stack, tmp_path, sock_dir, factory):
-    handle = await build_broker(
-        _settings(tmp_path, sock_dir),
+async def _build_test_broker(stack, tmp_path, sock_dir):
+    settings, coprocess = _settings(tmp_path, sock_dir)
+    return await build_broker(
+        settings,
         stack,
+        coprocess_settings=coprocess,
         runtime_driver=InMemoryRuntimeDriver(),
     )
+
+
+async def _broker_adapter(stack, tmp_path, sock_dir, factory):
+    handle = await _build_test_broker(stack, tmp_path, sock_dir)
     assert handle is not None
     return BrokerWorkspaceAdapter(
         client=handle.client,
@@ -122,11 +131,7 @@ async def test_create_prunes_staged_tree_after_start(tmp_path, sock_dir):
     (seed / "file.txt").write_text("payload")
 
     async with AsyncExitStack() as stack:
-        handle = await build_broker(
-            _settings(tmp_path, sock_dir),
-            stack,
-            runtime_driver=InMemoryRuntimeDriver(),
-        )
+        handle = await _build_test_broker(stack, tmp_path, sock_dir)
         assert handle is not None
         adapter = BrokerWorkspaceAdapter(
             client=handle.client,
@@ -169,11 +174,7 @@ def _sign_receipt(handle, adapter, job_id, *, generation, barrier, suffix):
 async def test_park_resume_finalize_lifecycle(tmp_path, sock_dir):
     job = "job-lifecycle-01"
     async with AsyncExitStack() as stack:
-        handle = await build_broker(
-            _settings(tmp_path, sock_dir),
-            stack,
-            runtime_driver=InMemoryRuntimeDriver(),
-        )
+        handle = await _build_test_broker(stack, tmp_path, sock_dir)
         assert handle is not None
         adapter = BrokerWorkspaceAdapter(
             client=handle.client,
@@ -227,11 +228,7 @@ async def test_checkpoint_store_receipt_is_accepted_by_broker(tmp_path, sock_dir
 
     job = "job-checkpoint-01"
     async with AsyncExitStack() as stack:
-        handle = await build_broker(
-            _settings(tmp_path, sock_dir),
-            stack,
-            runtime_driver=InMemoryRuntimeDriver(),
-        )
+        handle = await _build_test_broker(stack, tmp_path, sock_dir)
         assert handle is not None
         adapter = BrokerWorkspaceAdapter(
             client=handle.client,
@@ -408,11 +405,7 @@ async def test_worker_checkpoint_park_resume_finalize_over_real_rpc(tmp_path, so
     patches = [b"", final_patch]
 
     async with AsyncExitStack() as stack:
-        handle = await build_broker(
-            _settings(tmp_path, sock_dir),
-            stack,
-            runtime_driver=InMemoryRuntimeDriver(),
-        )
+        handle = await _build_test_broker(stack, tmp_path, sock_dir)
         assert handle is not None
         layout = OpenHandsStateLayout(tmp_path / "artifacts")
         keys = OpenHandsKeyDeriver(bytes(range(32)), master_key_id="artifact-v1")
@@ -488,11 +481,7 @@ async def test_worker_checkpoint_park_resume_finalize_over_real_rpc(tmp_path, so
 async def test_recover_checkpoint_replays_pre_effect_app_intents(tmp_path, sock_dir):
     job = "job-recovery-0001"
     async with AsyncExitStack() as stack:
-        handle = await build_broker(
-            _settings(tmp_path, sock_dir),
-            stack,
-            runtime_driver=InMemoryRuntimeDriver(),
-        )
+        handle = await _build_test_broker(stack, tmp_path, sock_dir)
         assert handle is not None
         artifacts = WorkspaceArtifactStore(
             OpenHandsStateLayout(tmp_path / "recovery-artifacts"),

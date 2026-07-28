@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import SecretStr
 
 from openloop.agents import load_agent
+from openloop.broker_config import BrokerServiceConfig
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.coordination import InProcessLock, PostgresLock
@@ -20,7 +21,10 @@ from openloop.tools.openhands_broker_workspace import BrokerWorkspaceAdapter
 from openloop.wiring import compose
 from openloop.wiring import builders
 from openloop.wiring.broker import _derive_receipt_key, build_broker_service
-from tests.support.settings import IsolatedSettings as Settings
+from tests.support.settings import (
+    IsolatedBrokerSettings,
+    IsolatedSettings as Settings,
+)
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 composemod = importlib.import_module("openloop.wiring.compose")
@@ -141,15 +145,24 @@ async def test_external_broker_mode_wires_adapter_without_app_reconciler(
         github_token="test-token",
         broker_mode="external",
         broker_control_socket_dir=str(short_socket_root),
+        broker_ingress_root=str(app_ingress),
+        broker_checkpoint_receipt_root=str(app_receipts),
+        broker_shared_data_gid=os.getgid(),
+        broker_identity_private_key=SecretStr(
+            base64.b64encode(identity_seed).decode()
+        ),
+        broker_receipt_roots={
+            "receipt-key-v1": base64.b64encode(receipt_root).decode()
+        },
+    )
+    broker_settings = IsolatedBrokerSettings(
+        broker_control_socket_dir=str(short_socket_root),
         broker_state_root=str(broker_state),
         broker_runtime_root=str(broker_runtime),
         broker_ingress_root=str(app_ingress),
         broker_checkpoint_receipt_root=str(app_receipts),
         broker_shared_data_gid=os.getgid(),
         broker_expected_app_uid=os.getuid(),
-        broker_identity_private_key=SecretStr(
-            base64.b64encode(identity_seed).decode()
-        ),
         broker_identity_public_keys={
             "identity-v1": base64.b64encode(
                 identity_private.public_key().public_bytes_raw()
@@ -157,9 +170,6 @@ async def test_external_broker_mode_wires_adapter_without_app_reconciler(
         },
         broker_capability_roots={"cap-key-v1": _broker_root(1)},
         broker_runtime_roots={"runtime-key-v1": _broker_root(2)},
-        broker_receipt_roots={
-            "receipt-key-v1": base64.b64encode(receipt_root).decode()
-        },
         broker_receipt_public_keys={
             "receipt-key-v1": base64.b64encode(receipt_public).decode()
         },
@@ -179,7 +189,7 @@ async def test_external_broker_mode_wires_adapter_without_app_reconciler(
 
     async with AsyncExitStack() as broker_stack:
         service = await build_broker_service(
-            settings,
+            BrokerServiceConfig.from_broker_settings(broker_settings),
             broker_stack,
             runtime_driver=InMemoryRuntimeDriver(),
         )

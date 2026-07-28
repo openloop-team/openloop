@@ -20,6 +20,10 @@ RUNTIME_COMPOSITIONS = (
 )
 COMPOSITIONS = (*RUNTIME_COMPOSITIONS, OVERRIDE)
 BROKER_ROOT = "${OPENLOOP_BROKER_ROOT:?}"
+BROKER_CONTAINER_ROOT = "/var/lib/openloop/broker"
+BROKER_CONTROL = f"{BROKER_CONTAINER_ROOT}/control"
+BROKER_INGRESS = f"{BROKER_CONTAINER_ROOT}/ingress"
+BROKER_RECEIPTS = f"{BROKER_CONTAINER_ROOT}/receipts"
 COMPOSE_DATABASE_URL = (
     "postgresql://${POSTGRES_USER:-openloop}"
     "@postgres:5432/${POSTGRES_DB:-openloop}"
@@ -162,11 +166,27 @@ def test_adapter_is_the_only_raw_socket_owner_and_is_stripped_down():
     assert RAW_SOCKET not in runtime_mounts
     assert ADAPTER_DATA not in runtime_mounts
     assert "DOCKER_HOST" not in runtime["environment"]
-    assert broker_mounts[f"{BROKER_ROOT}/receipts"]["read_only"] is True
-    for suffix in ("control", "state", "runtime", "ingress", "receipts"):
-        assert broker_mounts[f"{BROKER_ROOT}/{suffix}"]["bind"] == {
-            "create_host_path": True
-        }
+    broker_bind_sources = {
+        BROKER_CONTROL: f"{BROKER_ROOT}/control",
+        f"{BROKER_ROOT}/state": f"{BROKER_ROOT}/state",
+        f"{BROKER_ROOT}/runtime": f"{BROKER_ROOT}/runtime",
+        BROKER_INGRESS: f"{BROKER_ROOT}/ingress",
+        BROKER_RECEIPTS: f"{BROKER_ROOT}/receipts",
+    }
+    for target, source in broker_bind_sources.items():
+        assert broker_mounts[target]["source"] == source
+        assert broker_mounts[target]["bind"] == {"create_host_path": True}
+    assert broker_mounts[BROKER_RECEIPTS]["read_only"] is True
+
+    runtime_bind_sources = {
+        BROKER_CONTROL: f"{BROKER_ROOT}/control",
+        f"{BROKER_ROOT}/runtime": f"{BROKER_ROOT}/runtime",
+        BROKER_INGRESS: f"{BROKER_ROOT}/ingress",
+        BROKER_RECEIPTS: f"{BROKER_ROOT}/receipts",
+    }
+    for target, source in runtime_bind_sources.items():
+        assert runtime_mounts[target]["source"] == source
+        assert runtime_mounts[target]["bind"] == {"create_host_path": True}
     assert "user" not in runtime
     assert runtime["group_add"] == ["${OPENLOOP_DATA_GID:-10777}"]
     assert _compose()["volumes"] == {"docker-socket-adapter-data": None}
@@ -186,8 +206,19 @@ def test_broker_has_explicit_external_environment_health_and_ordering():
     assert broker["environment"]["DATABASE_URL"] == COMPOSE_DATABASE_URL
     assert "PGPASSWORD" not in broker["environment"]
     assert "POSTGRES_PASSWORD" not in broker["environment"]
-    assert broker["environment"]["BROKER_MODE"] == "external"
+    assert "BROKER_MODE" not in broker["environment"]
     assert runtime["environment"]["BROKER_MODE"] == "external"
+    defaulted_paths = {
+        "BROKER_CONTROL_SOCKET_DIR",
+        "BROKER_INGRESS_ROOT",
+        "BROKER_CHECKPOINT_RECEIPT_ROOT",
+    }
+    assert defaulted_paths.isdisjoint(broker["environment"])
+    assert defaulted_paths.isdisjoint(runtime["environment"])
+    assert broker["environment"]["BROKER_STATE_ROOT"] == f"{BROKER_ROOT}/state"
+    assert broker["environment"]["BROKER_RUNTIME_ROOT"] == f"{BROKER_ROOT}/runtime"
+    assert "BROKER_STATE_ROOT" not in runtime["environment"]
+    assert "BROKER_RUNTIME_ROOT" not in runtime["environment"]
     assert broker["depends_on"] == {
         "docker-socket-adapter": {"condition": "service_healthy"},
         "broker-init": {"condition": "service_completed_successfully"},
