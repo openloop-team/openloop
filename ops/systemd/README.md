@@ -28,14 +28,17 @@ normal whole-stack control point.
 ## Prerequisites
 
 Install Docker Engine and the Docker Compose plugin using Docker's
-[Ubuntu instructions](https://docs.docker.com/engine/install/ubuntu/). Docker
-officially supports Ubuntu Resolute 26.04 LTS.
+[Ubuntu instructions](https://docs.docker.com/engine/install/ubuntu/). Install
+the Doppler CLI using Doppler's
+[Debian/Ubuntu instructions](https://docs.doppler.com/docs/install-cli).
 
-Verify the required commands and daemon:
+Verify the required commands and Docker daemon:
 
 ```bash
 test -x /usr/bin/docker
+test -x /usr/bin/doppler
 sudo /usr/bin/docker compose version
+/usr/bin/doppler --version
 sudo systemctl is-active docker.service
 ```
 
@@ -48,20 +51,16 @@ before a unit can start:
 /opt/openloop/.env
 /opt/openloop/configs/prd/runtime.env
 /opt/openloop/configs/prd/broker.env
-/etc/openloop/openloop-secrets.env
+/var/lib/openloop/runtime/
+/var/lib/openloop/broker/
 ```
 
-Create the non-secret Compose interpolation file and install the systemd secret
-environment template:
+Create the non-secret Compose interpolation file:
 
 ```bash
 cd /opt/openloop
 sudo install -o root -g root -m 0644 .env.example .env
-sudo install -d -o root -g root -m 0700 /etc/openloop
-sudo install -o root -g root -m 0600 \
-  ops/systemd/openloop-secrets.env.example \
-  /etc/openloop/openloop-secrets.env
-sudoedit /etc/openloop/openloop-secrets.env
+sudoedit /opt/openloop/.env
 ```
 
 Keep the trust domains separate:
@@ -71,20 +70,69 @@ Keep the trust domains separate:
 - `configs/prd/runtime.env` contains tracked non-secret runtime settings.
 - `configs/prd/broker.env` contains tracked non-secret broker settings and
   derived app public keys.
-- `/etc/openloop/openloop-secrets.env` contains every true secret consumed by
-  the Compose process.
+- The runtime Doppler config contains runtime secrets and the Postgres
+  password.
+- The broker Doppler config contains only broker-owned roots and the same
+  Postgres password.
 
-Protect the secret environment file from non-root reads:
+`DOPPLER_CONFIG_DIR` is deliberately different for the two trust domains:
+
+| Doppler CLI directory | Used by | Required secrets |
+| --- | --- | --- |
+| `/var/lib/openloop/runtime` | Postgres and runtime units | `POSTGRES_PASSWORD`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `GITHUB_TOKEN`, `GITHUB_APP_PRIVATE_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `CODING_WORKER_OPENHANDS_STATE_MASTER_KEY`, `BROKER_IDENTITY_PRIVATE_KEY`, `BROKER_RECEIPT_ROOTS` |
+| `/var/lib/openloop/broker` | Broker unit | `POSTGRES_PASSWORD`, `BROKER_CAPABILITY_ROOTS`, `BROKER_RUNTIME_ROOTS` |
+
+The Docker socket adapter and broker initializer do not fetch secrets.
+`POSTGRES_PASSWORD` must have the identical value in both configs. Keep its
+canonical value in the deployment project and use
+[Doppler secret references](https://docs.doppler.com/docs/secrets) from the
+runtime and broker configs when your Doppler plan supports cross-project
+references.
+
+Create root-only Doppler CLI directories. These contain persisted service-token
+configuration and encrypted fallback data, not exported plaintext environment
+files:
 
 ```bash
-sudo chown root:root /etc/openloop/openloop-secrets.env
-sudo chmod 0600 /etc/openloop/openloop-secrets.env
+sudo install -d -o root -g root -m 0700 \
+  /var/lib/openloop/runtime \
+  /var/lib/openloop/broker
 ```
 
-Set `OPENLOOP_BROKER_ROOT` in `.env` to an absolute host path. If GitHub App
-authentication is enabled, put the PEM itself in the multiline
-`GITHUB_APP_PRIVATE_KEY` assignment. A single-quoted systemd EnvironmentFile
-value may span multiple lines.
+Generate one read-only Doppler service token for each production config. Store
+each token in its own CLI directory, scoped to `/opt/openloop`, without putting
+the token in a unit, repository file, or shell argument:
+
+```bash
+read -rsp 'Runtime Doppler service token: ' runtime_doppler_token
+printf '\n'
+printf '%s\n' "$runtime_doppler_token" |
+  sudo /usr/bin/env DOPPLER_CONFIG_DIR=/var/lib/openloop/runtime \
+    /usr/bin/doppler configure set token --scope /opt/openloop
+unset runtime_doppler_token
+
+read -rsp 'Broker Doppler service token: ' broker_doppler_token
+printf '\n'
+printf '%s\n' "$broker_doppler_token" |
+  sudo /usr/bin/env DOPPLER_CONFIG_DIR=/var/lib/openloop/broker \
+    /usr/bin/doppler configure set token --scope /opt/openloop
+unset broker_doppler_token
+
+sudo chown -R root:root /var/lib/openloop/runtime /var/lib/openloop/broker
+sudo chmod 0700 /var/lib/openloop/runtime /var/lib/openloop/broker
+```
+
+Persisted service tokens are Doppler's recommended VM configuration. The units
+set only `DOPPLER_CONFIG_DIR`; `doppler run` selects the token scoped to
+`/opt/openloop` and injects the selected config into the Compose process.
+Compose then creates only the declared `/run/secrets/*` mounts for each
+container.
+
+Set `OPENLOOP_BROKER_ROOT` in `.env` to an absolute host path distinct from
+`/var/lib/openloop/broker`, which is reserved for Doppler CLI metadata. The
+example uses `/var/lib/openloop/broker-data`. If GitHub App authentication is
+enabled, store the complete PEM as `GITHUB_APP_PRIVATE_KEY` in the runtime
+Doppler config.
 
 ## Prepare images
 
@@ -93,7 +141,9 @@ locally built image tags and all project resources used later by systemd.
 
 ```bash
 cd /opt/openloop
-sudo /usr/bin/docker compose \
+sudo /usr/bin/env DOPPLER_CONFIG_DIR=/var/lib/openloop/runtime \
+  /usr/bin/doppler run -- \
+  /usr/bin/docker compose \
   --project-name openloop \
   --file docker-compose.deploy.yml \
   --file docker-compose.broker.yml \
@@ -239,12 +289,11 @@ sudo /usr/bin/docker compose \
 
 From the updated `/opt/openloop` checkout:
 
-1. Re-run the secret and quiet Compose configuration validation.
-2. Pull `postgres` and `docker-socket-adapter`.
-3. Build the shared image through the `runtime` service.
-4. Reinstall the unit files and reload systemd.
-5. Restart the aggregate target.
-6. Re-check systemd and Compose state.
+1. Pull `postgres` and `docker-socket-adapter`.
+2. Build the shared image through the `runtime` service.
+3. Reinstall the unit files and reload systemd.
+4. Restart the aggregate target.
+5. Re-check systemd and Compose state.
 
 Refresh the installed units before activation:
 
@@ -285,8 +334,10 @@ sudo journalctl -u openloop-postgres.service \
   --since boot
 ```
 
-Correct the configuration, host path, permissions, image, or service health
-problem. Then clear the failed state and activate the whole dependency chain:
+Correct the Doppler token/config, network, host path, permissions, image, or
+service health problem. `ExecStop` deliberately does not use Doppler, so an API
+or token failure cannot prevent a clean container stop. Then clear the failed
+state and activate the whole dependency chain:
 
 ```bash
 sudo systemctl reset-failed \

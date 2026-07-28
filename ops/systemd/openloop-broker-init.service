@@ -10,7 +10,6 @@ PartOf=openloop.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-EnvironmentFile=-/etc/openloop/openloop-secrets.env
 WorkingDirectory=/opt/openloop
 ExecStartPre=/usr/bin/test -r /opt/openloop/docker-compose.deploy.yml
 ExecStartPre=/usr/bin/test -r /opt/openloop/docker-compose.broker.yml
