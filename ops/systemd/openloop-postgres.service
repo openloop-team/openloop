@@ -10,6 +10,7 @@ PartOf=openloop.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+Environment=HOME=/root
 Environment=DOPPLER_CONFIG_DIR=/var/lib/openloop/runtime
 WorkingDirectory=/opt/openloop
 ExecStartPre=/usr/bin/test -x /usr/bin/doppler

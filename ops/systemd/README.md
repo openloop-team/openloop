@@ -123,10 +123,11 @@ sudo chmod 0700 /var/lib/openloop/runtime /var/lib/openloop/broker
 ```
 
 Persisted service tokens are Doppler's recommended VM configuration. The units
-set only `DOPPLER_CONFIG_DIR`; `doppler run` selects the token scoped to
-`/opt/openloop` and injects the selected config into the Compose process.
-Compose then creates only the declared `/run/secrets/*` mounts for each
-container.
+set `HOME=/root` because system services do not receive a login-shell home, and
+set the service-specific `DOPPLER_CONFIG_DIR`. `doppler run` selects the token
+scoped to `/opt/openloop` and injects the selected config into the Compose
+process. Compose then creates only the declared `/run/secrets/*` mounts for
+each container.
 
 Set `OPENLOOP_BROKER_ROOT` in `.env` to an absolute host path distinct from
 `/var/lib/openloop/broker`, which is reserved for Doppler CLI metadata. The
