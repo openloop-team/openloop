@@ -2,7 +2,7 @@
 
 ``IsolatedSettings`` keeps the production model and validators, but accepts
 values only from explicit constructor arguments. It never reads the developer's
-environment, ``.env.runtime``, or file-secret directories.
+environment, ``.runtime.env``, or file-secret directories.
 """
 
 from __future__ import annotations

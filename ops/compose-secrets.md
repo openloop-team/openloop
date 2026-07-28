@@ -1,36 +1,43 @@
-# Secrets
+# Compose configuration and secrets
 
-Production Compose reads secret source files from
-`${OPENLOOP_SECRETS_ROOT:-./secrets}` and mounts them read-only under
-`/run/secrets`. The default source tree is gitignored.
+OpenLoop keeps ordinary settings separate from credentials:
 
-```text
-secrets/
-├── postgres_password
-├── openai_api_key
-├── anthropic_api_key
-├── gemini_api_key
-├── groq_api_key
-├── openrouter_api_key
-├── slack_bot_token
-├── slack_signing_secret
-├── slack_app_token
-├── github_token
-├── github_app_private_key
-├── claude_code_oauth_token
-├── coding_worker_openhands_state_master_key
-├── broker_identity_private_key
-├── broker_receipt_roots
-├── broker_capability_roots
-└── broker_runtime_roots
-```
+- `.env` contains only values Docker Compose needs while resolving the model.
+- `configs/<env>/runtime.env` contains tracked runtime settings.
+- `configs/<env>/broker.env` contains tracked broker settings and public
+  verification keys.
+- Secrets are injected into the Compose process.
 
-`postgres_password`, the external-broker identity and root files, and any
-credential for an enabled integration must contain real values. The three
-broker root-map files contain JSON objects:
+The service-level `env_file` entries parse the tracked config files and add
+their values to the corresponding container environment. They do not mount
+those files into a container.
+
+Each top-level Compose secret uses an injected environment value as its source.
+Compose creates a read-only `/run/secrets/<name>` file only in services granted
+that secret. OpenLoop's `Settings` reads `/run/secrets` directly, with mounted
+values taking precedence over process environment and `.runtime.env`.
+
+## Service grants
+
+- Postgres receives only `postgres_password`.
+- Runtime receives `postgres_password`, its integration credentials, and the
+  runtime-owned broker identity and receipt roots.
+- Broker receives `postgres_password` and its capability/runtime roots.
+- The Docker socket adapter and broker initializer receive no secrets.
+
+The broker root values are JSON objects, for example:
 
 ```json
 {"key-v1":"BASE64_ENCODED_32_BYTE_VALUE"}
 ```
 
-The GitHub App private-key file contains the PEM itself.
+`GITHUB_APP_PRIVATE_KEY` contains the PEM text itself. Compose exposes it as
+`/run/secrets/github_app_private_key`, while the runtime sets
+`GITHUB_APP_PRIVATE_KEY_PATH` to that path.
+
+The broker public verification maps are not secrets. Generate them , then store the output in
+`configs/<env>/broker.env`:
+
+```bash
+uv run openloop broker keys
+```

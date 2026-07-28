@@ -1,7 +1,7 @@
 """CLI tests — `openloop broker keys` (broker-side public key material).
 
-`.env.broker` must carry the PUBLIC halves of two app-side secrets that live in
-`.env.runtime`: the identity signing seed, and the per-version receipt keys
+`.broker.env` must carry the PUBLIC halves of two app-side secrets that live in
+`.runtime.env`: the identity signing seed, and the per-version receipt keys
 HKDF-derived from the receipt roots. Neither is free-choice — a random value
 passes every startup check and then silently fails at verification time — so
 this command derives and prints them.
@@ -54,7 +54,7 @@ def _emitted_map(output: str, name: str) -> dict[str, str]:
 
 @pytest.fixture
 def app_material(monkeypatch, tmp_path):
-    """App-side `.env.runtime` values, with cwd moved off the real repo file."""
+    """App-side `.runtime.env` values, with cwd moved off the real repo file."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("BROKER_IDENTITY_PRIVATE_KEY", _b64(IDENTITY_SEED))
     monkeypatch.setenv("BROKER_IDENTITY_KEY_ID", "identity-v1")
@@ -122,7 +122,7 @@ def test_refuses_when_the_identity_seed_is_unset(app_material, capsys):
 
     captured = capsys.readouterr()
     assert "BROKER_IDENTITY_PRIVATE_KEY" in captured.err
-    assert ".env.runtime" in captured.err
+    assert ".runtime.env" in captured.err
     assert captured.out == ""
 
 
@@ -133,7 +133,7 @@ def test_refuses_when_the_receipt_roots_are_unset(app_material, capsys):
 
     captured = capsys.readouterr()
     assert "BROKER_RECEIPT_ROOTS" in captured.err
-    assert ".env.runtime" in captured.err
+    assert ".runtime.env" in captured.err
     assert captured.out == ""
 
 

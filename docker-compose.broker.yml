@@ -2,21 +2,18 @@
 #
 # Usage:
 #   cp .env.example .env
-#   cp .env.runtime.example .env.runtime   # gitignored app settings
-#   cp .env.broker.example .env.broker     # gitignored broker settings
-#   # Render every declared secret directly under ./secrets/
-#   docker compose -f docker-compose.yml -f docker-compose.broker.yml up --build
+#   # Edit configs/prd/*.env, then run Compose under all three Doppler projects.
+#   mise run secrets-invoke -- mise run compose-up
 #
 # OPENLOOP_BROKER_ROOT must be an absolute host path. The one-shot init service
 # creates the root when absent, then provisions its five children with the exact
 # distinct-uid/shared-gid ownership matrix before either long-running service
 # starts.
 #
-# `.env.runtime` and `.env.broker` are read-only dotenv bundles; they may carry
-# the same shared values. Separate host paths let runtime and broker each read
-# a FIFO without competing for one stream. Individual secret source files
-# remain supported under `/run/secrets`, and public verification maps stay in
-# `.env.broker`.
+# `configs/prd/runtime.env` and `configs/prd/broker.env` contain non-secret
+# settings and are consumed through service-level `env_file`. True secrets are
+# created by Compose from values injected into the Compose process and granted
+# under `/run/secrets`. Public verification maps stay in the broker config.
 #
 # This override keeps Docker authority inside the adapter/broker trust boundary.
 
@@ -93,6 +90,8 @@ services:
     user: "${OPENLOOP_BROKER_UID:-10002}:${OPENLOOP_DATA_GID:-10777}"
     group_add:
       - ${OPENLOOP_DATA_GID:-10777}
+    env_file:
+      - ./configs/prd/broker.env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}@postgres:5432/${POSTGRES_DB:-openloop}
       DOCKER_HOST: unix:///run/openloop-docker/docker.sock
@@ -130,12 +129,6 @@ services:
       start_period: 5s
     restart: unless-stopped
     volumes:
-      - type: bind
-        source: ./.env.broker
-        target: /app/.env.runtime
-        read_only: true
-        bind:
-          create_host_path: false
       - type: volume
         source: docker-socket-adapter-data
         target: /run/openloop-docker
@@ -217,12 +210,12 @@ volumes:
 
 secrets:
   postgres_password:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/postgres_password
+    environment: POSTGRES_PASSWORD
   broker_identity_private_key:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/broker_identity_private_key
+    environment: BROKER_IDENTITY_PRIVATE_KEY
   broker_receipt_roots:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/broker_receipt_roots
+    environment: BROKER_RECEIPT_ROOTS
   broker_capability_roots:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/broker_capability_roots
+    environment: BROKER_CAPABILITY_ROOTS
   broker_runtime_roots:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/broker_runtime_roots
+    environment: BROKER_RUNTIME_ROOTS

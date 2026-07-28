@@ -19,8 +19,14 @@ docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml build r
 """
 
 [tasks.compose-up]
-description = "Recreate the Docker adapter, broker, and runtime"
-run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml up -d --force-recreate docker-socket-adapter broker runtime --remove-orphans"
+description = "Recreate the attached broker stack"
+run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml up --force-recreate docker-socket-adapter broker runtime --remove-orphans"
+
+[tasks.compose-up-d]
+description = "Recreate the detached broker stack"
+run = """
+docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml up -d --force-recreate docker-socket-adapter broker runtime --remove-orphans
+"""
 
 [tasks.compose-stop]
 description = "Stop the Docker containers"
@@ -28,7 +34,9 @@ run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml 
 
 [tasks.compose-down]
 description = "Bring down the containers and project volumes"
-run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml down --remove-orphans --volumes"
+run = """
+docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml down --remove-orphans --volumes
+"""
 
 [tasks.compose-logs]
 description = "Follow the adapter, runtime, broker, and Postgres logs"
@@ -46,13 +54,28 @@ run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml 
 description = "Open a Python shell in the runtime container"
 run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml exec runtime python"
 
-[tasks.doppler]
-description = "Invoke a command with doppler secrets"
+[tasks.secrets-download]
+description = "Explain the injection-only secrets workflow"
+run = """
+echo "Secrets are injected into Compose and are not downloaded to plaintext files."
+echo "Run: mise run secrets-invoke -- mise run compose-up"
+"""
+
+[tasks.secrets-invoke]
+description = "Invoke a command with deploy, runtime, and broker Doppler values"
 run = """
 doppler run \
   --project openloop-deploy \
   --config dev_personal \
-  --
+  -- \
+doppler run \
+  --project openloop-runtime \
+  --config dev_personal \
+  -- \
+doppler run \
+  --project openloop-broker \
+  --config dev_personal \
+  -- \
 """
 
 [tasks.test]
@@ -103,20 +126,12 @@ fi
 set -a
 . ./.env.e2e
 set +a
-openloop_secrets_root="${OPENLOOP_SECRETS_ROOT:-./secrets}"
-if [ ! -s "$openloop_secrets_root/slack_bot_token" ] || [ ! -s "$openloop_secrets_root/slack_app_token" ]; then
-  echo "Missing Slack bot/app secret files under $openloop_secrets_root."
-  exit 1
-fi
-IFS= read -r SLACK_BOT_TOKEN < "$openloop_secrets_root/slack_bot_token"
-IFS= read -r SLACK_APP_TOKEN < "$openloop_secrets_root/slack_app_token"
-export SLACK_BOT_TOKEN SLACK_APP_TOKEN
 if [ "${E2E_CONFIRM:-}" != "1" ]; then
   echo "Refusing to run Slack live E2E. Set E2E_CONFIRM=1 after choosing a test channel."
   exit 1
 fi
 if [ -z "${SLACK_BOT_TOKEN:-}" ] || [ -z "${SLACK_APP_TOKEN:-}" ] || [ -z "${E2E_SLACK_USER_TOKEN:-}" ] || [ -z "${E2E_SLACK_CHANNEL:-}" ]; then
-  echo "SLACK_BOT_TOKEN, SLACK_APP_TOKEN, E2E_SLACK_USER_TOKEN, and E2E_SLACK_CHANNEL are required."
+  echo "SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be injected; E2E_SLACK_USER_TOKEN and E2E_SLACK_CHANNEL must be set in .env.e2e."
   exit 1
 fi
 E2E_LIVE=1 python -m pytest tests/e2e/test_slack_socket_live.py -v

@@ -1,6 +1,6 @@
 """Runtime configuration loaded from mounted secrets, environment, or dotenv.
 
-Mirrors the keys documented in ``.env.runtime.example``. Only what the first
+Mirrors the keys documented in ``.runtime.env.example``. Only what the first
 vertical slice needs is wired up here; more lands as the runtime grows.
 """
 
@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env.runtime",
+        env_file=".runtime.env",
         env_file_encoding="utf-8",
         secrets_dir="/run/secrets",
         extra="ignore",

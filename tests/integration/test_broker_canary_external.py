@@ -143,7 +143,7 @@ def _write_partitioned_environments(project: Path) -> None:
             )
         )
     )
-    (project / ".env.runtime").write_text(
+    (project / ".runtime.env").write_text(
         "\n".join(
             (
                 "STORAGE_MODE=memory",
@@ -155,7 +155,7 @@ def _write_partitioned_environments(project: Path) -> None:
             )
         )
     )
-    (project / ".env.broker").write_text(
+    (project / ".broker.env").write_text(
         "\n".join(
             (
                 "BROKER_CAPABILITY_CURRENT_VERSION=cap-key-v1",

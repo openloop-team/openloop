@@ -226,9 +226,10 @@ Requires Docker + Compose and at least one model provider key.
 ```bash
 git clone https://github.com/p1c2u/openloop.git
 cd openloop
-cp .env.example .env                  # Compose/deployment values
-cp .env.runtime.example .env.runtime  # provider keys + Slack credentials
-docker compose up -d                  # Postgres + Redis + runtime
+cp .env.example .env                  # non-secret Compose values
+# Configure the openloop-deploy, openloop-runtime, and openloop-broker
+# Doppler projects, then inject their secrets into Compose:
+mise run secrets-invoke -- mise run compose-up-d
 openloop agents apply -f agents/dev-platform.yaml
 # invite the bot to a channel, then: @agent summarize this thread
 ```
@@ -248,13 +249,17 @@ root-equivalent Docker access.
 
 ```bash
 cp .env.example .env
-cp .env.runtime.example .env.runtime
-cp .env.broker.example .env.broker
 # Set an absolute OPENLOOP_BROKER_ROOT in .env.
-# Render every file listed in ops/compose-secrets.md.
+# Edit tracked non-secret settings under configs/prd/.
 mise run compose-build
-mise run compose-up
+mise run secrets-invoke -- mise run compose-up
 ```
+
+Compose loads `configs/prd/runtime.env` and `configs/prd/broker.env` through
+service-level `env_file`. These tracked files contain only ordinary settings
+and public verification keys. Doppler injects true secrets into the Compose
+process, and Compose creates the declared `/run/secrets/*` files without
+writing a plaintext secret inventory into the repository.
 
 `DOCKER_SOCKET` may select a non-default upstream Unix socket. Do not configure
 `DOCKER_GID` or a TCP Docker endpoint. The adapter healthcheck uses a separate
@@ -264,24 +269,14 @@ socket volume, private health tmpfs, and mounted upstream socket are writable.
 
 ### Mounted secrets
 
-Secret files should be mounted at `/run/secrets/<lowercase-settings-field>`. The
-GitHub App PEM is mounted as `/run/secrets/github_app_private_key`, with its
-non-secret path configured automatically. File contents are type-validated
-exactly like environment values, including JSON decoding for dictionaries.
+Each top-level Compose secret names an environment value supplied by the
+appropriate Doppler project. Compose materializes it as
+`/run/secrets/<lowercase-settings-field>` and grants it only to the services
+that declare it. OpenLoop type-validates file contents like environment values,
+including JSON root maps. The GitHub App PEM is available at
+`/run/secrets/github_app_private_key`.
 
-Compose uses one flat secret inventory rooted at
-`${OPENLOOP_SECRETS_ROOT:-./secrets}`. Files such as `postgres_password`,
-`openai_api_key`, and `broker_capability_roots` live directly in that directory.
-Compose still grants only the required files to each container.
-
-The Compose services also bind-mount the gitignored `.env.runtime` and
-`.env.broker` dotenv bundles read-only at `/app/.env.runtime`; Compose does not
-inject their contents through `env_file:`. These paths may be regular files or
-Linux FIFOs produced by deployment tooling. Individual `/run/secrets` files
-override process environment and dotenv values, while explicit Compose
-environment values override the dotenv bundle.
-
-The individual file grants are:
+The grants are:
 
 - Postgres receives only `postgres_password`.
 - Runtime receives the database password, application credentials, and
@@ -325,11 +320,12 @@ once, then run the socket:
      channels and DMs.
 4. **Install the app** to your workspace, copy the bot token → `SLACK_BOT_TOKEN`
    (`xoxb-…`), and invite the bot to a channel.
-5. **Set `.env.runtime`**: a model key, `SLACK_BOT_TOKEN`, and
-   `SLACK_APP_TOKEN`. Then run:
+5. **Set the runtime secrets**: add a model key, `SLACK_BOT_TOKEN`, and
+   `SLACK_APP_TOKEN` to the `openloop-runtime` Doppler project. Then run:
 
 ```bash
-mise exec -- openloop slack socket   # connects; mention the bot in a channel
+doppler run --project openloop-runtime --config dev_personal -- \
+  mise exec -- openloop slack socket   # connects; mention the bot in a channel
 ```
 
 Mention the bot to start a thread; you can
@@ -403,9 +399,8 @@ reinstall to get an `xoxp-…` token:
 ```bash
 cp .env.e2e.example .env.e2e
 # Set E2E_SLACK_USER_TOKEN and E2E_SLACK_CHANNEL in .env.e2e.
-# The task reads SLACK_BOT_TOKEN and SLACK_APP_TOKEN from secrets/.
 export E2E_CONFIRM=1
-mise run test-e2e-slack-live
+mise run secrets-invoke -- mise run test-e2e-slack-live
 ```
 
 The Slack live E2E GitHub Actions workflow is manual-only and uses a protected
@@ -519,10 +514,10 @@ account.
   externally, or deleting anything.
 - **Scoped tokens:** use fine-grained, per-integration tokens.
 - **Memory isolation:** scope memory per channel so context doesn't leak.
-- **Secrets:** keep source files in one flat host directory and use Compose
-  grants to mount required files at `/run/secrets`, or provide the gitignored
-  `.env.runtime` and `.env.broker` paths as read-only dotenv bundles. Never
-  commit real values.
+- **Secrets:** keep real values in the three scoped Doppler projects. Compose
+  creates the declared `/run/secrets/*` files from injected values; tracked
+  `configs/prd/*.env` files must contain only non-secret settings and public
+  verification material.
 - **Inspect:** self-host the runtime to see exactly what the agent does.
 
 Early-stage software, no warranty. Don't connect sensitive production systems

@@ -1,17 +1,13 @@
 """Where configuration values come from, and which source wins.
 
 `Settings` loads from mounted secret files, the environment, and
-`.env.runtime`. The dotenv path may be a regular file or FIFO. One is
-constructed at each process entrypoint and passed down; consumers take it as
-an argument rather than reaching for a global.
+`.runtime.env`. One is constructed at each process entrypoint and passed down;
+consumers take it as an argument rather than reaching for a global.
 
 These tests preserve the production precedence contract. The rest of the
 unit/in-process suite uses ``IsolatedSettings``, which accepts constructor
 arguments and declared defaults but ignores ambient sources entirely.
 """
-
-import os
-import threading
 
 import pytest
 
@@ -23,7 +19,7 @@ from tests.support.settings import IsolatedSettings
 def ambient(monkeypatch, tmp_path):
     """A working copy and environment that both carry non-default config."""
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".env.runtime").write_text(
+    (tmp_path / ".runtime.env").write_text(
         "OLLAMA_BASE_URL=http://from-dotenv:1111\n"
     )
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
@@ -35,35 +31,9 @@ def test_reads_the_dotenv_regular_file(ambient):
     assert Settings().ollama_base_url == "http://from-dotenv:1111"
 
 
-def test_reads_the_dotenv_fifo(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    dotenv = tmp_path / ".env.runtime"
-    os.mkfifo(dotenv)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
-
-    def write_settings() -> None:
-        with dotenv.open("w", encoding="utf-8") as stream:
-            stream.write(
-                "OPENAI_API_KEY=fifo-provider-secret\n"
-                "OLLAMA_BASE_URL=http://from-fifo:5555\n"
-            )
-
-    writer = threading.Thread(target=write_settings, daemon=True)
-    writer.start()
-    try:
-        settings = Settings(_secrets_dir=tmp_path / "missing-secrets")
-    finally:
-        writer.join(timeout=1.0)
-
-    assert not writer.is_alive()
-    assert settings.openai_api_key == "fifo-provider-secret"
-    assert settings.ollama_base_url == "http://from-fifo:5555"
-
-
 def test_dotenv_parses_complex_field_json(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".env.runtime").write_text(
+    (tmp_path / ".runtime.env").write_text(
         "BROKER_CAPABILITY_ROOTS='"
         '{"cap-key-v1":"dotenv-root"}'
         "'\n"

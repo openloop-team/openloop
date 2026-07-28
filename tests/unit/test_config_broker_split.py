@@ -19,7 +19,7 @@ def test_default_settings_load_runtime_dotenv_without_legacy_fallback(
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     (tmp_path / ".env").write_text("OLLAMA_BASE_URL=http://legacy.example\n")
-    runtime_file = tmp_path / ".env.runtime"
+    runtime_file = tmp_path / ".runtime.env"
     runtime_file.write_text("OLLAMA_BASE_URL=http://runtime.example\n")
 
     assert RuntimeSettings().ollama_base_url == "http://runtime.example"

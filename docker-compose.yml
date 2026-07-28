@@ -6,8 +6,10 @@ services:
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-openloop}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       POSTGRES_DB: ${POSTGRES_DB:-openloop}
+    secrets:
+      - postgres_password
     ports:
       - "5432:5432"
     volumes:
@@ -31,14 +33,31 @@ services:
   runtime:
     image: ${OPENLOOP_IMAGE:-openloop:local}
     build: .
+    env_file:
+      - ./configs/prd/runtime.env
     environment:
       # Compose owns database bootstrap values in .env. Override the localhost
       # URL used by direct Python execution with the in-network service host.
-      # Keep the raw password outside the URI so URL-significant characters are
-      # passed to PostgreSQL unchanged.
+      # OpenLoop obtains the raw password from /run/secrets/postgres_password.
       DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}@postgres:5432/${POSTGRES_DB:-openloop}
-      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github_app_private_key
       LOG_LEVEL: ${LOG_LEVEL:-info}
+    secrets:
+      - postgres_password
+      - openai_api_key
+      - anthropic_api_key
+      # - gemini_api_key
+      - groq_api_key
+      - openrouter_api_key
+      - slack_bot_token
+      # - slack_signing_secret
+      - slack_app_token
+      - github_token
+      - github_app_private_key
+      - claude_code_oauth_token
+      - coding_worker_openhands_state_master_key
+      - broker_identity_private_key
+      - broker_receipt_roots
     depends_on:
       postgres:
         condition: service_healthy
@@ -47,17 +66,40 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - type: bind
-        source: ./.env.runtime
-        target: /app/.env.runtime
-        read_only: true
-        bind:
-          create_host_path: false
       - ./agents:/app/agents:ro
-      # GitHub App auth: mount the App private key and set
-      # GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app.pem in .env.runtime.
-      - ./secrets/github-app.pem:/run/secrets/github-app.pem:ro
     command: uvicorn openloop.app:app --host 0.0.0.0 --port 8000
 
 volumes:
   pgdata:
+
+secrets:
+  postgres_password:
+    environment: POSTGRES_PASSWORD
+  openai_api_key:
+    environment: OPENAI_API_KEY
+  anthropic_api_key:
+    environment: ANTHROPIC_API_KEY
+  # gemini_api_key:
+  #   environment: GEMINI_API_KEY
+  groq_api_key:
+    environment: GROQ_API_KEY
+  openrouter_api_key:
+    environment: OPENROUTER_API_KEY
+  slack_bot_token:
+    environment: SLACK_BOT_TOKEN
+  # slack_signing_secret:
+  #   environment: SLACK_SIGNING_SECRET
+  slack_app_token:
+    environment: SLACK_APP_TOKEN
+  github_token:
+    environment: GITHUB_TOKEN
+  github_app_private_key:
+    environment: GITHUB_APP_PRIVATE_KEY
+  claude_code_oauth_token:
+    environment: CLAUDE_CODE_OAUTH_TOKEN
+  coding_worker_openhands_state_master_key:
+    environment: CODING_WORKER_OPENHANDS_STATE_MASTER_KEY
+  broker_identity_private_key:
+    environment: BROKER_IDENTITY_PRIVATE_KEY
+  broker_receipt_roots:
+    environment: BROKER_RECEIPT_ROOTS

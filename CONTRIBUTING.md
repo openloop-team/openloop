@@ -41,15 +41,15 @@ the wrong way while the architecture is still forming.
 git clone https://github.com/p1c2u/openloop.git
 cd openloop
 cp .env.example .env
-cp .env.runtime.example .env.runtime
-# configure model provider keys and Slack credentials, then:
-docker compose up -d
+# Edit tracked non-secret settings under configs/prd/, configure the
+# openloop-deploy, openloop-runtime, and openloop-broker Doppler projects, then:
+mise run secrets-invoke -- mise run compose-up-d
 ```
 
-For the external OpenHands broker, also copy `.env.broker.example`, set an
-absolute `OPENLOOP_BROKER_ROOT`, then use `mise run compose-build` and
-`mise run compose-up`. The networkless HAProxy permission adapter—not the
-runtime or broker—mounts the raw Docker socket. The broker must retain
+For the external OpenHands broker, set an absolute `OPENLOOP_BROKER_ROOT` in
+`.env`, then use `mise run compose-build` and the command above. The networkless
+HAProxy permission adapter—not the runtime or broker—mounts the raw Docker
+socket. The broker must retain
 `OPENLOOP_DATA_GID` to connect to the adapter's `root:OPENLOOP_DATA_GID` mode
 `0660` UDS through its read-only volume mount. Do not add `DOCKER_GID` or a TCP
 Docker endpoint; the adapter does not filter the root-equivalent Docker API.
@@ -62,8 +62,8 @@ Docker endpoint; the adapter does not filter the root-equivalent Docker API.
   tradeoffs or follow-ups.
 - **Link the issue** the PR addresses (e.g. `Closes #123`).
 - **Update docs** alongside behavior changes.
-- **Don't commit secrets.** Keep credentials in the gitignored `.env`,
-  `.env.runtime`, and `.env.broker` files, never in code or fixtures.
+- **Don't commit secrets.** Keep credentials in the scoped Doppler projects,
+  never in `.env`, `configs/prd/*.env`, code, or fixtures.
 
 ### Commit messages
 

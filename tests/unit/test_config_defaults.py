@@ -1,6 +1,6 @@
-"""Config defaults that `.env.runtime.example` documents to operators.
+"""Config defaults that `.runtime.env.example` documents to operators.
 
-The example file is copied verbatim into `.env.runtime`, so anywhere it and the
+The example file is copied verbatim into `.runtime.env`, so anywhere it and the
 code disagree the operator silently gets a third behaviour. These pin the two
 places that had drifted: the default database name (Compose provisions
 `openloop`, so the app default must name the same database) and Groq, which the

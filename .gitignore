@@ -157,6 +157,10 @@ activemq-data/
 .env
 .env.runtime
 .env.broker
+.runtime.env
+.broker.env
+.runtime.env.download.*
+.broker.env.download.*
 .env.e2e
 .envrc
 .venv

@@ -223,8 +223,8 @@ def _insert_metadata_id(text: str, minted: str) -> tuple[str, str] | None:
 def _cmd_broker_keys(args: argparse.Namespace) -> int:
     """Emit the broker-side PUBLIC key maps derived from app-side material.
 
-    `.env.broker` needs the public halves of two secrets that live app-side in
-    `.env.runtime`. Neither is free-choice: the identity public is the public
+    `.broker.env` needs the public halves of two secrets that live app-side in
+    `.runtime.env`. Neither is free-choice: the identity public is the public
     half of ``BROKER_IDENTITY_PRIVATE_KEY``, and each receipt public is the
     public half of the HKDF-derived per-version key rooted at
     ``BROKER_RECEIPT_ROOTS``. Random stand-ins pass every startup check and then
@@ -243,7 +243,7 @@ def _cmd_broker_keys(args: argparse.Namespace) -> int:
         _derive_receipt_key,
     )
 
-    settings = Settings()   # entrypoint: load from .env.runtime + env
+    settings = Settings()   # entrypoint: load from .runtime.env + env
 
     def public_of(private: Any) -> str:
         return base64.b64encode(private.public_key().public_bytes_raw()).decode()
@@ -255,7 +255,7 @@ def _cmd_broker_keys(args: argparse.Namespace) -> int:
         if not getattr(settings, field):
             print(
                 f"error: {env_name} is not set — the broker's public maps are "
-                f"derived from it, so set it in .env.runtime first",
+                f"derived from it, so set it in .runtime.env first",
                 file=sys.stderr,
             )
             return 1

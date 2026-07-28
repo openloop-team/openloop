@@ -23,7 +23,7 @@ async def run_socket(settings: Settings) -> None:
 
     if not settings.slack_app_token:
         raise SystemExit(
-            "Socket Mode needs SLACK_APP_TOKEN (xapp-…). Set it in .env.runtime."
+            "Socket Mode needs SLACK_APP_TOKEN (xapp-…). Set it in .runtime.env."
         )
 
     async with compose(settings) as ctx:

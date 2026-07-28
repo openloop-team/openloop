@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -23,8 +24,6 @@ COMPOSE_DATABASE_URL = (
     "postgresql://${POSTGRES_USER:-openloop}"
     "@postgres:5432/${POSTGRES_DB:-openloop}"
 )
-COMPOSE_PGPASSWORD = "${POSTGRES_PASSWORD:-change-me}"
-SECRETS_ROOT = "${OPENLOOP_SECRETS_ROOT:-./secrets}"
 OPENLOOP_IMAGE = "${OPENLOOP_IMAGE:-openloop:local}"
 BUILD = {
     "context": ".",
@@ -38,7 +37,8 @@ ADAPTER_DATA = "/run/openloop-docker"
 ADAPTER_HEALTH = "/run/openloop-health"
 FORWARDED_SOCKET = f"{ADAPTER_DATA}/docker.sock"
 RAW_SOCKET = "/var/run/docker.sock"
-DOTENV_TARGET = "/app/.env.runtime"
+RUNTIME_ENV_FILE = "./configs/prd/runtime.env"
+BROKER_ENV_FILE = "./configs/prd/broker.env"
 
 
 def _compose() -> dict:
@@ -63,9 +63,9 @@ def _secret_grants(service: dict) -> dict[str, str]:
     return grants
 
 
-def _secret_files(document: dict) -> dict[str, str]:
+def _secret_environments(document: dict) -> dict[str, str]:
     return {
-        name: definition["file"]
+        name: definition["environment"]
         for name, definition in document.get("secrets", {}).items()
     }
 
@@ -177,14 +177,12 @@ def test_broker_has_explicit_external_environment_health_and_ordering():
     broker = services["broker"]
     runtime = services["runtime"]
 
-    assert "env_file" not in broker
-    assert _mounts(broker)[DOTENV_TARGET] == {
-        "type": "bind",
-        "source": "./.env.broker",
-        "target": DOTENV_TARGET,
-        "read_only": True,
-        "bind": {"create_host_path": False},
-    }
+    assert broker["env_file"] == [BROKER_ENV_FILE]
+    assert all(
+        mount.get("source") != BROKER_ENV_FILE
+        for mount in broker.get("volumes", ())
+        if isinstance(mount, dict)
+    )
     assert broker["environment"]["DATABASE_URL"] == COMPOSE_DATABASE_URL
     assert "PGPASSWORD" not in broker["environment"]
     assert "POSTGRES_PASSWORD" not in broker["environment"]
@@ -203,57 +201,52 @@ def test_broker_has_explicit_external_environment_health_and_ordering():
     ]
 
 
-def test_runtime_compositions_bind_mount_runtime_dotenv():
+def test_runtime_compositions_use_service_level_env_file():
     for path in RUNTIME_COMPOSITIONS:
         runtime = yaml.safe_load(path.read_text())["services"]["runtime"]
-        assert "env_file" not in runtime
-        assert _mounts(runtime)[DOTENV_TARGET] == {
-            "type": "bind",
-            "source": "./.env.runtime",
-            "target": DOTENV_TARGET,
-            "read_only": True,
-            "bind": {"create_host_path": False},
-        }
+        assert runtime["env_file"] == [RUNTIME_ENV_FILE]
+        assert all(
+            mount.get("source") != RUNTIME_ENV_FILE
+            for mount in runtime.get("volumes", ())
+            if isinstance(mount, dict)
+        )
         assert runtime["environment"]["DATABASE_URL"] == COMPOSE_DATABASE_URL
         assert runtime["environment"]["LOG_LEVEL"] == "${LOG_LEVEL:-info}"
 
     development = yaml.safe_load(RUNTIME_COMPOSITIONS[0].read_text())
     production = yaml.safe_load(DEPLOY.read_text())
-    assert (
-        development["services"]["runtime"]["environment"]["PGPASSWORD"]
-        == COMPOSE_PGPASSWORD
-    )
+    assert "PGPASSWORD" not in development["services"]["runtime"]["environment"]
     assert "PGPASSWORD" not in production["services"]["runtime"]["environment"]
+    for document in (development, production):
+        assert document["services"]["postgres"]["environment"][
+            "POSTGRES_PASSWORD_FILE"
+        ] == "/run/secrets/postgres_password"
 
 
-def test_production_deploy_mounts_only_the_provided_secret_inventory():
+def test_production_deploy_creates_only_the_provided_secret_inventory():
     document = yaml.safe_load(DEPLOY.read_text())
     services = document["services"]
     postgres = services["postgres"]
     runtime = services["runtime"]
 
-    expected_files = {
-        "postgres_password": f"{SECRETS_ROOT}/postgres_password",
-        "openai_api_key": f"{SECRETS_ROOT}/openai_api_key",
-        "anthropic_api_key": f"{SECRETS_ROOT}/anthropic_api_key",
-        "groq_api_key": f"{SECRETS_ROOT}/groq_api_key",
-        "openrouter_api_key": f"{SECRETS_ROOT}/openrouter_api_key",
-        "slack_bot_token": f"{SECRETS_ROOT}/slack_bot_token",
-        "slack_app_token": f"{SECRETS_ROOT}/slack_app_token",
-        "github_token": f"{SECRETS_ROOT}/github_token",
-        "github_app_private_key": f"{SECRETS_ROOT}/github_app_private_key",
-        "claude_code_oauth_token": (
-            f"{SECRETS_ROOT}/claude_code_oauth_token"
-        ),
+    expected_environments = {
+        "postgres_password": "POSTGRES_PASSWORD",
+        "openai_api_key": "OPENAI_API_KEY",
+        "anthropic_api_key": "ANTHROPIC_API_KEY",
+        "groq_api_key": "GROQ_API_KEY",
+        "openrouter_api_key": "OPENROUTER_API_KEY",
+        "slack_bot_token": "SLACK_BOT_TOKEN",
+        "slack_app_token": "SLACK_APP_TOKEN",
+        "github_token": "GITHUB_TOKEN",
+        "github_app_private_key": "GITHUB_APP_PRIVATE_KEY",
+        "claude_code_oauth_token": "CLAUDE_CODE_OAUTH_TOKEN",
         "coding_worker_openhands_state_master_key": (
-            f"{SECRETS_ROOT}/coding_worker_openhands_state_master_key"
+            "CODING_WORKER_OPENHANDS_STATE_MASTER_KEY"
         ),
-        "broker_identity_private_key": (
-            f"{SECRETS_ROOT}/broker_identity_private_key"
-        ),
-        "broker_receipt_roots": f"{SECRETS_ROOT}/broker_receipt_roots",
+        "broker_identity_private_key": "BROKER_IDENTITY_PRIVATE_KEY",
+        "broker_receipt_roots": "BROKER_RECEIPT_ROOTS",
     }
-    assert _secret_files(document) == expected_files
+    assert _secret_environments(document) == expected_environments
     assert _secret_grants(postgres) == {
         "postgres_password": "postgres_password"
     }
@@ -284,22 +277,22 @@ def test_production_deploy_mounts_only_the_provided_secret_inventory():
     raw = DEPLOY.read_text()
     assert "# - gemini_api_key" in raw
     assert "# gemini_api_key:" in raw
+    assert "#   environment: GEMINI_API_KEY" in raw
     assert "# - slack_signing_secret" in raw
     assert "# slack_signing_secret:" in raw
+    assert "#   environment: SLACK_SIGNING_SECRET" in raw
 
 
-def test_broker_override_mounts_only_granted_flat_secrets():
+def test_broker_override_creates_only_granted_environment_secrets():
     document = _compose()
     services = document["services"]
 
-    assert _secret_files(document) == {
-        "postgres_password": f"{SECRETS_ROOT}/postgres_password",
-        "broker_identity_private_key": (
-            f"{SECRETS_ROOT}/broker_identity_private_key"
-        ),
-        "broker_receipt_roots": f"{SECRETS_ROOT}/broker_receipt_roots",
-        "broker_capability_roots": f"{SECRETS_ROOT}/broker_capability_roots",
-        "broker_runtime_roots": f"{SECRETS_ROOT}/broker_runtime_roots",
+    assert _secret_environments(document) == {
+        "postgres_password": "POSTGRES_PASSWORD",
+        "broker_identity_private_key": "BROKER_IDENTITY_PRIVATE_KEY",
+        "broker_receipt_roots": "BROKER_RECEIPT_ROOTS",
+        "broker_capability_roots": "BROKER_CAPABILITY_ROOTS",
+        "broker_runtime_roots": "BROKER_RUNTIME_ROOTS",
     }
     assert _secret_grants(services["broker"]) == {
         "postgres_password": "postgres_password",
@@ -317,8 +310,10 @@ def test_broker_override_mounts_only_granted_flat_secrets():
 
 def test_example_files_document_and_preserve_the_secret_partition():
     compose = (ROOT / ".env.example").read_text()
-    app = (ROOT / ".env.runtime.example").read_text()
-    broker = (ROOT / ".env.broker.example").read_text()
+    app = (ROOT / ".runtime.env.example").read_text()
+    broker = (ROOT / ".broker.env.example").read_text()
+    runtime_config = (ROOT / "configs/prd/runtime.env").read_text()
+    broker_config = (ROOT / "configs/prd/broker.env").read_text()
 
     def assigned_names(document: str) -> set[str]:
         return {
@@ -336,6 +331,8 @@ def test_example_files_document_and_preserve_the_secret_partition():
 
     app_names = assigned_names(app)
     broker_names = assigned_names(broker)
+    runtime_config_names = assigned_names(runtime_config)
+    broker_config_names = assigned_names(broker_config)
     interpolated_names = {
         match
         for path in COMPOSITIONS
@@ -348,9 +345,7 @@ def test_example_files_document_and_preserve_the_secret_partition():
 
     compose_owned = {
         "POSTGRES_USER",
-        "POSTGRES_PASSWORD",
         "POSTGRES_DB",
-        "OPENLOOP_SECRETS_ROOT",
         "LOG_LEVEL",
         "BROKER_IDENTITY_ISSUER",
         "BROKER_IDENTITY_AUDIENCE",
@@ -365,6 +360,7 @@ def test_example_files_document_and_preserve_the_secret_partition():
     assert compose_owned <= documented_names(compose)
     assert compose_owned.isdisjoint(app_names)
     assert compose_owned.isdisjoint(broker_names)
+    assert "POSTGRES_PASSWORD" not in documented_names(compose)
 
     assert "OPENAI_API_KEY" not in compose
     assert "BROKER_IDENTITY_PRIVATE_KEY" not in compose
@@ -383,11 +379,54 @@ def test_example_files_document_and_preserve_the_secret_partition():
     assert "PGPASSWORD" not in broker_names
     assert "DATABASE_URL" in app_names
     assert "DATABASE_URL" not in broker_names
+    true_secrets = {
+        "POSTGRES_PASSWORD",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GROQ_API_KEY",
+        "OPENROUTER_API_KEY",
+        "SLACK_BOT_TOKEN",
+        "SLACK_SIGNING_SECRET",
+        "SLACK_APP_TOKEN",
+        "GITHUB_TOKEN",
+        "GITHUB_APP_PRIVATE_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CODING_WORKER_OPENHANDS_STATE_MASTER_KEY",
+        "BROKER_IDENTITY_PRIVATE_KEY",
+        "BROKER_RECEIPT_ROOTS",
+        "BROKER_CAPABILITY_ROOTS",
+        "BROKER_RUNTIME_ROOTS",
+    }
+    assert runtime_config_names.isdisjoint(true_secrets)
+    assert broker_config_names.isdisjoint(true_secrets)
+    assert {
+        "BROKER_IDENTITY_PUBLIC_KEYS",
+        "BROKER_RECEIPT_PUBLIC_KEYS",
+    } <= broker_config_names
     ignored = (ROOT / ".gitignore").read_text().splitlines()
     assert ".env" in ignored
     assert ".env.runtime" in ignored
     assert ".env.broker" in ignored
+    assert ".runtime.env" in ignored
+    assert ".broker.env" in ignored
+    assert ".runtime.env.download.*" in ignored
+    assert ".broker.env.download.*" in ignored
     assert ".env.e2e" in ignored
+    docker_ignored = (ROOT / ".dockerignore").read_text().splitlines()
+    for secret_path in (
+        ".env",
+        ".env.runtime",
+        ".env.broker",
+        ".runtime.env",
+        ".broker.env",
+        ".runtime.env.download.*",
+        ".broker.env.download.*",
+        "secrets/",
+    ):
+        assert secret_path in docker_ignored
+    assert ".runtime.env.example" not in docker_ignored
+    assert ".broker.env.example" not in docker_ignored
 
 
 def test_operator_commands_use_compose_default_environment_discovery():
@@ -401,7 +440,19 @@ def test_operator_commands_use_compose_default_environment_discovery():
         )
     )
 
-    assert "--env-file .env.runtime" not in guidance
+    assert "--env-file .runtime.env" not in guidance
+
+
+def test_secret_tasks_do_not_download_plaintext_bundles():
+    with (ROOT / "mise.toml").open("rb") as stream:
+        tasks = tomllib.load(stream)["tasks"]
+
+    download_guidance = tasks["secrets-download"]["run"]
+    assert "doppler secrets download" not in download_guidance
+    assert "OPENLOOP_SECRETS_ROOT" not in download_guidance
+    assert "> .runtime.env" not in download_guidance
+    assert "> .broker.env" not in download_guidance
+    assert "secrets-invoke" in download_guidance
 
 
 def test_compositions_do_not_receive_secret_manager_tokens():

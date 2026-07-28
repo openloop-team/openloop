@@ -8,9 +8,9 @@
 #
 # Usage on the server:
 #   cp .env.example .env                   # Compose/deployment values
-#   cp .env.runtime.example .env.runtime   # gitignored runtime settings
-#   # Render every declared secret directly under ./secrets/
-#   docker compose -f docker-compose.deploy.yml up -d --build
+#   # Edit configs/prd/runtime.env, then run Compose under Doppler so the
+#   # declared secret environment sources are present.
+#   mise run secrets-invoke -- docker compose -f docker-compose.deploy.yml up -d --build
 #   docker compose -f docker-compose.deploy.yml logs -f runtime
 #
 # The runtime intentionally has no Docker-daemon authority. Containerized
@@ -38,9 +38,11 @@ services:
     image: ${OPENLOOP_IMAGE:-openloop:local}
     build: .
     restart: unless-stopped
+    env_file:
+      - ./configs/prd/runtime.env
     # Derive the DB URL from the same vars Postgres uses, pointed at the
-    # in-network service host. Overrides any DATABASE_URL in .env.runtime so the
-    # localhost example value can't leak in.
+    # in-network service host. Overrides DATABASE_URL from the tracked runtime
+    # config so a direct-execution value cannot leak in.
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-openloop}@postgres:5432/${POSTGRES_DB:-openloop}
       GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github_app_private_key
@@ -50,7 +52,7 @@ services:
       - postgres_password
       - openai_api_key
       - anthropic_api_key
-      # Uncomment when GEMINI_API_KEY has been migrated to secrets/gemini_api_key.
+      # Uncomment when GEMINI_API_KEY is present in the runtime Doppler project.
       # - gemini_api_key
       - groq_api_key
       - openrouter_api_key
@@ -71,12 +73,6 @@ services:
         condition: service_healthy
     # Edit agents/*.yaml and `docker compose ... restart runtime` — no rebuild.
     volumes:
-      - type: bind
-        source: ./.env.runtime
-        target: /app/.env.runtime
-        read_only: true
-        bind:
-          create_host_path: false
       - ./agents:/app/agents:ro
 
 volumes:
@@ -84,32 +80,32 @@ volumes:
 
 secrets:
   postgres_password:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/postgres_password
+    environment: POSTGRES_PASSWORD
   openai_api_key:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/openai_api_key
+    environment: OPENAI_API_KEY
   anthropic_api_key:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/anthropic_api_key
+    environment: ANTHROPIC_API_KEY
   # gemini_api_key:
-  #   file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/gemini_api_key
+  #   environment: GEMINI_API_KEY
   groq_api_key:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/groq_api_key
+    environment: GROQ_API_KEY
   openrouter_api_key:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/openrouter_api_key
+    environment: OPENROUTER_API_KEY
   slack_bot_token:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/slack_bot_token
+    environment: SLACK_BOT_TOKEN
   # slack_signing_secret:
-  #   file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/slack_signing_secret
+  #   environment: SLACK_SIGNING_SECRET
   slack_app_token:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/slack_app_token
+    environment: SLACK_APP_TOKEN
   github_token:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/github_token
+    environment: GITHUB_TOKEN
   github_app_private_key:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/github_app_private_key
+    environment: GITHUB_APP_PRIVATE_KEY
   claude_code_oauth_token:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/claude_code_oauth_token
+    environment: CLAUDE_CODE_OAUTH_TOKEN
   coding_worker_openhands_state_master_key:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/coding_worker_openhands_state_master_key
+    environment: CODING_WORKER_OPENHANDS_STATE_MASTER_KEY
   broker_identity_private_key:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/broker_identity_private_key
+    environment: BROKER_IDENTITY_PRIVATE_KEY
   broker_receipt_roots:
-    file: ${OPENLOOP_SECRETS_ROOT:-./secrets}/broker_receipt_roots
+    environment: BROKER_RECEIPT_ROOTS

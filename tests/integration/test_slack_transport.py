@@ -61,6 +61,6 @@ def test_session_store_fallback_settles_before_slack_runner_is_built(settings):
 async def test_run_socket_requires_app_token():
     # No SLACK_APP_TOKEN configured → exits before opening a socket.
     # An explicit argument outranks the environment, so this holds even when
-    # the developer's .env.runtime or shell sets SLACK_APP_TOKEN.
+    # the developer's .runtime.env or shell sets SLACK_APP_TOKEN.
     with pytest.raises(SystemExit):
         await run_socket(Settings(slack_app_token=None))
