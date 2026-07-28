@@ -1,0 +1,24 @@
+[Unit]
+Description=OpenLoop Docker socket adapter container
+Documentation=file:/opt/openloop/ops/systemd/README.md
+Requires=docker.service openloop-postgres.service
+Wants=network-online.target
+After=network-online.target docker.service openloop-postgres.service
+RequiresMountsFor=/opt/openloop
+PartOf=openloop.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/openloop/openloop-secrets.env
+WorkingDirectory=/opt/openloop
+ExecStartPre=/usr/bin/test -r /opt/openloop/docker-compose.deploy.yml
+ExecStartPre=/usr/bin/test -r /opt/openloop/docker-compose.broker.yml
+ExecStartPre=/usr/bin/test -r /opt/openloop/.env
+ExecStartPre=/usr/bin/test -r /opt/openloop/configs/prd/runtime.env
+ExecStartPre=/usr/bin/test -r /opt/openloop/configs/prd/broker.env
+ExecStartPre=/usr/bin/docker compose --project-name openloop --file docker-compose.deploy.yml --file docker-compose.broker.yml config --quiet
+ExecStart=/usr/bin/docker compose --project-name openloop --file docker-compose.deploy.yml --file docker-compose.broker.yml up --detach --no-deps --no-build --pull never --wait --wait-timeout 120 docker-socket-adapter
+ExecStop=/usr/bin/docker compose --project-name openloop --file docker-compose.deploy.yml --file docker-compose.broker.yml stop --timeout 30 docker-socket-adapter
+TimeoutStartSec=180
+TimeoutStopSec=60

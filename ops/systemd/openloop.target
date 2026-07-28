@@ -1,0 +1,8 @@
+[Unit]
+Description=OpenLoop production Compose deployment
+Documentation=file:/opt/openloop/ops/systemd/README.md
+Requires=openloop-runtime.service
+After=openloop-runtime.service
+
+[Install]
+WantedBy=multi-user.target

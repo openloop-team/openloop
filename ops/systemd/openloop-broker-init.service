@@ -1,0 +1,22 @@
+[Unit]
+Description=OpenLoop broker directory initializer
+Documentation=file:/opt/openloop/ops/systemd/README.md
+Requires=docker.service openloop-docker-socket-adapter.service
+Wants=network-online.target
+After=network-online.target docker.service openloop-docker-socket-adapter.service
+RequiresMountsFor=/opt/openloop
+PartOf=openloop.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/openloop/openloop-secrets.env
+WorkingDirectory=/opt/openloop
+ExecStartPre=/usr/bin/test -r /opt/openloop/docker-compose.deploy.yml
+ExecStartPre=/usr/bin/test -r /opt/openloop/docker-compose.broker.yml
+ExecStartPre=/usr/bin/test -r /opt/openloop/.env
+ExecStartPre=/usr/bin/test -r /opt/openloop/configs/prd/runtime.env
+ExecStartPre=/usr/bin/test -r /opt/openloop/configs/prd/broker.env
+ExecStartPre=/usr/bin/docker compose --project-name openloop --file docker-compose.deploy.yml --file docker-compose.broker.yml config --quiet
+ExecStart=/usr/bin/docker compose --project-name openloop --file docker-compose.deploy.yml --file docker-compose.broker.yml up --no-deps --no-build --pull never --abort-on-container-exit --exit-code-from broker-init broker-init
+TimeoutStartSec=180
