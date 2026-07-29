@@ -74,6 +74,10 @@ class WorkspaceTask:
         ``repo``/``instruction``/``base`` values also move under the code
         profile. Missing keys remain tolerated because legacy rows predate
         several shared fields.
+
+        This shim must stay until no pre-convergence rows remain in the workflow
+        and checkpoint stores. Removing it earlier breaks recovery of in-flight
+        work: those rows rehydrate as a task with no identity.
         """
         if "task_id" not in data and ("job_id" in data or "worker_state" in data):
             code_state: dict = {}
