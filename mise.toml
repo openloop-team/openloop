@@ -148,3 +148,24 @@ run = "python -m uvicorn openloop.app:app --host 0.0.0.0 --port 8000"
 [tasks.apply]
 description = "Validate an agent config, e.g. mise run apply -- -f agents/dev-platform.yaml"
 run = "openloop agents apply"
+
+[tasks.backlog]
+description = "Show the ranked Next queue from the private board"
+run = """
+set -e
+# NOTE: use printf, not echo — zsh's builtin echo expands the \\n escapes inside
+# the JSON strings and corrupts the document before jq sees it.
+items=$(gh project item-list 2 --owner openloop-team --format json --limit 200)
+next=$(printf '%s' "$items" | jq -r '.items[] | select(.status == "Next")
+  | "  \\(if .content.number then "#" + (.content.number|tostring) else "draft" end)\\t\\(.title)"')
+if [ -n "$next" ]; then
+  printf 'Next:\\n%s\\n' "$next"
+else
+  printf 'Next: empty - nothing is ranked as next.\\n'
+fi
+printf '\\n'
+printf '%s' "$items" | jq -r '[.items[] | select(.status == "Backlog")] | "Backlog: \\(length) items"'
+printf '%s' "$items" | jq -r '[.items[] | select(.status == "Icebox")] | "Icebox:  \\(length) items"'
+printf '\\nWorkstreams:\\n'
+gh issue list --label workstream --json number,title --jq '.[] | "  #\\(.number)\\t\\(.title)"' | sort
+"""
