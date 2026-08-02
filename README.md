@@ -25,7 +25,7 @@ policy, budget, approval rules, and audit trail.
 [**Features**](#what-it-does-mvp) ·
 [**How it works**](#how-it-works) ·
 [**Quickstart**](#quickstart-preliminary--commands-are-placeholders) ·
-[**Roadmap**](#roadmap) ·
+[**Capabilities**](#current-capabilities) ·
 [**Contributing**](#contributing)
 
 </div>
@@ -489,22 +489,6 @@ the workflow.
   uses Postgres advisory locks when the deploy already runs Postgres — no extra
   service — with Redis and process-local backends also available
 
-## Product direction
-
-Public work is organized around six outcome-level workstreams:
-
-- [Thread-bound workspace agent](https://github.com/openloop-team/openloop/issues/18)
-- [Container broker](https://github.com/openloop-team/openloop/issues/19)
-- [Hardening and multi-tenant readiness](https://github.com/openloop-team/openloop/issues/20)
-- [Deployment and configuration](https://github.com/openloop-team/openloop/issues/21)
-- [On-prem self-diagnostics](https://github.com/openloop-team/openloop/issues/12)
-- [Slack surface](https://github.com/openloop-team/openloop/issues/22)
-
-Each workstream states the intended outcome and completion criteria. Current
-priority and progress are intentionally not copied into the README; those live
-in the private Roadmap project, while public issues and pull requests describe
-work that is in flight.
-
 ## Scope
 
 This repository is the **open-source runtime and control plane** — self-hosted,
@@ -512,8 +496,7 @@ inspectable, and the whole product for now.
 
 It covers the agent runtime, model gateway (LiteLLM), MCP tool gateway + native
 connectors, channel/thread memory, approval flow, token/cost tracking, Slack
-async delivery, config-as-code, and Docker Compose deployment. The workstream
-issues above describe the product's direction without duplicating their status.
+async delivery, config-as-code, and Docker Compose deployment.
 
 ## Security
 
