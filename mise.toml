@@ -157,7 +157,7 @@ set -e
 # the JSON strings and corrupts the document before jq sees it.
 items=$(gh project item-list 2 --owner openloop-team --format json --limit 200)
 next=$(printf '%s' "$items" | jq -r '.items[] | select(.status == "Next")
-  | "  \\(if .content.number then "#" + (.content.number|tostring) else "draft" end)\\t\\(.title)"')
+  | "  \\(if .content.number then "#" + (.content.number|tostring) else "draft" end)\\t\\(.content.title // .title)"')
 if [ -n "$next" ]; then
   printf 'Next:\\n%s\\n' "$next"
 else
