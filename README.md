@@ -409,27 +409,26 @@ The Slack live E2E GitHub Actions workflow is manual-only and uses a protected
 environment/repository variable, or pass a channel ID when manually dispatching
 the workflow.
 
-## Roadmap
+## Current capabilities
 
-- [x] Core async runtime + task pipeline
-- [x] Slack surface (mentions, thread replies, approvals)
-- [x] LiteLLM gateway + model-policy routing
-- [x] MCP tool gateway + native GitHub connector
-- [x] Channel/thread memory (Postgres + pgvector)
-- [x] Human approval flow + token/cost tracking
-- [x] Docker Compose + config-as-code
-- [ ] Discord / Zoom / GitHub / Linear surfaces
-- [x] Coding worker (draft PRs) — connector + approval gate + crash-resumable;
+- Core async runtime + task pipeline
+- Slack surface (mentions, thread replies, approvals)
+- LiteLLM gateway + model-policy routing
+- MCP tool gateway + native GitHub connector
+- Channel/thread memory (Postgres + pgvector)
+- Human approval flow + token/cost tracking
+- Docker Compose + config-as-code
+- Coding worker (draft PRs) — connector + approval gate + crash-resumable;
   hardened (Phase 2): the worker is credential-free (edits a prepared workspace),
   all credential-bearing git ops live in one orchestrating boundary shared by
   both durable paths, and git auth rides a per-command header (never a
   token-in-URL clone, nothing in the workspace)
-- [x] Worker sandbox (Phase 3) — model-generated edits can run in a throwaway
+- Worker sandbox (Phase 3) — model-generated edits can run in a throwaway
   docker container: default-deny egress (network none), no env forwarded (LLM
   key stays in the controller), capabilities dropped, auto-reaped; fail-closed
   wiring (an unusable sandbox disables the worker, never silently runs on the
   host). `CODING_WORKER_SANDBOX=docker`
-- [x] OpenHands worker backend + spend ledger (Phase 4) — pluggable worker
+- OpenHands worker backend + spend ledger (Phase 4) — pluggable worker
   backends behind `CODING_WORKER_BACKEND=builtin|openhands`: the default stays the
   light diff worker; `openhands` drives an agentic OpenHands run over the same
   prepared, credential-free workspace (`openhands` extra; with
@@ -439,7 +438,7 @@ the workflow.
   capped **fail-closed** by the owning agent's `per_task_usd` before anything
   is pushed — on both durable paths — and the agentic backend refuses to
   register without that cap
-- [x] OpenHands cold resume — the Docker
+- OpenHands cold resume — the Docker
   agent-server is digest-pinned, loopback-only, and authenticated; conversation
   state lives in a private per-job mount outside the checkout; independent
   per-job keys protect conversation state and AES-GCM workspace artifacts.
@@ -450,7 +449,7 @@ the workflow.
   retains a final artifact until the draft PR is durable. Enabled by default for
   Docker OpenHands; set `CODING_WORKER_OPENHANDS_COLD_RESUME_ENABLED=false` as
   an operational rollback.
-- [x] Claude Code worker backend (`CODING_WORKER_BACKEND=claude`) —
+- Claude Code worker backend (`CODING_WORKER_BACKEND=claude`) —
   **experimental, personal use only**: drives the `claude` CLI in headless mode
   (`claude -p`) over the same prepared, credential-free workspace, authenticating
   with whatever `claude` is logged into — **including a Pro/Max subscription**.
@@ -467,31 +466,44 @@ the workflow.
   change between `claude` releases. Keep it off by default; for anything shared
   or production use metered API keys (`builtin`/`openhands`) or a local model.
   The backend seam makes reverting one env var
-- [x] Budget/usage unification + throughput limits (Phase 5) — worker spend is
+- Budget/usage unification + throughput limits (Phase 5) — worker spend is
   attributed to the *invoking* agent (threaded through the approval args, so
   multi-agent configs charge and cap the right budget) and gated by that
   agent's monthly budget before an attempt does any work (`block | warn`
   preserved); per-agent rate/concurrency limits (`spec.limits:
   max_concurrent_tasks, tasks_per_minute`) refuse excess tasks at the runtime
   entry with a tenant-shaped scope key, recorded in the audit trail
-- [x] Durable workflows — engine + approval-as-wait-node; worker resumes on crash;
+- Durable workflows — engine + approval-as-wait-node; worker resumes on crash;
   chat pipeline runs as a workflow (bounded: persisted turn state + idempotent
   writes; model calls are not replayed on crash)
-- [x] Slack async delivery — persisted surface sessions, thinking
+- Slack async delivery — persisted surface sessions, thinking
   status + final postbacks, approval/thread-reply continuation, startup reconciler,
   conversation-history threading (a follow-up turn replays the thread's prior
   exchanges), idempotency-keyed delivery (a crash between a successful post and
   recording its id is recovered by key instead of re-posting; best-effort, falls
   back to at-least-once if the surface lookup can't run), and delivery outside the
   original request lifecycle
-- [x] Cross-process coordination — a distributed lock so that when several
+- Cross-process coordination — a distributed lock so that when several
   replicas boot together only one leads recovery, re-run on an interval so a
   leader that dies mid-sweep is healed by a survivor. `LOCK_BACKEND=auto` (default)
   uses Postgres advisory locks when the deploy already runs Postgres — no extra
   service — with Redis and process-local backends also available
-- [ ] Hardening for full production parity — more surface adapters and an explicit
-  model-call replay/caching policy
-- [ ] Next.js dashboard, OTel/Langfuse tracing
+
+## Product direction
+
+Public work is organized around six outcome-level workstreams:
+
+- [Thread-bound workspace agent](https://github.com/openloop-team/openloop/issues/18)
+- [Container broker](https://github.com/openloop-team/openloop/issues/19)
+- [Hardening and multi-tenant readiness](https://github.com/openloop-team/openloop/issues/20)
+- [Deployment and configuration](https://github.com/openloop-team/openloop/issues/21)
+- [On-prem self-diagnostics](https://github.com/openloop-team/openloop/issues/12)
+- [Slack surface](https://github.com/openloop-team/openloop/issues/22)
+
+Each workstream states the intended outcome and completion criteria. Current
+priority and progress are intentionally not copied into the README; those live
+in the private Roadmap project, while public issues and pull requests describe
+work that is in flight.
 
 ## Scope
 
@@ -500,8 +512,8 @@ inspectable, and the whole product for now.
 
 It covers the agent runtime, model gateway (LiteLLM), MCP tool gateway + native
 connectors, channel/thread memory, approval flow, token/cost tracking, Slack
-async delivery, config-as-code, and Docker Compose deployment. The roadmap above
-tracks what's planned.
+async delivery, config-as-code, and Docker Compose deployment. The workstream
+issues above describe the product's direction without duplicating their status.
 
 ## Security
 
