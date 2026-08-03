@@ -24,7 +24,8 @@ approval → workflow → PR.
 
 from __future__ import annotations
 
-from openloop.tasks import WorkspaceTask
+from openloop.tasks import CONTINUATION, WorkspaceTask
+from openloop.tasks.contract import START_GATE_EVENT, WORKSPACE_TASK_WORKFLOW
 from openloop.tools.coding_worker import (
     AttemptRunner,
     WorkerState,
@@ -42,10 +43,12 @@ from openloop.workflows.engine import (
     WorkflowPark,
 )
 
-WORKFLOW_NAME = "workspace_task"
+# Both are declared by the task contract (openloop.tasks.contract) and re-exported
+# here, where every existing importer already reaches for them.
+WORKFLOW_NAME = WORKSPACE_TASK_WORKFLOW
 
 # The wait node's name doubles as the event the approval emits.
-APPROVAL_EVENT = "await_approval"
+APPROVAL_EVENT = START_GATE_EVENT
 
 
 def _worker_phase(completed_steps: list[str]) -> str:
@@ -241,9 +244,13 @@ def build_workspace_task_workflow(
             body=_pr_body(s["body"], task.task_id),
             draft=True,
         )
+        # A continuation pushes onto the same head, so the PR it "opens" is the
+        # one this task already owns. Say so — per-turn delivery must not report
+        # a second draft PR that was never created.
+        continued = bool(s.get(CONTINUATION)) and existing is not None
         ctx.instance.result = {
             "job_id": task.task_id,
-            "status": "opened",
+            "status": "updated" if continued else "opened",
             "branch": branch,
             "pr_number": pull.get("number"),
             "pr_url": pull.get("html_url"),
@@ -252,8 +259,8 @@ def build_workspace_task_workflow(
             "prompt_tokens": s.get("prompt_tokens", 0),
             "completion_tokens": s.get("completion_tokens", 0),
             "summary": (
-                f"opened draft PR #{pull.get('number')} in {repo} "
-                f"(job {task.task_id})"
+                f"{'updated' if continued else 'opened'} draft PR "
+                f"#{pull.get('number')} in {repo} (job {task.task_id})"
             ),
         }
         cleanup = getattr(orchestrator, "cleanup_attempt", None)
@@ -268,13 +275,20 @@ def build_workspace_task_workflow(
     def _steps_for(state: dict) -> list[Step]:
         if state.get("profile", "code") == "investigate":
             return _investigate_steps(investigator)  # unreachable in Stage 1; see guard
-        return [
-            Step(APPROVAL_EVENT, wait=True),
+        work = [
             # This step owns schema-first resume rules. Marking it non-resumable
             # would abandon even safe parked/final boundaries.
             Step("run_worker", run_worker, resumable=True),
             Step("open_pr", open_pr),
         ]
+        if state.get(CONTINUATION):
+            # A continuation turn re-enters a task that already passed its start
+            # gate (Gate.START gates the task, not each turn), and it carries
+            # that approval's id forward — so it has no wait node of its own.
+            # The marker is part of the instance's initial state and never
+            # removed, so this resolves identically on every re-drive.
+            return work
+        return [Step(APPROVAL_EVENT, wait=True), *work]
 
     return Workflow(WORKFLOW_NAME, [], steps_resolver=_steps_for)
 

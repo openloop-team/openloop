@@ -1338,7 +1338,11 @@ class GitWorkspaceOrchestrator:
                 )
                 await step("clone")
 
-                await self._git("checkout", "-b", state.branch, cwd=workspace)
+                # -B, not -b: a continuation turn clones the task's own branch
+                # as its base (so it builds on the work already on the PR), and
+                # the local branch of that name already exists at HEAD. On a
+                # first turn the branch is new and -B behaves exactly like -b.
+                await self._git("checkout", "-B", state.branch, cwd=workspace)
                 await step("branch")
 
             # The worker edits the prepared workspace. No credential in scope:

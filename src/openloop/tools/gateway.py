@@ -13,6 +13,8 @@ from openloop.approvals.store import (
     ApprovalStore,
     InMemoryApprovalStore,
 )
+from openloop.tasks.binding import ThreadTask, ThreadTaskStore
+from openloop.tasks.contract import Gate, profile_for
 from openloop.tools.aliases import ACTION_ALIASES, _canonical_action
 from openloop.tools.base import (
     Invocation,
@@ -63,6 +65,7 @@ class ToolGateway:
         tools: list[Tool] | None = None,
         approvals: ApprovalStore | None = None,
         engine: "WorkflowEngine | None" = None,
+        tasks: ThreadTaskStore | None = None,
     ) -> None:
         self._tools: dict[str, Tool] = {}
         for tool in tools or []:
@@ -71,6 +74,12 @@ class ToolGateway:
         # Optional: when set, a tool that declares a `workflow` runs as a durable
         # workflow — approval becomes a wait node and resolve() emits the event.
         self.engine = engine
+        # Optional: when set, a gated workspace task is bound to the thread that
+        # requested it, so a later reply continues that task instead of
+        # delegating a second one. The gateway is where the binding is born —
+        # it is the one place that sees the task's identity, its authorization,
+        # and the thread scope at the same moment.
+        self.tasks = tasks
         # Optional Phase B warm-workspace pool (set during app wiring). Held here
         # so the app can reach it to wire its durable sink + lifecycle without a
         # separate registry; the orchestrator uses it directly.
@@ -298,6 +307,12 @@ class ToolGateway:
             # For a workflow-backed tool, start the workflow now; it parks on its
             # approval wait node. The approval event (from resolve) wakes it.
             await self._maybe_start_workflow(tool, request)
+            # Bind the task to the thread that asked for it, before the human
+            # decides: the binding is the task's birth record, and it must exist
+            # even if this process dies between the card and the click.
+            await self._bind_thread_task(
+                request, warm_key=warm_key, requested_by=requested_by
+            )
             logger.info("approval required for %s (id=%s)", action, request.id)
             return Invocation(
                 status="pending_approval",
@@ -615,6 +630,9 @@ class ToolGateway:
             # A None return means already terminal or never created — nothing
             # can revive a denied row, so the effect is ensured either way.
             await self.engine.cancel(instance_id, "approval denied")
+            # A task denied at its start gate was never authorized: retire its
+            # thread binding so no reply can continue it.
+            await self._retire_thread_task(request, "approval denied")
             await self._mark_reconciled_safe(request.id)
             return True
         if kind == "direct":
@@ -645,6 +663,77 @@ class ToolGateway:
             instance_id=request.workflow_instance_id or _instance_id(request),
             initial_state=_workflow_initial_state(request),
         )
+
+    async def _bind_thread_task(
+        self,
+        request: ApprovalRequest,
+        *,
+        warm_key: str | None,
+        requested_by: str | None,
+    ) -> None:
+        """Record this thread's binding to the workspace task being created.
+
+        Only a **gated** workspace-task profile binds: its gate is what makes
+        the task an authorized, durable thing a later reply may re-enter without
+        a second card. An ungated profile (a read-only investigation) runs
+        synchronously, owns no durable branch or PR identity, and leaves the
+        thread free for the next request.
+
+        ``warm_key`` is the invoking turn's thread scope — gateway-supplied, so
+        a model-supplied value can never bind a task to somebody else's thread.
+        A turn with no thread (a DM-less API call, a test) binds nothing.
+        """
+        if self.tasks is None or not warm_key:
+            return
+        _, permission = split_action(request.action)
+        profile = profile_for(permission)
+        if profile is None or profile.gate is Gate.NONE:
+            return
+        task_id = request.args.get("job_id")
+        if not task_id:
+            return
+        try:
+            await self.tasks.bind(
+                ThreadTask(
+                    task_id=task_id,
+                    scope_key=warm_key,
+                    profile=profile.name,
+                    entry_action=profile.entry_action,
+                    agent=request.agent,
+                    agent_id=request.args.get("agent_id"),
+                    approval_id=request.id,
+                    requested_by=requested_by,
+                    instance_id=request.workflow_instance_id,
+                    session_id=request.args.get("session_id"),
+                    state=_workflow_initial_state(request),
+                )
+            )
+        except Exception:  # noqa: BLE001 — a lost binding costs continuation only
+            logger.exception(
+                "failed to bind workspace task %s to its thread; it will run "
+                "but no reply can continue it",
+                task_id,
+            )
+
+    async def _retire_thread_task(
+        self, request: ApprovalRequest, reason: str
+    ) -> None:
+        """Retire the binding a denied request's task was born with.
+
+        Retiring names only what the durable row itself carries, and retiring an
+        id this gateway never bound is a no-op, so a direct request whose
+        model-supplied ``job_id`` collides with an unrelated task cannot retire
+        it: a bound task's id is gateway-minted for the workflow path only.
+        """
+        if self.tasks is None:
+            return
+        task_id = request.args.get("job_id")
+        if not task_id:
+            return
+        try:
+            await self.tasks.retire(task_id, reason)
+        except Exception:  # noqa: BLE001 — the deny effect itself already landed
+            logger.exception("failed to retire workspace task binding %s", task_id)
 
 
 def _instance_id(request: ApprovalRequest) -> str:

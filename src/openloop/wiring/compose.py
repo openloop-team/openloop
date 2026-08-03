@@ -21,6 +21,7 @@ from openloop.memory import InMemoryStore
 from openloop.postgres import BorrowedPostgresStore, create_pool
 from openloop.sessions import InMemorySurfaceSessionStore, InMemoryThreadRecordStore
 from openloop.surfaces.slack import build_slack_app
+from openloop.tasks import InMemoryThreadTaskStore
 from openloop.usage import InMemoryTaskLimiter, InMemoryUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from openloop.wiring import builders
@@ -37,6 +38,7 @@ _STORE_KEYS = {
     "workflows",
     "sessions",
     "threads",
+    "tasks",
 }
 _LEAF_KEYS = _STORE_KEYS | {
     "embedder",
@@ -251,6 +253,16 @@ async def compose(
             label="thread-record",
             post_setup=_reset_thread_claims,
         )
+        tasks = await _settle_store(
+            stack,
+            _override_or(
+                selected, "tasks", lambda: builders.build_thread_task_store(settings)
+            ),
+            InMemoryThreadTaskStore,
+            pool=pool,
+            mode=mode,
+            label="thread-task",
+        )
         stores = SettledStores(
             memory=memory,
             usage=usage,
@@ -259,6 +271,7 @@ async def compose(
             workflows=workflows,
             sessions=sessions,
             threads=threads,
+            tasks=tasks,
         )
 
         coordinator_candidate = _override_or(
@@ -299,6 +312,7 @@ async def compose(
                 engine,
                 usage=stores.usage,
                 broker_handle=broker_handle,
+                tasks=stores.tasks,
             )
         else:
             tools = tools_factory(stores)
@@ -337,6 +351,7 @@ async def compose(
                 bot_token=settings.slack_bot_token,
                 signing_secret=settings.slack_signing_secret or None,
                 threads=stores.threads,
+                tasks=stores.tasks,
             )
             session_runner = getattr(slack_app, "_session_runner", None)
             if settings.slack_signing_secret:

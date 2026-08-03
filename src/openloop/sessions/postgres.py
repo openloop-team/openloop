@@ -52,6 +52,10 @@ class PostgresSurfaceSessionStore(BorrowedPostgresStore):
                 "ALTER TABLE surface_sessions "
                 "ADD COLUMN IF NOT EXISTS result_artifact_ref TEXT"
             )
+            # Migration for tables created before thread-bound task continuation.
+            await conn.execute(
+                "ALTER TABLE surface_sessions ADD COLUMN IF NOT EXISTS task_id TEXT"
+            )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS surface_sessions_status_idx "
                 "ON surface_sessions (status, updated_at DESC)"
@@ -73,6 +77,11 @@ class PostgresSurfaceSessionStore(BorrowedPostgresStore):
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS surface_sessions_thread_idx "
                 "ON surface_sessions (channel, thread)"
+            )
+            # Backs the instance → session lookup (workflow callback → delivery).
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS surface_sessions_instance_idx "
+                "ON surface_sessions (workflow_instance_id)"
             )
 
     async def get(self, session_id: str) -> SurfaceSession | None:
@@ -106,6 +115,18 @@ class PostgresSurfaceSessionStore(BorrowedPostgresStore):
                 "SELECT * FROM surface_sessions WHERE approval_ids @> $1::jsonb "
                 "ORDER BY updated_at DESC LIMIT 1",
                 json.dumps([approval_id]),
+            )
+        return _row_to_session(row) if row else None
+
+    async def get_by_instance(self, instance_id: str) -> SurfaceSession | None:
+        if not instance_id:
+            return None
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM surface_sessions WHERE workflow_instance_id = $1 "
+                "ORDER BY updated_at DESC LIMIT 1",
+                instance_id,
             )
         return _row_to_session(row) if row else None
 
@@ -184,10 +205,11 @@ class PostgresSurfaceSessionStore(BorrowedPostgresStore):
                     id, surface, workspace, agent, channel, thread, event_id,
                     status, workflow_instance_id, progress_message_id,
                     final_message_id, approval_ids, request_text, result_summary,
-                    result_artifact_ref, error, updated_at
+                    result_artifact_ref, error, task_id, updated_at
                 )
                 VALUES (
-                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now()
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+                    now()
                 )
                 ON CONFLICT (id) DO UPDATE SET
                     surface = EXCLUDED.surface,
@@ -205,6 +227,7 @@ class PostgresSurfaceSessionStore(BorrowedPostgresStore):
                     result_summary = EXCLUDED.result_summary,
                     result_artifact_ref = EXCLUDED.result_artifact_ref,
                     error = EXCLUDED.error,
+                    task_id = EXCLUDED.task_id,
                     updated_at = now()
                 """,
                 session.id,
@@ -223,6 +246,7 @@ class PostgresSurfaceSessionStore(BorrowedPostgresStore):
                 session.result_summary,
                 session.result_artifact_ref,
                 session.error,
+                session.task_id,
             )
 
     async def recent(self, limit: int = 100) -> list[SurfaceSession]:
@@ -256,6 +280,7 @@ def _row_to_session(row) -> SurfaceSession:
         result_summary=row["result_summary"],
         result_artifact_ref=row["result_artifact_ref"],
         error=row["error"],
+        task_id=row["task_id"],
         created_at=row["created_at"] or now,
         updated_at=row["updated_at"] or now,
     )

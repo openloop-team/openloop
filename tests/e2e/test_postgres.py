@@ -1246,3 +1246,98 @@ async def _delete_approvals(store, ids):
             await conn.execute("DELETE FROM approvals WHERE id = ANY($1)", ids)
     except Exception:
         pass
+
+
+async def test_thread_task_binding_across_real_postgres(postgres_pool):
+    """The thread↔task binding round-trips, and its claim CAS is exclusive."""
+    if not await _reachable():
+        pytest.skip(f"no Postgres reachable at {DSN}")
+
+    from openloop.tasks import BUSY, CLOSED, OPEN, ThreadTask
+    from openloop.tasks.postgres import PostgresThreadTaskStore
+
+    task_id = f"task-{uuid.uuid4().hex[:8]}"
+    other_id = f"task-{uuid.uuid4().hex[:8]}"
+    scope = f"slack\x1facme\x1fdev-platform\x1fC1\x1fthr-{uuid.uuid4().hex[:8]}"
+
+    store = PostgresThreadTaskStore()
+    await store.setup(postgres_pool)
+    try:
+        await store.bind(ThreadTask(
+            task_id=task_id,
+            scope_key=scope,
+            profile="code",
+            entry_action="code:write",
+            agent="dev-platform",
+            agent_id="45006d4ce5c64d2c96ed1fe3277d7347",
+            approval_id="appr-1",
+            requested_by="U1",
+            instance_id=task_id,
+            session_id="sess-1",
+            state={"task_id": task_id, "profile": "code"},
+        ))
+        # Write-once: a re-invoke never re-points the binding at another thread.
+        await store.bind(ThreadTask(
+            task_id=task_id, scope_key="other-thread", profile="code",
+            entry_action="code:write", state={},
+        ))
+
+        # A fresh store (a restart) reconstructs the binding cold.
+        store2 = PostgresThreadTaskStore()
+        await store2.setup(postgres_pool)
+        try:
+            bound = await store2.bound(scope)
+            assert bound is not None and bound.task_id == task_id
+            assert bound.scope_key == scope
+            assert bound.status == OPEN
+            assert bound.requested_by == "U1"
+            assert bound.approval_id == "appr-1"
+            assert bound.state["profile"] == "code"
+            assert bound.turns == 1
+
+            # The claim is an atomic CAS: exactly one turn drives the task.
+            claimed = await store2.claim(
+                task_id, instance_id=f"{task_id}:cont:s2", session_id="s2"
+            )
+            assert claimed is not None and claimed.status == BUSY
+            assert claimed.turns == 2
+            assert await store2.claim(task_id, instance_id="loser") is None
+            assert [r.task_id for r in await store2.claimed()] == [task_id]
+
+            released = await store2.release(
+                task_id, state={"task_id": task_id, "profile_state": {"code": {}}}
+            )
+            assert released.status == OPEN
+            assert released.state["profile_state"] == {"code": {}}
+            assert await store2.claimed() == []
+
+            # A closed binding leaves the thread with no continuable task, and
+            # never reopens — but a late state write is still recorded.
+            await store2.retire(task_id, "approval denied")
+            assert await store2.bound(scope) is None
+            await store2.release(task_id, state={"task_id": task_id, "late": True})
+            closed = await store2.get(task_id)
+            assert closed.status == CLOSED
+            assert closed.closed_reason == "approval denied"
+            assert closed.state["late"] is True
+            assert await store2.claim(task_id, instance_id="nope") is None
+
+            # A second task in the same thread binds after the first is closed.
+            await store2.bind(ThreadTask(
+                task_id=other_id, scope_key=scope, profile="code",
+                entry_action="code:write", requested_by="U1", state={},
+            ))
+            assert (await store2.bound(scope)).task_id == other_id
+        finally:
+            await store2.close()
+    finally:
+        try:
+            pool = store._require_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM workspace_thread_tasks WHERE task_id = ANY($1)",
+                    [task_id, other_id],
+                )
+        except Exception:
+            pass
+        await store.close()

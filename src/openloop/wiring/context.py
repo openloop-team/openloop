@@ -13,6 +13,7 @@ from openloop.coordination import DistributedLock
 from openloop.memory import Embedder, MemoryStore
 from openloop.runtime import Runtime
 from openloop.sessions import SurfaceSessionStore, ThreadRecordStore
+from openloop.tasks import ThreadTaskStore
 from openloop.tools import ToolGateway
 from openloop.usage import TaskLimiter, UsageStore
 from openloop.workflows import WorkflowEngine, WorkflowStore
@@ -29,6 +30,7 @@ class SettledStores:
     workflows: WorkflowStore
     sessions: SurfaceSessionStore
     threads: ThreadRecordStore
+    tasks: ThreadTaskStore
 
 
 @dataclass(slots=True)
@@ -121,3 +123,7 @@ class AppContext:
     @property
     def threads(self) -> ThreadRecordStore:
         return self.stores.threads
+
+    @property
+    def tasks(self) -> ThreadTaskStore:
+        return self.stores.tasks

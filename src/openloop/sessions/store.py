@@ -98,6 +98,11 @@ class SurfaceSession:
     target: SurfaceTarget
     status: str = "queued"
     workflow_instance_id: str | None = None
+    # The durable workspace task this turn drove, when it drove one (a
+    # continuation of the thread's bound task). Set, the turn's outcome is
+    # recovered from that task's workflow instance rather than from a model
+    # turn — the session is one delivery of a task that outlives it.
+    task_id: str | None = None
     # Durable in-thread approval card id. The column name is historical from the
     # earlier posted-progress-message flow.
     progress_message_id: str | None = None
@@ -124,6 +129,8 @@ class SurfaceSessionStore(Protocol):
     async def get_by_event(self, event_id: str) -> SurfaceSession | None: ...
 
     async def get_by_approval(self, approval_id: str) -> SurfaceSession | None: ...
+
+    async def get_by_instance(self, instance_id: str) -> SurfaceSession | None: ...
 
     async def get_by_thread(
         self, target: "SurfaceTarget"
@@ -169,6 +176,16 @@ class InMemorySurfaceSessionStore:
             self._by_id.values(), key=lambda s: s.updated_at, reverse=True
         ):
             if approval_id in session.approval_ids:
+                return session
+        return None
+
+    async def get_by_instance(self, instance_id: str) -> SurfaceSession | None:
+        if not instance_id:
+            return None
+        for session in sorted(
+            self._by_id.values(), key=lambda s: s.updated_at, reverse=True
+        ):
+            if session.workflow_instance_id == instance_id:
                 return session
         return None
 

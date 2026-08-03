@@ -31,6 +31,7 @@ from openloop.surfaces.approvals import (
     OPENHANDS_ACCEPT_ACTION,
     OPENHANDS_REJECT_ACTION,
 )
+from openloop.tasks import ThreadTaskStore
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +109,9 @@ async def handle_message(
 
     Only a mention **of the bot** is left to :func:`handle_mention`
     (``app_mention`` fires solely for bot mentions); a reply mentioning some other
-    user is a perfectly valid follow-up and is handled here. The reply runs as a
-    fresh turn in the same thread; ``run`` dedupes on the message ts.
+    user is a perfectly valid follow-up and is handled here. The reply runs as the
+    next turn of the thread's bound workspace task when it is eligible to continue
+    one, and as a fresh model turn otherwise; ``run`` dedupes on the message ts.
     """
     if event.get("bot_id") or event.get("subtype"):
         return  # bot message, or an edit/delete/join subtype — not a user reply
@@ -142,6 +144,7 @@ def build_slack_app(
     bot_token: str,
     signing_secret: str | None = None,
     threads: ThreadRecordStore | None = None,
+    tasks: ThreadTaskStore | None = None,
 ) -> AsyncApp:
     """Build the Bolt app (mention + approval handlers) bound to a runtime.
 
@@ -156,7 +159,11 @@ def build_slack_app(
         app = AsyncApp(token=bot_token, request_verification_enabled=False)
 
     runner = SessionRunner(
-        runtime, sessions, SlackSurfaceDelivery(app.client), threads=threads
+        runtime,
+        sessions,
+        SlackSurfaceDelivery(app.client),
+        threads=threads,
+        tasks=tasks,
     )
     # Exposed so the composition root and approval handler can reach the runner.
     app._session_runner = runner  # type: ignore[attr-defined]
