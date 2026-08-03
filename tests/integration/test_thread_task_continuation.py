@@ -280,6 +280,27 @@ async def test_a_reply_waits_for_the_turn_already_driving_the_task():
     assert (await stores.sessions.get_by_event("ev2")).status == "completed"
 
 
+async def test_a_continuation_reopens_a_lost_pr_against_the_original_base():
+    stores = Stores()
+    _, _, _, _, _, orchestrator, github = await _start_task(stores)
+    # Somebody closed the draft PR (or the first turn's open_pr failed after the
+    # push): the continuation has to raise a new one — against the base the task
+    # targets, never against its own head.
+    github.pulls.clear()
+
+    runner, *_ = _process(stores, [], orchestrator=orchestrator, github=github)
+    await runner.run_threaded(
+        Task(text="also handle nulls", surface="slack", channel="C1", user="U1"),
+        _target("ev2"),
+    )
+
+    assert len(github.pulls) == 1
+    reopened = github.pulls[0]
+    assert reopened["head"] == orchestrator.runs[0].branch
+    assert reopened["base"] == "main"
+    assert (await stores.sessions.get_by_event("ev2")).status == "completed"
+
+
 async def test_a_denied_task_is_never_continued():
     stores = Stores()
     # A denied first turn never reaches a model continuation, so the second
@@ -307,6 +328,34 @@ async def test_a_denied_task_is_never_continued():
     assert (await stores.sessions.get_by_event("ev2")).result_summary == (
         "anything else?"
     )
+
+
+async def test_recovery_drains_a_reply_a_crash_left_queued():
+    stores = Stores()
+    runner, _, _, _, _, orchestrator, github = await _start_task(stores)
+    record = await stores.tasks.bound(thread_scope_key(_target("ev1")))
+    # A turn claimed the task and died with it: the claim points at an instance
+    # that no longer exists, and the reply that arrived meanwhile is queued with
+    # nobody left to drain it.
+    await stores.tasks.claim(record.task_id, instance_id="lost", session_id="gone")
+    await runner.run_threaded(
+        Task(text="also handle nulls", surface="slack", channel="C1", user="U1"),
+        _target("ev2"),
+    )
+    assert await stores.sessions.get_by_event("ev2") is None
+
+    # A fresh process recovers: the orphaned claim is freed and the queued reply
+    # is finally run as the task's next turn.
+    cold_worker = FakeWorkerOrchestrator(title="Add retries")
+    cold, *_ = _process(stores, [], orchestrator=cold_worker, github=github)
+    repaired = await cold.reconcile()
+
+    assert record.task_id in repaired
+    assert len(cold_worker.runs) == 1
+    assert cold_worker.runs[0].job_id == record.task_id
+    session = await stores.sessions.get_by_event("ev2")
+    assert session.status == "completed"
+    assert await stores.threads.pending_scopes() == []
 
 
 async def test_a_crashed_turn_releases_its_claim_on_recovery():

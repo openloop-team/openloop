@@ -595,13 +595,27 @@ class SessionRunner:
         return repaired
 
     async def _drain_pending_threads(self, sessions: list[SurfaceSession]) -> None:
-        """Kick the drain for every thread these sessions belong to.
+        """Drain threads that still hold a queued reply nobody is draining.
 
-        Replies that arrived while a task was busy sit in the durable inbox with
-        nobody draining them once the process dies. Re-driving each known thread
-        is idempotent (an empty inbox never claims a turn) and cheap.
+        Replies deferred while a task was busy sit in the durable inbox with no
+        leader once the process dies. This sweep runs on the recovery interval,
+        so it asks the store which scopes actually have something queued rather
+        than probing every thread it has ever seen — in the ordinary case that
+        is one query returning nothing. A scope with no recent session to
+        address it from is left for the next inbound event, which carries its
+        own target.
         """
         if self.threads is None:
+            return
+        pending = getattr(self.threads, "pending_scopes", None)
+        if pending is None:
+            return
+        try:
+            scopes = set(await pending())
+        except Exception:  # noqa: BLE001 — the sweep's other repairs still stand
+            logger.exception("failed to list threads with queued replies")
+            return
+        if not scopes:
             return
         seen: set[str] = set()
         for session in sessions:
@@ -609,7 +623,7 @@ class SessionRunner:
             if target.thread is None:
                 continue
             key = thread_scope_key(target)
-            if key in seen:
+            if key not in scopes or key in seen:
                 continue
             seen.add(key)
             try:

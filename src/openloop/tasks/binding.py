@@ -33,6 +33,7 @@ implementation.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
@@ -148,14 +149,26 @@ class ThreadTaskStore(Protocol):
 
 
 class InMemoryThreadTaskStore:
-    """Process-local bindings — good for dev and tests (not crash-durable)."""
+    """Process-local bindings — good for dev and tests (not crash-durable).
+
+    Snapshot-isolated like the Postgres rows it stands in for: every boundary
+    copies the record *including its ``state`` blob*, so mutating a record you
+    were handed never reaches the store except through a store operation.
+    Without this the two backends diverge exactly where it matters — Postgres
+    deserializes fresh JSONB per read, while a shared dict here would let a
+    caller advance the durable task before the turn describing it has run.
+    """
 
     def __init__(self) -> None:
         self._by_id: dict[str, ThreadTask] = {}
 
+    @staticmethod
+    def _snapshot(record: ThreadTask) -> ThreadTask:
+        return replace(record, state=copy.deepcopy(record.state))
+
     async def get(self, task_id: str) -> ThreadTask | None:
         record = self._by_id.get(task_id)
-        return replace(record) if record is not None else None
+        return self._snapshot(record) if record is not None else None
 
     async def bound(self, scope_key: str) -> ThreadTask | None:
         if not scope_key:
@@ -170,16 +183,16 @@ class InMemoryThreadTaskStore:
         # Newest wins: a thread that (legitimately) started a second task after
         # the first was closed continues the one it is actually working on.
         matches.sort(key=lambda r: r.created_at)
-        return replace(matches[-1])
+        return self._snapshot(matches[-1])
 
     async def bind(self, record: ThreadTask) -> ThreadTask:
         existing = self._by_id.get(record.task_id)
         if existing is not None:
-            return replace(existing)
-        stored = replace(record)
+            return self._snapshot(existing)
+        stored = self._snapshot(record)
         stored.created_at = stored.updated_at = _now()
         self._by_id[record.task_id] = stored
-        return replace(stored)
+        return self._snapshot(stored)
 
     async def claim(
         self, task_id: str, *, instance_id: str, session_id: str | None = None
@@ -193,7 +206,7 @@ class InMemoryThreadTaskStore:
         record.session_id = session_id
         record.turns += 1
         record.updated_at = _now()
-        return replace(record)
+        return self._snapshot(record)
 
     async def release(
         self,
@@ -210,9 +223,9 @@ class InMemoryThreadTaskStore:
             record.status = status
             record.closed_reason = reason if status == CLOSED else None
         if state is not None:
-            record.state = dict(state)
+            record.state = copy.deepcopy(state)
         record.updated_at = _now()
-        return replace(record)
+        return self._snapshot(record)
 
     async def retire(self, task_id: str, reason: str) -> ThreadTask | None:
         return await self.release(task_id, status=CLOSED, reason=reason)
@@ -220,4 +233,4 @@ class InMemoryThreadTaskStore:
     async def claimed(self, limit: int = 200) -> list[ThreadTask]:
         rows = [r for r in self._by_id.values() if r.status == BUSY]
         rows.sort(key=lambda r: r.updated_at)
-        return [replace(r) for r in rows[:limit]]
+        return [self._snapshot(r) for r in rows[:limit]]

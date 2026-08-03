@@ -236,6 +236,42 @@ async def test_an_unpushed_task_continues_from_its_original_base():
     assert state["profile_state"]["code"]["worker_state"]["branch"] == "openloop/job-j1"
 
 
+async def test_building_a_continuation_never_advances_the_durable_record():
+    # The record describes what HAS run. Building the next turn's state must not
+    # touch it — otherwise a turn that never starts (the workflow refuses, the
+    # process dies) leaves the task claiming work that never happened, and the
+    # in-memory store diverges from Postgres, which deserializes fresh JSONB.
+    store = InMemoryThreadTaskStore()
+    await store.bind(_record())
+    claimed = await store.claim("j1", instance_id="j1:cont:s2", session_id="s2")
+
+    continuation_state(claimed, request="also handle nulls", session_id="s2")
+
+    code = (await store.get("j1")).state["profile_state"]["code"]
+    assert code["instruction"] == "add retries"
+    assert code["base"] == "main"
+    assert code["worker_state"]["completed_steps"] == [
+        "clone", "branch", "edit", "commit", "push",
+    ]
+    assert "requests" not in code
+
+
+async def test_the_pull_requests_target_survives_the_base_moving_to_the_branch():
+    # A continuation checks out the task's own branch, so `base` starts naming
+    # the branch. The PR's target must not follow it there: a pull request from
+    # a branch onto itself is not a pull request.
+    record = _record()
+    state = continuation_state(record, request="also handle nulls", session_id="s2")
+    code = state["profile_state"]["code"]
+    assert code["base"] == "openloop/job-j1"
+    assert code["pr_base"] == "main"
+
+    # It is pinned once, not re-derived from the (now branch-valued) base.
+    record.state = state
+    third = continuation_state(record, request="and a test", session_id="s3")
+    assert third["profile_state"]["code"]["pr_base"] == "main"
+
+
 async def test_continuation_instance_id_is_deterministic_per_turn():
     assert continuation_instance_id("j1", "s2") == "j1:cont:s2"
     assert continuation_instance_id("j1", "s2") != continuation_instance_id("j1", "s3")

@@ -28,6 +28,7 @@ was authorized. A profile that needs per-effect gating expresses that as
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 
 from openloop.tasks.binding import OPEN, ThreadTask
@@ -111,14 +112,20 @@ def continuation_state(
 
 
 def _rebuild(record: ThreadTask) -> WorkspaceTask:
-    """Rehydrate the durable task, refusing a record that can't be re-entered."""
+    """Rehydrate the durable task, refusing a record that can't be re-entered.
+
+    Deep-copies the record's state first. ``WorkspaceTask.from_dict`` aliases
+    the nested ``profile_state`` it is handed, so a builder mutating the
+    rehydrated task would otherwise reach back into the caller's record — and
+    advance the durable task before the turn it describes has run.
+    """
     builder = _BUILDERS.get(record.profile)
     if builder is None:
         raise ContinuationUnavailable(
             f"profile {record.profile!r} has no continuation"
         )
     try:
-        task = WorkspaceTask.from_dict(record.state or {})
+        task = WorkspaceTask.from_dict(copy.deepcopy(record.state or {}))
     except Exception as exc:  # noqa: BLE001 — a malformed row is never continued
         raise ContinuationUnavailable(f"unreadable task state: {exc}") from exc
     if not task.task_id:
@@ -154,6 +161,14 @@ def _continue_code(task: WorkspaceTask, request: str) -> None:
     branch = worker["branch"]
     pushed = "push" in (worker.get("completed_steps") or [])
     base = branch if pushed else (worker.get("base") or code.get("base") or "main")
+    # The branch the task's pull request targets, pinned before ``base`` starts
+    # tracking the branch itself. Without it a continuation that finds no open
+    # PR — one a human closed, or one whose first open failed — would try to
+    # raise a pull request from the branch onto itself, which is not a pull
+    # request at all and fails on every later turn too.
+    code.setdefault(
+        "pr_base", worker.get("base") or code.get("base") or "main"
+    )
 
     history = list(code.get("requests") or [])
     if not history and code.get("instruction"):

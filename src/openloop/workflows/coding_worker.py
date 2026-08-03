@@ -233,7 +233,10 @@ def build_workspace_task_workflow(
         task = WorkspaceTask.from_dict(s)
         code_state = task.profile_state.setdefault("code", {})
         repo = code_state["repo"]
-        base = code_state.get("base", "main")
+        # ``pr_base`` is the branch this task's PR targets, pinned when the task
+        # first continued — from then on ``base`` is what the *checkout* starts
+        # from, which for a continuation is the task's own branch.
+        base = code_state.get("pr_base") or code_state.get("base", "main")
         branch = s["branch"]
         existing = await github.find_pull(repo, head=branch)
         pull = existing or await github.create_pull(
