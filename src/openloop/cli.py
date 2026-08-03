@@ -9,10 +9,18 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Any
 
 from openloop.agents import load_agent
 from openloop.agents.loader import AgentConfigError
+from openloop.release import (
+    DEFAULT_CONFIG_ENV,
+    DEFAULT_SELECTION_PATH,
+    ReleaseError,
+    ReleaseRecord,
+    doppler_environments,
+)
 
 
 def _cmd_agents_apply(args: argparse.Namespace) -> int:
@@ -220,6 +228,146 @@ def _insert_metadata_id(text: str, minted: str) -> tuple[str, str] | None:
     return "".join(new_lines), preview
 
 
+def _cmd_release_record(args: argparse.Namespace) -> int:
+    """Record the tuple one deployment resolves to.
+
+    Recording is idempotent by identity: re-recording the same image, bundle
+    revisions, and Doppler environments over an existing record keeps the
+    original file. A *different* tuple never overwrites a recorded one — the
+    record is what a rollback later selects.
+    """
+    try:
+        record = ReleaseRecord.from_checkout(
+            Path(args.root),
+            image=args.image,
+            doppler=doppler_environments(args.doppler),
+            config_env=args.config_env,
+            source_commit=args.source_commit,
+        )
+    except ReleaseError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.output is None:
+        print(record.to_json(), end="")
+        return 0
+
+    output = Path(args.output)
+    if output.exists():
+        try:
+            existing = ReleaseRecord.from_json(output.read_text())
+        except ReleaseError as exc:
+            print(
+                f"error: {output} is not a release record: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+        if existing.release_id != record.release_id:
+            print(
+                f"error: {output} already records release "
+                f"{existing.short_id}; a release record is immutable",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"ok: release {record.short_id} already recorded in {output}")
+        return 0
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(record.to_json())
+    print(f"ok: recorded release {record.short_id} in {output}")
+    return 0
+
+
+def _load_record(path: str) -> ReleaseRecord | None:
+    try:
+        return ReleaseRecord.from_json(Path(path).read_text())
+    except OSError as exc:
+        print(f"error: cannot read {path}: {exc}", file=sys.stderr)
+        return None
+    except ReleaseError as exc:
+        print(f"error: {path}: {exc}", file=sys.stderr)
+        return None
+
+
+def _cmd_release_show(args: argparse.Namespace) -> int:
+    record = _load_record(args.file)
+    if record is None:
+        return 1
+    print(f"release        {record.release_id}")
+    print(f"recorded at    {record.recorded_at}")
+    print(f"image          {record.image}")
+    print(f"config env     {record.config_env}")
+    print(f"deploy         {record.deploy.revision}")
+    print(f"runtime config {record.runtime_config.revision}")
+    if record.source_commit is not None:
+        print(f"source commit  {record.source_commit}")
+    for project, config in record.doppler.items():
+        print(f"doppler        {project}={config}")
+    return 0
+
+
+def _cmd_release_verify(args: argparse.Namespace) -> int:
+    """Fail unless the checkout still holds the recorded bundle content."""
+    record = _load_record(args.file)
+    if record is None:
+        return 1
+    try:
+        differences = record.verify(Path(args.root))
+    except ReleaseError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.image is not None and args.image.strip() != record.image:
+        differences.append(
+            f"image: {args.image.strip()} is not the recorded {record.image}"
+        )
+    if differences:
+        for difference in differences:
+            print(f"drift: {difference}", file=sys.stderr)
+        print(
+            f"error: {args.root} does not hold release {record.short_id}",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"ok: {args.root} holds release {record.short_id}")
+    return 0
+
+
+def _cmd_release_select(args: argparse.Namespace) -> int:
+    """Emit the environment that makes a recorded release the running one."""
+    record = _load_record(args.file)
+    if record is None:
+        return 1
+    try:
+        differences = record.verify(Path(args.root))
+    except ReleaseError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if differences:
+        for difference in differences:
+            print(f"drift: {difference}", file=sys.stderr)
+        print(
+            f"error: refusing to select release {record.short_id}: "
+            f"{args.root} holds different bundle content"
+            + (
+                f" — check out {record.source_commit} first"
+                if record.source_commit
+                else ""
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
+    selection = record.render_selection()
+    if args.output is None:
+        print(selection, end="")
+        return 0
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(selection)
+    print(f"ok: selected release {record.short_id} in {output}")
+    return 0
+
+
 def _cmd_broker_keys(args: argparse.Namespace) -> int:
     """Emit the broker-side PUBLIC key maps derived from app-side material.
 
@@ -324,6 +472,72 @@ def main(argv: list[str] | None = None) -> int:
         "keys", help="derive the broker public key maps from runtime"
     )
     keys.set_defaults(func=_cmd_broker_keys)
+
+    release = sub.add_parser(
+        "release", help="record and select immutable deployment releases"
+    )
+    release_sub = release.add_subparsers(dest="action", required=True)
+
+    record = release_sub.add_parser(
+        "record", help="record the release tuple a deployment resolves to"
+    )
+    record.add_argument(
+        "--image",
+        required=True,
+        help="digest-pinned image, e.g. ghcr.io/o/openloop@sha256:<64 hex>",
+    )
+    record.add_argument(
+        "--doppler",
+        action="append",
+        default=[],
+        metavar="PROJECT=CONFIG",
+        help="secret-manager environment (repeat for each project)",
+    )
+    record.add_argument(
+        "--config-env",
+        default=DEFAULT_CONFIG_ENV,
+        help="configs/<env> directory the release runs (default: prd)",
+    )
+    record.add_argument(
+        "--source-commit", help="git commit the bundles were taken from"
+    )
+    record.add_argument(
+        "--root", default=".", help="checkout holding the bundles"
+    )
+    record.add_argument(
+        "-o", "--output", help="write the record here instead of stdout"
+    )
+    record.set_defaults(func=_cmd_release_record)
+
+    show = release_sub.add_parser("show", help="summarize a release record")
+    show.add_argument("file", help="path to a release record")
+    show.set_defaults(func=_cmd_release_show)
+
+    verify = release_sub.add_parser(
+        "verify", help="check a checkout against a release record"
+    )
+    verify.add_argument("file", help="path to a release record")
+    verify.add_argument(
+        "--root", default=".", help="checkout to compare against"
+    )
+    verify.add_argument(
+        "--image", help="also require this image to be the recorded one"
+    )
+    verify.set_defaults(func=_cmd_release_verify)
+
+    select = release_sub.add_parser(
+        "select", help="emit the environment that runs a recorded release"
+    )
+    select.add_argument("file", help="path to a release record")
+    select.add_argument(
+        "--root", default=".", help="checkout that must hold the release"
+    )
+    select.add_argument(
+        "-o",
+        "--output",
+        help=f"write the selection here (deploys read {DEFAULT_SELECTION_PATH})",
+    )
+    select.set_defaults(func=_cmd_release_select)
 
     slack = sub.add_parser("slack", help="run the Slack surface")
     slack_sub = slack.add_subparsers(dest="action", required=True)
