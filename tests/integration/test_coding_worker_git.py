@@ -149,6 +149,61 @@ async def test_second_attempt_force_pushes_idempotently(remote):
     assert _git("show", "openloop/job-j3:README.md", cwd=remote) == "hello world 2\n"
 
 
+class _AddFileCompleter:
+    """Emits a diff that adds a new file — applies against any tree state."""
+
+    def __init__(self, name: str, content: str) -> None:
+        self.name, self.content = name, content
+
+    async def complete(self, model, messages, **kwargs):
+        diff = (
+            f"diff --git a/{self.name} b/{self.name}\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            f"+++ b/{self.name}\n"
+            "@@ -0,0 +1 @@\n"
+            f"+{self.content}\n"
+        )
+        return ModelResponse(
+            text=f"TITLE: Add {self.name}\nBODY: adds a file\nDIFF:\n{diff}",
+            model="stub",
+        )
+
+
+async def test_continuation_builds_on_the_branch_instead_of_replacing_it(remote):
+    """A continuation turn extends the task's branch; earlier work survives.
+
+    The contrast with ``test_second_attempt_force_pushes_idempotently`` is the
+    point: a *resumed* attempt re-bases on ``main`` and replaces the branch,
+    while a *continuation* takes the branch itself as its base, so its commit
+    lands on top of what the task already pushed — which is what keeps one
+    open pull request growing instead of being rewritten each turn.
+    """
+    first = _orchestrator(remote)
+    await first.run_attempt(_state("c1"))
+    first_sha = _git("rev-parse", "openloop/job-c1", cwd=remote).strip()
+
+    # The continuation the runner builds: same job, same branch, base = branch.
+    cont_state = _state("c1")
+    cont_state.base = cont_state.branch
+    cont = _orchestrator(
+        remote,
+        BuiltinCodingWorker(
+            model="stub", gateway=_AddFileCompleter("NOTES.md", "continued")
+        ),
+    )
+    await cont.run_attempt(cont_state)
+
+    branch = "openloop/job-c1"
+    second_sha = _git("rev-parse", branch, cwd=remote).strip()
+    assert second_sha != first_sha
+    # Built ON the first commit — the earlier work is history, not overwritten.
+    parents = _git("rev-list", "--parents", "-n", "1", second_sha, cwd=remote).split()
+    assert first_sha in parents[1:]
+    assert _git("show", f"{branch}:README.md", cwd=remote) == "hello world 1\n"
+    assert _git("show", f"{branch}:NOTES.md", cwd=remote) == "continued\n"
+
+
 class _RecordingOrchestrator(GitWorkspaceOrchestrator):
     """Records every git subcommand so a test can prove warm reuse skips clone."""
 
