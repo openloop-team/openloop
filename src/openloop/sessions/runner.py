@@ -57,7 +57,7 @@ from openloop.sessions.threads import (
     TranscriptFragment,
     thread_scope_key,
 )
-from openloop.tasks.binding import BUSY, ThreadTask, ThreadTaskStore
+from openloop.tasks.binding import BUSY, CLOSED, ThreadTask, ThreadTaskStore
 from openloop.tasks.continuation import (
     ContinuationUnavailable,
     continuation_instance_id,
@@ -551,7 +551,9 @@ class SessionRunner:
             if getattr(instance, "status", None) == "cancelled":
                 # Cancelled means its authorization was withdrawn (a denial, or
                 # an explicit cancel) — the task never continues.
-                await self.tasks.retire(task_id, "workflow cancelled")
+                await self.tasks.release(
+                    task_id, state=state or None, status=CLOSED, reason="workflow cancelled"
+                )
                 return
             await self.tasks.release(task_id, state=state or None)
         except Exception:  # noqa: BLE001 — delivery must never fail on bookkeeping
