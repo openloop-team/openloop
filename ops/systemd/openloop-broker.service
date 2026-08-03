@@ -13,11 +13,14 @@ RemainAfterExit=yes
 Environment=HOME=/root
 Environment=DOPPLER_CONFIG_DIR=/var/lib/openloop/broker
 WorkingDirectory=/opt/openloop
+EnvironmentFile=/etc/openloop/release.env
 ExecStartPre=/usr/bin/test -x /usr/bin/doppler
 ExecStartPre=/usr/bin/test -d /var/lib/openloop/broker
 ExecStartPre=/usr/bin/test -r /opt/openloop/docker-compose.deploy.yml
 ExecStartPre=/usr/bin/test -r /opt/openloop/docker-compose.broker.yml
 ExecStartPre=/usr/bin/test -r /opt/openloop/.env
+ExecStartPre=/usr/bin/test -r /etc/openloop/release.env
+ExecStartPre=/usr/bin/grep -Exq "OPENLOOP_IMAGE=[^[:space:]]+@sha256:[0-9a-f]{64}" /etc/openloop/release.env
 ExecStartPre=/usr/bin/test -r /opt/openloop/configs/prd/runtime.env
 ExecStartPre=/usr/bin/test -r /opt/openloop/configs/prd/broker.env
 ExecStartPre=/usr/bin/doppler run -- /usr/bin/docker compose --project-name openloop --file docker-compose.deploy.yml --file docker-compose.broker.yml config --quiet

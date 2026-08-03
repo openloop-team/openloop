@@ -8,10 +8,14 @@
 #
 # Usage on the server:
 #   cp .env.example .env                   # Compose/deployment values
-#   # Edit configs/prd/runtime.env, then run Compose under Doppler so the
-#   # declared secret environment sources are present.
-#   mise run secrets-invoke -- docker compose -f docker-compose.deploy.yml up -d --build
+#   # Edit configs/prd/runtime.env, select a recorded release so OPENLOOP_IMAGE
+#   # names a digest (docs/operations/releases.md), then run Compose under
+#   # Doppler so the declared secret environment sources are present.
+#   mise run secrets-invoke -- docker compose -f docker-compose.deploy.yml up -d
 #   docker compose -f docker-compose.deploy.yml logs -f runtime
+#
+# This file never builds: image production lives in docker-compose.build.yml so
+# a deployment can only consume the digest a release recorded.
 #
 # The runtime intentionally has no Docker-daemon authority. Containerized
 # OpenHands requires the external broker override.
@@ -36,7 +40,6 @@ services:
 
   runtime:
     image: ${OPENLOOP_IMAGE:-openloop:local}
-    build: .
     restart: unless-stopped
     env_file:
       - ./configs/prd/runtime.env
@@ -48,6 +51,9 @@ services:
       GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github_app_private_key
       LOG_LEVEL: ${LOG_LEVEL:-info}
       STORAGE_MODE: postgres
+      # Which recorded release this container is running, so a live deployment
+      # can be matched to its record without inspecting the host.
+      RELEASE_ID: ${OPENLOOP_RELEASE_ID:-}
     secrets:
       - postgres_password
       - openai_api_key
@@ -71,7 +77,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    # Edit agents/*.yaml and `docker compose ... restart runtime` — no rebuild.
+    # Agent definitions are configuration, not image content: edit agents/*.yaml
+    # and `docker compose ... restart runtime` — no rebuild. Record the new
+    # runtime-config revision against the same image digest afterwards.
     volumes:
       - ./agents:/app/agents:ro
 

@@ -6,6 +6,9 @@ OpenLoop keeps ordinary settings separate from credentials:
 - `configs/<env>/runtime.env` contains tracked runtime settings.
 - `configs/<env>/broker.env` contains tracked broker settings and public
   verification keys.
+- `/etc/openloop/release.env` names the selected image digest and release id on
+  a deployment host. It is generated, non-secret, and overrides `.env`
+  ([`docs/operations/releases.md`](../docs/operations/releases.md)).
 - Secrets are injected into the Compose process.
 
 The service-level `env_file` entries parse the tracked config files and add
