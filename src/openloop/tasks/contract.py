@@ -6,6 +6,15 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 
 
+# The durable workflow a gated workspace task runs as, and the wait node its
+# start gate parks on. They live with the contract, not with one profile's
+# workflow module: the session layer routes on both (is this instance a task
+# turn? is it merely parked at its gate?) and must not depend on a profile's
+# implementation — or on that profile's optional dependencies — to do so.
+WORKSPACE_TASK_WORKFLOW = "workspace_task"
+START_GATE_EVENT = "await_approval"
+
+
 class Gate(str, Enum):
     """Where a profile's approval boundary sits. A profile's value is a floor;
     agent config may add gating, never remove it."""

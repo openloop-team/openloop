@@ -137,6 +137,14 @@ class ThreadRecordStore(Protocol):
 
     async def next_inbox(self, scope: SurfaceTarget) -> InboxItem | None: ...
 
+    async def pending_scopes(self, limit: int = 500) -> list[str]:
+        """Scope keys with queued inbox items — the recovery sweep's work list.
+
+        Lets a sweep touch only threads that actually have something waiting,
+        instead of probing every thread it has ever seen.
+        """
+        ...
+
     async def end_turn(self, scope: SurfaceTarget) -> None: ...
 
     async def reset_active_claims(self) -> int: ...
@@ -223,6 +231,9 @@ class InMemoryThreadRecordStore:
         if not items:
             return None
         return items.pop(0)  # oldest-first
+
+    async def pending_scopes(self, limit: int = 500) -> list[str]:
+        return [key for key, items in self._inbox.items() if items][:limit]
 
     async def end_turn(self, scope: SurfaceTarget) -> None:
         self._active[_scope_key(scope)] = False
@@ -479,6 +490,17 @@ class PostgresThreadRecordStore(BorrowedPostgresStore):
             payload=json.loads(row["payload"]),
             seq=row["id"],
         )
+
+    async def pending_scopes(self, limit: int = 500) -> list[str]:
+        pool = self._require_pool()
+        async with pool.acquire() as conn:
+            # Driven by the (scope_key, id) inbox index; returns nothing at all
+            # in the ordinary case where no thread is holding a queued reply.
+            rows = await conn.fetch(
+                "SELECT DISTINCT scope_key FROM surface_thread_inbox LIMIT $1",
+                limit,
+            )
+        return [r["scope_key"] for r in rows]
 
     async def end_turn(self, scope: SurfaceTarget) -> None:
         pool = self._require_pool()

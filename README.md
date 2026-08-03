@@ -483,6 +483,13 @@ the workflow.
   recording its id is recovered by key instead of re-posting; best-effort, falls
   back to at-least-once if the surface lookup can't run), and delivery outside the
   original request lifecycle
+- Thread-bound task continuation — a thread binds to one workspace task, so a
+  later reply from the person who started it continues *that* task rather than
+  delegating a new one: same task id, branch, and draft PR, under the same
+  approval and spend attribution. The binding is durable, so a continuation
+  works after a restart from a cold reconstruction of the task; replies that
+  arrive while a turn is running are queued for it, and anyone else's reply is
+  an ordinary turn ([ADR 0007](docs/adr/0007-thread-bound-workspace-task-continuation.md))
 - Cross-process coordination — a distributed lock so that when several
   replicas boot together only one leads recovery, re-run on an interval so a
   leader that dies mid-sweep is healed by a survivor. `LOCK_BACKEND=auto` (default)

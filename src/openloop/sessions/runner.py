@@ -23,6 +23,17 @@ design: a session that crashed mid-turn is recovered by the startup reconciler
 (Slice 6), not this inline path (it must not replay the model call). The
 original request does not own the task's lifetime — the runner does, and it can
 be awaited inline (tests) or scheduled in the background (Slack).
+
+**Thread-bound continuation.** A session is one *turn*; a workspace task can span
+many. When the thread already owns a durable task
+(:mod:`openloop.tasks.binding`) and the reply is eligible to continue it
+(:mod:`openloop.tasks.continuation`), the runner skips the model entirely and
+runs that task's next turn instead: same task id, same branch and pull request,
+same approval and spend attribution, delivered under this turn's own session. The
+task is reconstructed from its durable record every time, so a continuation after
+a restart is indistinguishable from one a second later — and while a task's turn
+is in flight the thread's queued replies wait for it rather than racing a second
+execution onto the same workspace.
 """
 
 from __future__ import annotations
@@ -46,6 +57,17 @@ from openloop.sessions.threads import (
     TranscriptFragment,
     thread_scope_key,
 )
+from openloop.tasks.binding import BUSY, CLOSED, ThreadTask, ThreadTaskStore
+from openloop.tasks.continuation import (
+    ContinuationUnavailable,
+    continuation_instance_id,
+    continuation_state,
+    may_continue,
+)
+from openloop.tasks.contract import (
+    START_GATE_EVENT as _TASK_START_GATE,
+    WORKSPACE_TASK_WORKFLOW as _TASK_WORKFLOW,
+)
 from openloop.workflows.store import TERMINAL as _WORKFLOW_TERMINAL
 
 logger = logging.getLogger(__name__)
@@ -58,6 +80,9 @@ PROGRESS_STATUS_TEXT = "is thinking..."
 # ticker's ~lease/3 cadence so each tick refreshes.
 PROGRESS_REFRESH_SECONDS = 5.0
 WAITING_TEXT = "⏳ Waiting for approval…"
+# A workspace-task turn that parked mid-work (e.g. on an action decision). Only
+# a repair path ever posts it — the decision card carries the real question.
+TASK_WAITING_TEXT = "⏳ Working on this task…"
 ERROR_TEXT = "⚠️ This task was interrupted and could not be completed."
 
 # How many prior thread turns to replay as conversation history. A safety bound
@@ -143,6 +168,17 @@ def _approval_id_for_instance(instance) -> str | None:
     return event.get("approval_id")
 
 
+def _task_id_of(instance) -> str | None:
+    """The workspace task a ``workspace_task`` instance is a turn of.
+
+    Reads the durable state's own identity, never the instance id: those are the
+    same string only for a first turn, and conflating them is exactly the
+    assumption continuation exists to remove.
+    """
+    state = getattr(instance, "state", {}) or {}
+    return state.get("task_id") or state.get("job_id")
+
+
 def _inbox_payload(task: Task, target: SurfaceTarget) -> dict:
     """Serialize just enough to reconstruct the task + delivery target at drain
     time. History is intentionally omitted — it's rebuilt from the (by then
@@ -182,10 +218,17 @@ class SessionRunner:
         sessions: SurfaceSessionStore,
         delivery: SurfaceDelivery,
         threads: "ThreadRecordStore | None" = None,
+        tasks: "ThreadTaskStore | None" = None,
     ) -> None:
         self.runtime = runtime
         self.sessions = sessions
         self.delivery = delivery
+        # The durable thread↔task bindings. When present, a reply in a thread
+        # that already owns a workspace task continues THAT task — same id,
+        # same branch, same PR, same authorization — instead of running a model
+        # turn that would delegate a second one. Absent, every turn is a fresh
+        # model turn (the pre-continuation behavior).
+        self.tasks = tasks
         # Phase A: the thread-scoped delivered-transcript store. When present, a
         # follow-up turn's history is the real conversation (request→answer per
         # delivered turn) rather than the per-session summary scan; when absent the
@@ -255,6 +298,13 @@ class SessionRunner:
         session.status = "running"
         await self.sessions.upsert(session)
 
+        # Thread-bound continuation: if this thread already owns a workspace task
+        # and the reply is eligible to continue it, this turn IS that task's next
+        # turn — no model round, no second delegation, no new task identity.
+        continued = await self._maybe_continue_task(session, task, target)
+        if continued is not None:
+            return continued
+
         # Replay earlier turns of this thread so the model has the conversation in
         # context, not just semantic recall. Done before handle() so the history
         # is baked into the workflow's persisted turn state (resume-safe).
@@ -291,13 +341,9 @@ class SessionRunner:
         Two replies to the same thread must not run concurrently — the later one
         has to see the earlier's delivered answer as context, and racing them would
         also double-drive. So an inbound reply is appended to the durable inbox and
-        then the caller tries to become the thread's single drain leader
-        (``try_begin_turn``, an atomic CAS). The winner drains every queued turn via
-        :meth:`run` (itself idempotent on ``event_id``) until the inbox is empty,
-        then releases; a loser simply returns, its reply left for the leader. The
-        outer re-claim loop closes the window where a reply lands after the last
-        dequeue but before the release. Falls back to a direct :meth:`run` when
-        there is no thread store or no thread/event scope to serialize on.
+        then :meth:`_drain_thread` tries to become the thread's single drain leader.
+        Falls back to a direct :meth:`run` when there is no thread store or no
+        thread/event scope to serialize on.
         """
         if self.threads is None or target.thread is None or not target.event_id:
             await self.run(task, target)
@@ -305,13 +351,285 @@ class SessionRunner:
         await self.threads.append_inbox(
             target, target.event_id, _inbox_payload(task, target)
         )
-        while await self.threads.try_begin_turn(target):
+        await self._drain_thread(target)
+
+    async def _drain_thread(self, target: SurfaceTarget) -> None:
+        """Drain a thread's queued replies, one turn at a time.
+
+        The caller tries to become the thread's single drain leader
+        (``try_begin_turn``, an atomic CAS). The winner drains every queued turn
+        via :meth:`run` (itself idempotent on ``event_id``) until the inbox is
+        empty, then releases; a loser simply returns, its reply left for the
+        leader. The outer re-claim loop closes the window where a reply lands
+        after the last dequeue but before the release.
+
+        Stops — leaving everything queued — while the thread's bound workspace
+        task is mid-turn: a reply must join the task it belongs to, not race a
+        second execution of it onto the same branch. The task's own terminal
+        transition drains the rest (see :meth:`_on_workflow_terminal`), and the
+        startup sweep drains anything a crash left queued, so a held reply is
+        never lost — only deferred.
+        """
+        while True:
+            if await self._task_busy(target):
+                return
+            if not await self.threads.try_begin_turn(target):
+                return
             try:
                 while (item := await self.threads.next_inbox(target)) is not None:
                     turn_task, turn_target = _task_target_from_payload(item.payload)
                     await self.run(turn_task, turn_target)
+                    if await self._task_busy(target):
+                        break
             finally:
                 await self.threads.end_turn(target)
+
+    # --- thread-bound workspace-task continuation ---
+
+    async def _bound_task(self, target: SurfaceTarget) -> "ThreadTask | None":
+        """This thread's durable workspace-task binding, if it has one."""
+        if self.tasks is None or target.thread is None:
+            return None
+        return await self.tasks.bound(thread_scope_key(target))
+
+    async def _task_busy(self, target: SurfaceTarget) -> bool:
+        """Whether this thread's bound task currently has a turn in flight.
+
+        Two independent signals, because neither alone is trustworthy after a
+        crash: the durable claim (a turn said it was driving) and the task's
+        workflow instance (what is actually running). A task parked at its
+        *start gate* is deliberately not busy — nothing is executing, it owns no
+        workspace state yet, and a reply while the approval card is up must stay
+        an ordinary turn rather than freezing the thread.
+        """
+        record = await self._bound_task(target)
+        if record is None:
+            return False
+        if record.status == BUSY:
+            return True
+        return await self._instance_busy(record.instance_id)
+
+    async def _instance_busy(self, instance_id: str | None) -> bool:
+        engine = getattr(self.runtime, "engine", None)
+        if engine is None or not instance_id:
+            return False
+        instance = await engine.store.get(instance_id)
+        if instance is None or instance.status in _WORKFLOW_TERMINAL:
+            return False
+        if instance.status == "waiting" and instance.waiting_on == _TASK_START_GATE:
+            return False
+        return True
+
+    async def _maybe_continue_task(
+        self, session: SurfaceSession, task: Task, target: SurfaceTarget
+    ) -> "SurfaceSession | None":
+        """Run this turn as the next turn of the thread's bound task, or not.
+
+        ``None`` means "not a continuation" — the caller runs the ordinary model
+        turn, which can still delegate new work through the approval gate. Every
+        refusal here is deliberate and fail-open in that direction: an ineligible
+        reply, a task another turn already claimed, or a record that cannot be
+        re-entered cold all fall back rather than block the user.
+        """
+        if self.tasks is None or target.thread is None:
+            return None
+        engine = getattr(self.runtime, "engine", None)
+        if engine is None or _TASK_WORKFLOW not in getattr(engine, "workflows", {}):
+            # No engine, or this process cannot run the task's workflow (the
+            # connector is disabled here) — never pretend to continue it.
+            return None
+        record = await self._bound_task(target)
+        if not may_continue(record, user=task.user):
+            return None
+        instance_id = continuation_instance_id(record.task_id, session.id)
+        claimed = await self.tasks.claim(
+            record.task_id, instance_id=instance_id, session_id=session.id
+        )
+        if claimed is None:
+            logger.info(
+                "workspace task %s is claimed elsewhere; running an ordinary turn",
+                record.task_id,
+            )
+            return None
+        try:
+            state = continuation_state(
+                claimed, request=task.text, session_id=session.id
+            )
+        except ContinuationUnavailable:
+            logger.warning(
+                "workspace task %s cannot be continued from its durable record",
+                claimed.task_id,
+                exc_info=True,
+            )
+            await self.tasks.release(claimed.task_id)
+            return None
+
+        session.task_id = claimed.task_id
+        # The turn's recovery pointer is the task's instance, not a model turn's.
+        session.workflow_instance_id = instance_id
+        await self.sessions.upsert(session)
+        logger.info(
+            "continuing workspace task %s as turn %d (instance %s)",
+            claimed.task_id,
+            claimed.turns,
+            instance_id,
+        )
+        try:
+            instance = await engine.start(_TASK_WORKFLOW, instance_id, state)
+        except Exception as exc:  # noqa: BLE001 — record + deliver, don't crash
+            logger.exception(
+                "failed to start continuation of workspace task %s", claimed.task_id
+            )
+            await self.tasks.release(claimed.task_id)
+            session.status = "failed"
+            session.error = str(exc)
+            await self.sessions.upsert(session)
+            await self._post_error(session)
+            return session
+        return await self._deliver_task_turn(session, instance)
+
+    async def _deliver_task_turn(
+        self, session: SurfaceSession, instance
+    ) -> SurfaceSession:
+        """Deliver one turn of a workspace task, idempotently.
+
+        Reached twice for the same instance by design — once inline from the
+        continuation that started it, once from the engine's terminal callback
+        (and again from the startup reconciler after a crash). Every write is
+        guarded on the session's persisted delivery state, so the second and
+        third arrivals are no-ops.
+        """
+        fresh = await self.sessions.get(session.id)
+        if fresh is not None:
+            session = fresh
+        status = getattr(instance, "status", None)
+        if status not in _WORKFLOW_TERMINAL:
+            # Parked mid-task (an OpenHands action decision, say). The park
+            # callback posts the decision; this turn is delivered when the task
+            # reaches a terminal state.
+            if session.final_message_id is None and session.status not in TERMINAL:
+                session.status = "waiting"
+                session.result_summary = session.result_summary or TASK_WAITING_TEXT
+                await self.sessions.upsert(session)
+            return session
+        await self._release_task(session.task_id, instance)
+        self._progress_seen.pop(session.id, None)
+        if session.final_message_id is not None or session.status in TERMINAL:
+            return session
+        if status == "completed":
+            result = getattr(instance, "result", None) or {}
+            session.status = "completed"
+            session.result_summary = result.get("summary") or "Done."
+            await self.sessions.upsert(session)
+            await self._post_final(session, session.result_summary)
+            return session
+        session.status = "failed"
+        session.error = getattr(instance, "error", None) or ERROR_TEXT
+        await self.sessions.upsert(session)
+        await self._post_error(session)
+        return session
+
+    async def _release_task(self, task_id: str | None, instance) -> None:
+        """Refresh the durable task from the turn that just ended, and unclaim it.
+
+        The refreshed blob is what a cold replica reconstructs the task from, so
+        the delivered pull-request identity is folded in here — it lives on the
+        workflow's result, and nothing else durable would carry it forward.
+        """
+        if self.tasks is None or not task_id:
+            return
+        state = dict(getattr(instance, "state", None) or {})
+        result = getattr(instance, "result", None) or {}
+        profile_state = state.get("profile_state")
+        if isinstance(profile_state, dict):
+            code = profile_state.get("code")
+            if isinstance(code, dict):
+                for key in ("branch", "pr_number", "pr_url"):
+                    if result.get(key) is not None:
+                        code[key] = result[key]
+        try:
+            if getattr(instance, "status", None) == "cancelled":
+                # Cancelled means its authorization was withdrawn (a denial, or
+                # an explicit cancel) — the task never continues.
+                await self.tasks.release(
+                    task_id, state=state or None, status=CLOSED, reason="workflow cancelled"
+                )
+                return
+            await self.tasks.release(task_id, state=state or None)
+        except Exception:  # noqa: BLE001 — delivery must never fail on bookkeeping
+            logger.exception("failed to release workspace task %s", task_id)
+
+    async def _resume_thread(self, target: SurfaceTarget) -> None:
+        """Drain replies a busy task deferred. A no-op while a drain is active."""
+        if self.threads is None or target.thread is None:
+            return
+        try:
+            await self._drain_thread(target)
+        except Exception:  # noqa: BLE001 — never fail a workflow callback
+            logger.exception("failed to resume thread drain after a task turn")
+
+    async def _recover_task_claims(self) -> list[str]:
+        """Repair claims a crash orphaned; returns the repaired task ids.
+
+        A turn that died mid-flight leaves its task claimed, which would wedge
+        the thread forever. The durable workflow instance is the arbiter: if it
+        is terminal (or gone), the claim is released and the task's record is
+        refreshed from it; if it is still live, the engine's own resume drives
+        it and its terminal transition releases the claim.
+        """
+        if self.tasks is None:
+            return []
+        engine = getattr(self.runtime, "engine", None)
+        repaired: list[str] = []
+        for record in await self.tasks.claimed():
+            if record.instance_id and engine is not None:
+                instance = await engine.store.get(record.instance_id)
+                if instance is not None and instance.status not in _WORKFLOW_TERMINAL:
+                    continue
+                if instance is not None:
+                    await self._release_task(record.task_id, instance)
+                    repaired.append(record.task_id)
+                    continue
+            await self.tasks.release(record.task_id)
+            repaired.append(record.task_id)
+        return repaired
+
+    async def _drain_pending_threads(self, sessions: list[SurfaceSession]) -> None:
+        """Drain threads that still hold a queued reply nobody is draining.
+
+        Replies deferred while a task was busy sit in the durable inbox with no
+        leader once the process dies. This sweep runs on the recovery interval,
+        so it asks the store which scopes actually have something queued rather
+        than probing every thread it has ever seen — in the ordinary case that
+        is one query returning nothing. A scope with no recent session to
+        address it from is left for the next inbound event, which carries its
+        own target.
+        """
+        if self.threads is None:
+            return
+        pending = getattr(self.threads, "pending_scopes", None)
+        if pending is None:
+            return
+        try:
+            scopes = set(await pending())
+        except Exception:  # noqa: BLE001 — the sweep's other repairs still stand
+            logger.exception("failed to list threads with queued replies")
+            return
+        if not scopes:
+            return
+        seen: set[str] = set()
+        for session in sessions:
+            target = session.target
+            if target.thread is None:
+                continue
+            key = thread_scope_key(target)
+            if key not in scopes or key in seen:
+                continue
+            seen.add(key)
+            try:
+                await self._drain_thread(target)
+            except Exception:  # noqa: BLE001 — one thread must not poison the sweep
+                logger.exception("failed to drain thread %s during recovery", key)
 
     async def _deliver(self, session: SurfaceSession, response) -> SurfaceSession:
         if response.model == "error":
@@ -408,7 +726,11 @@ class SessionRunner:
         if two ever overlap.
         """
         repaired: list[str] = []
-        for session in await self.sessions.recent(limit=1000):
+        # Before any session is judged: free tasks a crashed turn left claimed,
+        # so the sweep (and every thread they wedge) can make progress.
+        repaired.extend(await self._recover_task_claims())
+        recent = await self.sessions.recent(limit=1000)
+        for session in recent:
             if session.status == "waiting":
                 if await self._deliver_terminal_approval(session):
                     repaired.append(session.id)
@@ -431,6 +753,12 @@ class SessionRunner:
                 repaired.append(session.id)
                 continue
             # queued / running — recover from the workflow the session is bound to.
+            if session.task_id is not None:
+                # A workspace-task turn: its answer comes from the task's own
+                # instance, never from a model turn's state.
+                if await self._recover_task_session(session):
+                    repaired.append(session.id)
+                continue
             found, response = await self._recover(session)
             if response is not None:
                 await self._deliver(session, response)
@@ -445,7 +773,40 @@ class SessionRunner:
                 # restart rather than delivering a half-finished turn.
                 continue
             repaired.append(session.id)
+        # Replies a busy task deferred are still queued with nobody draining
+        # them; a restart is exactly when that has to be picked back up.
+        await self._drain_pending_threads(recent)
         return repaired
+
+    async def _recover_task_session(self, session: SurfaceSession) -> bool:
+        """Recover a crashed workspace-task turn; True when it was repaired."""
+        engine = getattr(self.runtime, "engine", None)
+        instance = (
+            await engine.store.get(session.workflow_instance_id)
+            if engine is not None and session.workflow_instance_id
+            else None
+        )
+        if instance is None:
+            await self._release_task_claim(session.task_id)
+            session.status = "abandoned"
+            session.error = ERROR_TEXT
+            await self.sessions.upsert(session)
+            await self._post_error(session)
+            return True
+        if instance.status not in _WORKFLOW_TERMINAL:
+            # Live (or resumable): the engine's own resume drives it and its
+            # terminal transition delivers this session.
+            return False
+        await self._deliver_task_turn(session, instance)
+        return True
+
+    async def _release_task_claim(self, task_id: str | None) -> None:
+        if self.tasks is None or not task_id:
+            return
+        try:
+            await self.tasks.release(task_id)
+        except Exception:  # noqa: BLE001 — recovery must not fail on bookkeeping
+            logger.exception("failed to release workspace task %s", task_id)
 
     async def _apply_thread_history(self, task: Task, session: SurfaceSession) -> None:
         """Populate ``task.history`` from earlier delivered turns in this thread.
@@ -644,6 +1005,20 @@ class SessionRunner:
         return session.result_summary or "(no response)"
 
     async def _on_workflow_terminal(self, instance) -> None:
+        is_task = getattr(instance, "workflow", None) == _TASK_WORKFLOW
+        if is_task:
+            # A continuation turn owns its own session and delivers directly:
+            # there is no approval to fold in, because the task passed its start
+            # gate turns ago and this turn ran under that same authorization.
+            turn = await self._task_turn_session(instance)
+            if turn is not None:
+                await self._deliver_task_turn(turn, instance)
+                await self._resume_thread(turn.target)
+                return
+            # A first turn: the approval path below delivers it, but the durable
+            # binding is refreshed here — this is the moment the task acquires
+            # the branch/PR identity a later reply continues.
+            await self._release_task(_task_id_of(instance), instance)
         approval_id = _approval_id_for_instance(instance)
         if not approval_id:
             return
@@ -652,6 +1027,20 @@ class SessionRunner:
             return
         self._progress_seen.pop(session.id, None)
         await self._deliver_terminal_approval(session)
+        if is_task:
+            await self._resume_thread(session.target)
+
+    async def _task_turn_session(self, instance) -> "SurfaceSession | None":
+        """The session delivering this instance as a workspace-task turn."""
+        if self.tasks is None:
+            return None
+        get_by_instance = getattr(self.sessions, "get_by_instance", None)
+        if get_by_instance is None:
+            return None
+        session = await get_by_instance(getattr(instance, "id", "") or "")
+        if session is None or session.task_id is None:
+            return None
+        return session
 
     async def _on_workflow_parked(self, instance) -> None:
         """Deliver an OpenHands decision only after its parked state is durable."""
@@ -664,12 +1053,19 @@ class SessionRunner:
         summary = decision.get("summary")
         if not decision_id or not summary:
             return
-        approval_id = _approval_id_for_instance(instance)
-        if not approval_id:
-            return
-        session = await self.sessions.get_by_approval(approval_id)
-        if session is None or session.status != "waiting":
-            return
+        # A continuation turn parks under its own session; a first turn parks
+        # under the session its approval card belongs to.
+        session = await self._task_turn_session(instance)
+        if session is not None:
+            if session.status in TERMINAL:
+                return
+        else:
+            approval_id = _approval_id_for_instance(instance)
+            if not approval_id:
+                return
+            session = await self.sessions.get_by_approval(approval_id)
+            if session is None or session.status != "waiting":
+                return
         update = getattr(self.delivery, "update_openhands_decision", None)
         post = getattr(self.delivery, "post_openhands_decision", None)
         if session.progress_message_id is not None and update is not None:
@@ -738,12 +1134,16 @@ class SessionRunner:
             actor_id=actor_id,
         )
         await engine.send_event(job_id, event, decision.to_dict(), drive=False)
-        approval_id = _approval_id_for_instance(instance)
-        session = (
-            await self.sessions.get_by_approval(approval_id)
-            if approval_id is not None
-            else None
-        )
+        # The card belongs to whichever turn posted it: a continuation turn's own
+        # session, or — for a first turn — the session holding the approval.
+        session = await self._task_turn_session(instance)
+        if session is None:
+            approval_id = _approval_id_for_instance(instance)
+            session = (
+                await self.sessions.get_by_approval(approval_id)
+                if approval_id is not None
+                else None
+            )
         if session is not None and session.progress_message_id is not None:
             label = "accepted" if kind == "accept" else "rejected"
             try:
@@ -774,12 +1174,17 @@ class SessionRunner:
         phrase = (getattr(instance, "state", {}) or {}).get("progress")
         if not phrase:
             return
-        approval_id = _approval_id_for_instance(instance)
-        if not approval_id:
-            return
-        session = await self.sessions.get_by_approval(approval_id)
-        if session is None or session.status != "waiting":
-            return
+        session = await self._task_turn_session(instance)
+        if session is not None:
+            if session.status in TERMINAL:
+                return
+        else:
+            approval_id = _approval_id_for_instance(instance)
+            if not approval_id:
+                return
+            session = await self.sessions.get_by_approval(approval_id)
+            if session is None or session.status != "waiting":
+                return
         last = self._progress_seen.get(session.id)
         now = time.monotonic()
         if last is not None:

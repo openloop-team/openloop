@@ -42,6 +42,8 @@ from openloop.sessions import (
 )
 from openloop.sessions.postgres import PostgresSurfaceSessionStore
 from openloop.sessions.threads import PostgresThreadRecordStore
+from openloop.tasks import InMemoryThreadTaskStore, ThreadTaskStore
+from openloop.tasks.postgres import PostgresThreadTaskStore
 from openloop.tools import ToolGateway
 from openloop.tools.aliases import _canonical_action
 from openloop.sandbox import (
@@ -156,6 +158,17 @@ def build_thread_record_store(settings: RuntimeSettings) -> ThreadRecordStore:
     if settings.effective_storage_mode in ("auto", "postgres"):
         return PostgresThreadRecordStore()
     return InMemoryThreadRecordStore()
+
+
+def build_thread_task_store(settings: RuntimeSettings) -> ThreadTaskStore:
+    """Pick a thread↔task binding backend. Postgres setup at startup.
+
+    Process-local bindings still bind a thread to its task within one run; only
+    the Postgres backend survives the restart a continuation must outlive.
+    """
+    if settings.effective_storage_mode in ("auto", "postgres"):
+        return PostgresThreadTaskStore()
+    return InMemoryThreadTaskStore()
 
 
 def _resolve_lock_backend(settings: RuntimeSettings) -> str:
@@ -616,13 +629,14 @@ def build_tool_gateway(
     engine: WorkflowEngine,
     usage: UsageStore | None = None,
     broker_handle: object | None = None,
+    tasks: ThreadTaskStore | None = None,
 ) -> ToolGateway:
     """Register native connectors plus an MCP connector per configured server.
 
     MCP connectors need an async setup() (tool discovery); the returned list is
     set up in the app lifespan.
     """
-    gateway = ToolGateway(approvals=approvals, engine=engine)
+    gateway = ToolGateway(approvals=approvals, engine=engine, tasks=tasks)
     github_credentials = build_github_credentials(settings)
     github_client = (
         HttpGitHubClient(github_credentials)
