@@ -30,12 +30,10 @@ from openloop.broker_rpc.models import StartSegmentPayload
 from openloop.broker_rpc.keys import VerificationKeySet
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 from tests.support.broker_repository_contract import SequenceIds
+from tests.support.postgres import require_postgres, postgres_dsn
 
 
-DSN = os.environ.get(
-    "OPENLOOP_TEST_DATABASE_URL",
-    "postgresql://openloop:change-me@localhost:5432/openloop",
-)
+DSN = postgres_dsn()
 OWNER = BrokerOwner("tenant-start-postgres", "workload-start-postgres")
 POLICY = BrokerRpcPolicy("default", "docker", "local", 300)
 _RECEIPT_PRIVATE_KEY = Ed25519PrivateKey.generate()
@@ -43,21 +41,9 @@ _RECEIPT_PRIVATE_KEY = Ed25519PrivateKey.generate()
 pytestmark = [pytest.mark.integration, pytest.mark.postgres]
 
 
-async def _reachable() -> bool:
-    try:
-        import asyncpg
-
-        connection = await asyncpg.connect(DSN, timeout=3)
-        await connection.close()
-        return True
-    except Exception:
-        return False
-
-
 @pytest.fixture
 async def postgres_start(tmp_path: Path):
-    if not await _reachable():
-        pytest.skip(f"no PostgreSQL reachable at {DSN}")
+    await require_postgres(DSN)
     import asyncpg
 
     schema = f"broker_start_test_{uuid4().hex}"

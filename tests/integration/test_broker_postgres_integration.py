@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from uuid import uuid4
 
 import pytest
@@ -37,31 +36,17 @@ from tests.support.broker_repository_contract import (
     quiesce_generation,
     receipt_for,
 )
+from tests.support.postgres import require_postgres, postgres_dsn
 
 
-DSN = os.environ.get(
-    "OPENLOOP_TEST_DATABASE_URL",
-    "postgresql://openloop:change-me@localhost:5432/openloop",
-)
+DSN = postgres_dsn()
 
 pytestmark = [pytest.mark.integration, pytest.mark.postgres]
 
 
-async def _reachable() -> bool:
-    try:
-        import asyncpg
-
-        connection = await asyncpg.connect(DSN, timeout=3)
-        await connection.close()
-        return True
-    except Exception:
-        return False
-
-
 @pytest.fixture
 async def postgres_repository():
-    if not await _reachable():
-        pytest.skip(f"no PostgreSQL reachable at {DSN}")
+    await require_postgres(DSN)
     import asyncpg
 
     schema = f"broker_test_{uuid4().hex}"
@@ -588,8 +573,7 @@ async def test_postgres_concurrent_repeated_setup_is_idempotent(
 
 
 async def test_postgres_concurrent_fresh_setup_serializes_bootstrap():
-    if not await _reachable():
-        pytest.skip(f"no PostgreSQL reachable at {DSN}")
+    await require_postgres(DSN)
     import asyncpg
 
     schema = f"broker_fresh_{uuid4().hex}"

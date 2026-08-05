@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import contextlib
-import os
 from pathlib import Path
 from uuid import uuid4
 
 import asyncpg
 import pytest
+from tests.support.postgres import require_postgres, postgres_dsn
 
 
-DSN = os.environ.get(
-    "OPENLOOP_TEST_DATABASE_URL",
-    "postgresql://openloop:change-me@localhost:5432/openloop_agents",
-)
+DSN = postgres_dsn()
 RETIREMENT_SQL = (
     Path(__file__).resolve().parents[2]
     / "ops"
@@ -32,19 +29,9 @@ DEDICATED_TABLES = (
 pytestmark = [pytest.mark.e2e, pytest.mark.postgres, pytest.mark.serial]
 
 
-async def _reachable() -> bool:
-    try:
-        connection = await asyncpg.connect(DSN, timeout=3)
-        await connection.close()
-        return True
-    except Exception:
-        return False
-
-
 @pytest.fixture
 async def retirement_db():
-    if not await _reachable():
-        pytest.skip(f"no PostgreSQL reachable at {DSN}")
+    await require_postgres(DSN)
 
     schema = f"analysis_retirement_{uuid4().hex}"
     admin = await asyncpg.connect(DSN)

@@ -12,7 +12,6 @@ suite stays green without Docker.
 from pathlib import Path
 import asyncio
 import contextlib
-import os
 import uuid
 from dataclasses import replace
 
@@ -35,13 +34,11 @@ from openloop.testing import (
     ScriptedGateway,
     tool_call_response,
 )
+from tests.support.postgres import require_postgres, postgres_dsn
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
-DSN = os.environ.get(
-    "OPENLOOP_TEST_DATABASE_URL",
-    "postgresql://openloop:change-me@localhost:5432/openloop_agents",
-)
+DSN = postgres_dsn()
 
 # 26-dim to match FakeEmbedder (the real default is 1536; dim is configurable).
 EMBED_DIM = 26
@@ -49,21 +46,9 @@ EMBED_DIM = 26
 pytestmark = [pytest.mark.e2e, pytest.mark.postgres]
 
 
-async def _reachable() -> bool:
-    try:
-        import asyncpg
-
-        conn = await asyncpg.connect(DSN, timeout=3)
-        await conn.close()
-        return True
-    except Exception:
-        return False
-
-
 @pytest.fixture
 async def postgres_pool():
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
     import asyncpg
 
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=10)
@@ -211,11 +196,11 @@ async def test_happy_path_end_to_end(stores):
 
 async def test_worker_checkpoint_resume_across_real_postgres(postgres_pool):
     """A worker job persisted to Postgres resumes on a fresh store instance."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from openloop.checkpoints.postgres import PostgresCheckpointStore
     from openloop.tools.coding_worker import (
+        CODING_WORKER_CODE_WRITE,
         STEPS,
         CodingWorkerConnector,
         WorkerOutcome,
@@ -255,8 +240,11 @@ async def test_worker_checkpoint_resume_across_real_postgres(postgres_pool):
         # First store/worker: pushes, but the PR open fails — persisted to PG.
         runner1, github1 = _Runner(), _FlakyGitHub()
         conn1 = CodingWorkerConnector(runner1, github1, checkpoints=store)
-        first = await conn1.execute("pr:write", args)
+        first = await conn1.execute(CODING_WORKER_CODE_WRITE, args)
         assert not first.ok
+        # Assert the *reason*, not just the failure: a retired action name would
+        # otherwise fail this call for an unrelated reason and pass vacuously.
+        assert first.data["status"] == "open_pr_failed"
         cp = await store.get(job_id)
         assert cp.status == "open_pr_failed" and "push" in cp.completed_steps
 
@@ -267,7 +255,7 @@ async def test_worker_checkpoint_resume_across_real_postgres(postgres_pool):
         try:
             runner2, github2 = _Runner(), FakeGitHub()
             conn2 = CodingWorkerConnector(runner2, github2, checkpoints=store2)
-            second = await conn2.execute("pr:write", args)
+            second = await conn2.execute(CODING_WORKER_CODE_WRITE, args)
             assert second.ok
             assert runner2.runs == 0  # resumed past the push
             assert len(github2.pulls) == 1
@@ -289,8 +277,7 @@ async def test_worker_checkpoint_resume_across_real_postgres(postgres_pool):
 
 async def test_workflow_resume_across_real_postgres(postgres_pool):
     """A workflow parked at a wait node resumes from Postgres on a fresh engine."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from openloop.workflows import Step, Workflow, WorkflowEngine
     from openloop.workflows.postgres import PostgresWorkflowStore
@@ -337,8 +324,7 @@ async def test_workflow_resume_across_real_postgres(postgres_pool):
 
 async def test_surface_session_roundtrip_across_real_postgres(postgres_pool):
     """Persist a surface session and look it up by event + approval id (Phase D)."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from openloop.sessions.postgres import PostgresSurfaceSessionStore
     from openloop.sessions.store import SurfaceSession, SurfaceTarget
@@ -407,8 +393,7 @@ async def test_surface_session_roundtrip_across_real_postgres(postgres_pool):
 
 async def test_thread_history_across_real_postgres(postgres_pool):
     """Rebuild conversation history from prior thread sessions (oldest-first)."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from openloop.sessions.postgres import PostgresSurfaceSessionStore
     from openloop.sessions.store import SurfaceSession, SurfaceTarget
@@ -484,8 +469,7 @@ async def test_thread_history_across_real_postgres(postgres_pool):
 
 async def test_postgres_advisory_lock_mutual_exclusion():
     """Two PostgresLock instances (≈ two replicas) can't both hold one key."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from openloop.coordination import PostgresLock
 
@@ -514,8 +498,7 @@ async def test_postgres_advisory_lock_frees_when_holder_goes_away():
     """A holder whose pool closes (a graceful stand-in for a crashed replica)
     releases its session, so its advisory lock frees and another replica acquires —
     no TTL to wait out. This is the property that makes advisory locks a good fit."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from openloop.coordination import PostgresLock
 
@@ -548,8 +531,7 @@ async def test_postgres_advisory_lock_frees_when_holder_goes_away():
 async def test_session_reconcile_across_real_postgres(postgres_pool):
     """A session that crashed before delivery is recovered + delivered on a fresh
     runner reading both the session and workflow state from Postgres (Phase D)."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from openloop.runtime import Runtime
     from openloop.sessions import SessionRunner
@@ -622,8 +604,7 @@ async def test_session_reconcile_across_real_postgres(postgres_pool):
 
 async def test_thread_record_transcript_across_real_postgres(postgres_pool):
     """Phase A: the delivered-transcript lane round-trips and appends idempotently."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from openloop.sessions.threads import (
         PostgresThreadRecordStore,
@@ -680,8 +661,7 @@ async def test_thread_record_transcript_across_real_postgres(postgres_pool):
 
 async def test_thread_context_ref_across_real_postgres(postgres_pool):
     """Phase B: the warm-context handle column round-trips and clears."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from openloop.sessions.threads import PostgresThreadRecordStore, thread_scope_key
     from openloop.sessions.store import SurfaceTarget
@@ -723,8 +703,7 @@ async def test_thread_context_ref_across_real_postgres(postgres_pool):
 
 async def test_thread_inbox_and_claim_across_real_postgres(postgres_pool):
     """Phase C: inbox dedup, ordered drain, and the atomic active-turn claim."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from openloop.sessions.threads import PostgresThreadRecordStore
     from openloop.sessions.store import SurfaceTarget
@@ -785,8 +764,7 @@ async def test_thread_inbox_and_claim_across_real_postgres(postgres_pool):
 
 async def test_workflow_drive_arbitration_sql_semantics(postgres_pool):
     """The claim/fence/release/evict predicates against real server-side SQL."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from openloop.workflows import WorkflowInstance
     from openloop.workflows.postgres import PostgresWorkflowStore
@@ -876,8 +854,7 @@ async def test_workflow_drive_gen_migration_is_idempotent(postgres_pool):
     a concurrent test touching this table during the drop window would break.
     See the @pytest.mark.serial marker.
     """
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from openloop.workflows.postgres import PostgresWorkflowStore
 
@@ -915,8 +892,7 @@ async def test_workflow_drive_gen_migration_is_idempotent(postgres_pool):
 
 async def test_workflow_concurrent_drives_run_steps_once(postgres_pool):
     """Two engines over one real store: exactly one claims and runs the step."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from openloop.workflows import Step, Workflow, WorkflowEngine
     from openloop.workflows.postgres import PostgresWorkflowStore
@@ -965,8 +941,7 @@ async def test_workflow_concurrent_drives_run_steps_once(postgres_pool):
 async def test_workflow_lease_takeover_evicts_stale_drive(postgres_pool):
     """Forced lease expiry: a rival claims, the stale drive is cancelled and
     cannot clobber — asserting the public contract, not internal exceptions."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from openloop.workflows import Step, Workflow, WorkflowEngine
     from openloop.workflows.postgres import PostgresWorkflowStore
@@ -1032,8 +1007,7 @@ async def test_workflow_lease_takeover_evicts_stale_drive(postgres_pool):
 async def test_workflow_cancel_during_drive_wins_over_writer(postgres_pool):
     """cancel_instance evicts a live drive mid-step; the terminal state and
     at-most-once callbacks survive the driver's losing write."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from openloop.workflows import Step, Workflow, WorkflowEngine
     from openloop.workflows.postgres import PostgresWorkflowStore
@@ -1114,8 +1088,7 @@ def _approval(rid: str, *, created_at=None, **overrides):
 
 async def test_approval_claim_decision_sql_guard_under_concurrency(postgres_pool):
     """The WHERE status='pending' guard makes claim_decision win once server-side."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     rid = f"appr-{uuid.uuid4().hex[:8]}"
     store = PostgresApprovalStore()
@@ -1141,8 +1114,7 @@ async def test_approval_claim_decision_sql_guard_under_concurrency(postgres_pool
 
 async def test_approval_decided_unreconciled_keyset_and_mark(postgres_pool):
     """Keyset pagination + (created_at, id) ordering + mark_reconciled idempotency."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     from datetime import datetime, timedelta, timezone
 
@@ -1197,8 +1169,7 @@ async def test_approval_decide_once_migration_idempotent_on_populated_table(
     via setup(). It is safe only while the e2e suite runs serially — a
     concurrent test touching this table during the drop window would break. See
     the @pytest.mark.serial marker."""
-    if not await _reachable():
-        pytest.skip(f"no Postgres reachable at {DSN}")
+    await require_postgres(DSN)
 
     rid = f"appr-{uuid.uuid4().hex[:8]}"
     store = PostgresApprovalStore()

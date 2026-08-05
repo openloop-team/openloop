@@ -46,6 +46,13 @@ run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml 
 description = "List the containers"
 run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml ps"
 
+[tasks.compose-postgres-up]
+description = "Start the compose Postgres and wait until it reports healthy"
+run = """
+docker compose up -d postgres
+until [ "$(docker inspect --format '{% raw %}{{.State.Health.Status}}{% endraw %}' "$(docker compose ps -q postgres)")" = healthy ]; do sleep 2; done
+"""
+
 [tasks.compose-psql]
 description = "Open a psql shell to the Postgres database"
 run = "docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml exec postgres psql  -U openloop -d openloop"
@@ -90,13 +97,36 @@ run = "python -m pytest tests/unit -q"
 description = "Run in-process integration tests without external services"
 run = "python -m pytest tests/integration -v"
 
+# A disposable database on its own port, deliberately not the compose Postgres:
+# these suites drop schemas and delete rows from shared tables, so they must
+# never point at the development database. CI provisions the same thing as a
+# service container.
+[tasks.test-postgres-up]
+description = "Start the disposable pgvector Postgres used by the test suites"
+run = """
+if [ -z "$(docker ps -q -f name='^openloop-test-postgres$')" ]; then
+  docker rm -f openloop-test-postgres >/dev/null 2>&1 || true
+  docker run -d --name openloop-test-postgres \
+    -e POSTGRES_USER=openloop \
+    -e POSTGRES_PASSWORD=openloop-test \
+    -e POSTGRES_DB=openloop_test \
+    -p 5433:5432 pgvector/pgvector:pg16 >/dev/null
+fi
+until docker exec openloop-test-postgres pg_isready -U openloop >/dev/null 2>&1; do sleep 1; done
+"""
+
+[tasks.test-postgres-down]
+description = "Remove the disposable test Postgres and its data"
+run = "docker rm -f openloop-test-postgres >/dev/null 2>&1 || true"
+
+[tasks.test-postgres]
+description = "Run the Postgres-backed suites against the disposable test database"
+depends = ["test-postgres-up"]
+run = "python -m pytest tests/e2e/test_postgres.py tests/e2e/test_analysis_retirement.py -v"
+
 [tasks.test-e2e]
 description = "Bring up Postgres and run Postgres E2E tests"
-run = """
-docker compose up -d postgres
-until [ "$(docker inspect --format '{% raw %}{{.State.Health.Status}}{% endraw %}' "$(docker compose ps -q postgres)")" = healthy ]; do sleep 2; done
-python -m pytest tests/e2e/test_postgres.py tests/e2e/test_analysis_retirement.py -v
-"""
+run = "mise run test-postgres"
 
 [tasks.test-e2e-runtime-github-live]
 description = "Run opt-in runtime/GitHub live E2E against a real model and GitHub"

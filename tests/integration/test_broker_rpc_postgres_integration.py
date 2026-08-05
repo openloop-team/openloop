@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import os
 from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -49,12 +48,10 @@ from openloop.broker_rpc.models import (
     StartSegmentPayload,
 )
 from tests.support.broker_repository_contract import SequenceIds
+from tests.support.postgres import require_postgres, postgres_dsn
 
 
-DSN = os.environ.get(
-    "OPENLOOP_TEST_DATABASE_URL",
-    "postgresql://openloop:change-me@localhost:5432/openloop",
-)
+DSN = postgres_dsn()
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 
 
@@ -80,17 +77,6 @@ OTHER_OWNER = BrokerOwner("tenant-b", "workload-b")
 PEER = PeerCredentials(4401, 1000, 1000)
 
 pytestmark = [pytest.mark.integration, pytest.mark.postgres]
-
-
-async def _reachable() -> bool:
-    try:
-        import asyncpg
-
-        connection = await asyncpg.connect(DSN, timeout=3)
-        await connection.close()
-        return True
-    except Exception:
-        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,8 +118,7 @@ class RpcPostgresFixture:
 
 @pytest.fixture
 async def rpc_postgres():
-    if not await _reachable():
-        pytest.skip(f"no PostgreSQL reachable at {DSN}")
+    await require_postgres(DSN)
     import asyncpg
 
     schema = f"broker_rpc_test_{uuid4().hex}"

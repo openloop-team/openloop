@@ -25,5 +25,57 @@ jobs:
       - name: Install dependencies
         run: mise run install
 
+      # Deliberately runs with no database: this is the path a contributor
+      # without Docker takes, so it keeps the Postgres suites' clean-skip
+      # behavior honest. The postgres job below is what actually exercises them.
       - name: Run unit and integration tests
         run: mise run test
+
+  test-postgres:
+    name: Tests (Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        # pgvector, not stock postgres: the memory store needs the `vector`
+        # extension. Matches the image in docker-compose.yml.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: openloop
+          # Throwaway credential for an ephemeral service container that is only
+          # reachable from this job. Matches DEFAULT_DSN in tests/support/postgres.py
+          # and the container `mise run test-postgres-up` provisions locally.
+          POSTGRES_PASSWORD: openloop-test
+          POSTGRES_DB: openloop_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openloop"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Same database as the local test container, on the runner's mapped port.
+      OPENLOOP_TEST_DATABASE_URL: postgresql://openloop:openloop-test@localhost:5432/openloop_test
+      # Turns the suites' "no database, skip" convenience into a hard failure, so
+      # a service container that fails to come up breaks the build instead of
+      # silently reducing this job to the hermetic suite.
+      OPENLOOP_REQUIRE_POSTGRES: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up mise
+        uses: jdx/mise-action@v2
+
+      - name: Install dependencies
+        run: mise run install
+
+      - name: Run unit and integration tests against Postgres
+        run: mise run test
+
+      - name: Run Postgres E2E suites
+        run: mise run test-postgres

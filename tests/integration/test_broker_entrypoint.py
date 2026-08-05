@@ -32,14 +32,12 @@ from tests.support.settings import (
     IsolatedBrokerSettings as Settings,
     IsolatedSettings as RuntimeSettings,
 )
+from tests.support.postgres import require_postgres, postgres_dsn
 
 
 _IDENTITY_SEED = bytes(range(1, 33))
 _RECEIPT_ROOT = bytes([3]) * 32
-_POSTGRES_DSN = os.environ.get(
-    "OPENLOOP_TEST_DATABASE_URL",
-    "postgresql://openloop:change-me@localhost:5432/openloop",
-)
+_POSTGRES_DSN = postgres_dsn()
 _SUBPROCESS_ENV_ALLOWLIST = (
     "LANG",
     "LC_ALL",
@@ -350,17 +348,6 @@ def _wait_until_healthy(settings: Settings, process: subprocess.Popen) -> None:
     pytest.fail("broker did not become healthy")
 
 
-async def _postgres_reachable() -> bool:
-    try:
-        import asyncpg
-
-        connection = await asyncpg.connect(_POSTGRES_DSN, timeout=3)
-        await connection.close()
-        return True
-    except Exception:
-        return False
-
-
 def _dsn_with_search_path(dsn: str, schema: str) -> str:
     parsed = urlsplit(dsn)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
@@ -509,8 +496,7 @@ def test_entrypoint_refuses_cross_boundary_root_reuse(broker_dir):
 
 @pytest.mark.postgres
 async def test_postgres_entrypoint_owns_broker_migrations(broker_dir):
-    if not await _postgres_reachable():
-        pytest.skip(f"no PostgreSQL reachable at {_POSTGRES_DSN}")
+    await require_postgres(_POSTGRES_DSN)
     import asyncpg
 
     schema = f"broker_entrypoint_{uuid4().hex}"

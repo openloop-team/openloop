@@ -78,6 +78,12 @@ path = "src/openloop/__init__.py"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# testpaths spans all three suites, so a bare `pytest` collects them together.
+# The default prepend import mode derives module names relative to rootdir,
+# which makes same-named files in two suite directories collide at collection
+# (tests/unit and tests/e2e both hold a test_analysis_retirement.py).
+addopts = "--import-mode=importlib"
+consider_namespace_packages = true
 markers = [
     "unit: isolated unit tests",
     "integration: in-process tests spanning runtime boundaries with fakes",

@@ -35,22 +35,9 @@ from tests.support.settings import (
     IsolatedCoprocessBrokerSettings,
     IsolatedSettings as Settings,
 )
+from tests.support.postgres import require_postgres, postgres_dsn
 
-_DSN = os.environ.get(
-    "OPENLOOP_TEST_DATABASE_URL",
-    "postgresql://openloop:change-me@localhost:5432/openloop_agents",
-)
-
-
-async def _postgres_reachable() -> bool:
-    try:
-        import asyncpg
-
-        conn = await asyncpg.connect(_DSN, timeout=3)
-        await conn.close()
-        return True
-    except Exception:
-        return False
+_DSN = postgres_dsn()
 
 
 @pytest.fixture
@@ -245,8 +232,7 @@ async def test_build_broker_uses_durable_audit_with_postgres(tmp_path, sock_dir)
     # audit table were missing or set up before the migrations, setup would raise
     # and build_broker would fail closed. A returned handle + a create_job that
     # round-trips over the pool proves the durable repo + durable audit path.
-    if not await _postgres_reachable():
-        pytest.skip(f"no Postgres reachable at {_DSN}")
+    await require_postgres(_DSN)
     import asyncpg
 
     settings, coprocess, _broker = _settings(tmp_path, sock_dir)
