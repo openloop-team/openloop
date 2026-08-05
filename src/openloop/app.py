@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
+from openloop import __version__
 from openloop.agents import load_agents
 from openloop.agents.schema import Agent
 from openloop.config import RuntimeSettings
@@ -85,7 +86,7 @@ def create_app(
             app.state.ctx = ctx
             yield
 
-    app = FastAPI(title="OpenLoop", version="0.0.1", lifespan=lifespan)
+    app = FastAPI(title="OpenLoop", version=__version__, lifespan=lifespan)
 
     if slack_agent and settings.slack_bot_token and settings.slack_signing_secret:
 

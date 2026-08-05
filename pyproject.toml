@@ -1,6 +1,6 @@
 [project]
 name = "pyopenloop"
-version = "0.0.1"
+dynamic = ["version"]
 description = "The open-source control plane and runtime for team AI agents"
 authors = [
   { name = "Artur Maciag", email = "maciag.artur@gmail.com" },
@@ -71,6 +71,9 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/openloop"]
+
+[tool.hatch.version]
+path = "src/openloop/__init__.py"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
