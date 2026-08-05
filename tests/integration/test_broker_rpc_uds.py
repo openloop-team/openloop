@@ -1,6 +1,5 @@
 import asyncio
 import os
-from pathlib import Path
 import struct
 from uuid import UUID
 
@@ -19,9 +18,9 @@ from openloop.broker_rpc.errors import RpcErrorCode
 from openloop.broker_rpc.identity import WorkloadIntent
 from openloop.broker_rpc.limits import BrokerRpcLimits
 from openloop.broker_rpc.models import (
+    RPC_VERSION,
     CreateJobPayload,
     CreateJobResult,
-    RPC_VERSION,
     RpcRequest,
 )
 from openloop.broker_rpc.peer import StaticPeerCredentialProvider
@@ -32,7 +31,6 @@ from openloop.broker_rpc.server import (
 from tests.support.broker_repository_contract import SequenceIds
 from tests.support.broker_rpc import broker_rpc_test_fixture
 
-
 OWNER = BrokerOwner("tenant-a", "workload-a")
 OTHER_OWNER = BrokerOwner("tenant-b", "workload-b")
 
@@ -42,7 +40,10 @@ def socket_path(short_socket_root):
     return short_socket_root / "broker.sock"
 
 
-def _server(path, fixture, *, limits=BrokerRpcLimits()):
+_DEFAULT_LIMITS = BrokerRpcLimits()
+
+
+def _server(path, fixture, *, limits=_DEFAULT_LIMITS):
     return BrokerRpcServer(
         application=fixture.application,
         socket_policy=UnixSocketPolicy(path, mode=0o600),
@@ -74,9 +75,7 @@ async def test_real_uds_create_replay_inspect_and_cross_tenant_denial(socket_pat
         assert replay.ticket.job_id == first.ticket.job_id
         assert replay.capability == first.capability
 
-        inspected = await client.inspect_job(
-            first.ticket.job_id, first.capability
-        )
+        inspected = await client.inspect_job(first.ticket.job_id, first.capability)
         assert inspected.snapshot.job_id == first.ticket.job_id
 
         other = _client(path, fixture, OTHER_OWNER, start=7000)
@@ -86,10 +85,7 @@ async def test_real_uds_create_replay_inspect_and_cross_tenant_denial(socket_pat
 
         with pytest.raises(BrokerRpcRemoteError) as wrong_capability:
             await client.inspect_job(first.ticket.job_id, JobCapability("A" * 43))
-        assert (
-            wrong_capability.value.code
-            is RpcErrorCode.NOT_FOUND_OR_UNAUTHORIZED
-        )
+        assert wrong_capability.value.code is RpcErrorCode.NOT_FOUND_OR_UNAUTHORIZED
     finally:
         await server.stop()
     assert not path.exists()

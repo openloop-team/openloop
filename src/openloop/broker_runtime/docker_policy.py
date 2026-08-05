@@ -16,7 +16,6 @@ from openloop.openhands.runtime_profile import (
     runtime_server_image,
 )
 from openloop.tools.openhands_relay import (
-    CONTAINER_RELAY_CAPABILITY_FILE,
     CONTAINER_RELAY_CONFIG_FILE,
     DEFAULT_HAPROXY_RELAY_IMAGE,
     CompiledOpenHandsRelay,
@@ -29,7 +28,6 @@ from .contract import (
     OpenHandsGenerationSpec,
     RuntimeUnavailable,
 )
-
 
 RUNTIME_SCHEMA = "v1"
 RUNTIME_PROFILE = "openhands"
@@ -132,18 +130,21 @@ class DockerRuntimeConfig:
     def __post_init__(self) -> None:
         runtime_root = _trusted_root("runtime_root", self.runtime_root)
         state_root = _trusted_root("state_root", self.state_root)
-        if runtime_root == state_root or runtime_root.is_relative_to(
-            state_root
-        ) or state_root.is_relative_to(runtime_root):
+        if (
+            runtime_root == state_root
+            or runtime_root.is_relative_to(state_root)
+            or state_root.is_relative_to(runtime_root)
+        ):
             raise ValueError("runtime_root and state_root must be disjoint")
         object.__setattr__(self, "runtime_root", runtime_root)
         object.__setattr__(self, "state_root", state_root)
         if not isinstance(self.docker, str) or not self.docker or "\0" in self.docker:
             raise ValueError("docker executable is invalid")
         require_immutable_server_image(self.agent_image)
-        if not isinstance(self.relay_image, str) or _DIGEST_IMAGE.fullmatch(
-            self.relay_image
-        ) is None:
+        if (
+            not isinstance(self.relay_image, str)
+            or _DIGEST_IMAGE.fullmatch(self.relay_image) is None
+        ):
             raise ValueError("HAProxy relay image must be pinned by sha256 digest")
         selected_platform = self.platform or native_docker_platform()
         if selected_platform not in SUPPORTED_DOCKER_PLATFORMS:
@@ -163,13 +164,10 @@ class DockerRuntimeConfig:
             raise ValueError("gid is out of range")
         object.__setattr__(self, "uid", selected_uid)
         object.__setattr__(self, "gid", selected_gid)
-        if (
-            self.shared_gid is not None
-            and (
-                isinstance(self.shared_gid, bool)
-                or not isinstance(self.shared_gid, int)
-                or not 0 <= self.shared_gid <= 2**31 - 1
-            )
+        if self.shared_gid is not None and (
+            isinstance(self.shared_gid, bool)
+            or not isinstance(self.shared_gid, int)
+            or not 0 <= self.shared_gid <= 2**31 - 1
         ):
             raise ValueError("shared_gid is out of range")
         _bounded_positive(
@@ -311,7 +309,7 @@ class DockerGenerationPolicy:
         spec: OpenHandsGenerationSpec,
         *,
         mode: RelayMode = RelayMode.RUNNING,
-    ) -> "DockerGenerationPolicy":
+    ) -> DockerGenerationPolicy:
         if not isinstance(config, DockerRuntimeConfig):
             raise TypeError("config must be a DockerRuntimeConfig")
         if not isinstance(spec, OpenHandsGenerationSpec):
@@ -475,9 +473,10 @@ class DockerGenerationPolicy:
     def start(self, name: str, object_id: str) -> DockerCommand:
         if name not in (self.names.agent, self.names.relay):
             raise ValueError("cannot start a foreign runtime resource")
-        if not isinstance(object_id, str) or _DOCKER_OBJECT_ID.fullmatch(
-            object_id
-        ) is None:
+        if (
+            not isinstance(object_id, str)
+            or _DOCKER_OBJECT_ID.fullmatch(object_id) is None
+        ):
             raise ValueError("cannot start an invalid runtime resource")
         return DockerCommand(
             (self.config.docker, "start", object_id), timeout_seconds=60.0

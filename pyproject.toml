@@ -27,6 +27,11 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "httpx>=0.27",
+    # Exact pins, unlike everything else here: these two decide whether CI is
+    # green, so a patch release that adds a rule or changes formatting must
+    # arrive as a reviewable bump rather than as a red build on an unrelated PR.
+    "ruff==0.16.0",
+    "mypy==2.3.0",
 ]
 mcp = [
     "mcp>=1.0",
@@ -74,6 +79,39 @@ packages = ["src/openloop"]
 
 [tool.hatch.version]
 path = "src/openloop/__init__.py"
+
+[tool.ruff]
+# The packaging floor, not the 3.12 the CI runner happens to use: rules that
+# rewrite to newer idioms must not propose anything a 3.11 install can't run.
+target-version = "py311"
+
+[tool.ruff.lint]
+# E501 (line length) is deliberately absent. `ruff format` owns line width, and
+# what it leaves long is the handful of cases it can't split — URLs, long string
+# literals, comment prose — where a lint error would only invite worse wrapping.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
+[tool.mypy]
+files = ["src"]
+python_version = "3.11"
+# Check against the deployment target, not the developer's laptop. The broker
+# reads SO_PEERCRED, which exists in the Linux socket stubs and not the macOS
+# ones, so leaving this to the host would fail on a Mac and pass in CI.
+platform = "linux"
+# Third-party surface this repo leans on (litellm, slack_bolt, the openhands SDK)
+# is largely unannotated or stub-less, and the openhands extra doesn't even
+# resolve on 3.11. Checking our own call sites is the win here; demanding stubs
+# for other people's packages would just mean a wall of unactionable errors.
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The openhands extra requires >=3.12 and its sources use 3.12-only syntax, so
+# checking this package under the 3.11 target above is a parse error before it
+# is anything else. Our own call sites into it degrade to Any, which is what
+# ignore_missing_imports would already have given us on a 3.11 install where the
+# extra resolves empty.
+module = ["openhands.*"]
+follow_imports = "skip"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -19,9 +19,7 @@ from tests.support.settings import IsolatedSettings
 def ambient(monkeypatch, tmp_path):
     """A working copy and environment that both carry non-default config."""
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".runtime.env").write_text(
-        "OLLAMA_BASE_URL=http://from-dotenv:1111\n"
-    )
+    (tmp_path / ".runtime.env").write_text("OLLAMA_BASE_URL=http://from-dotenv:1111\n")
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     monkeypatch.setenv("STORAGE_MODE", "postgres")
     return tmp_path
@@ -34,17 +32,16 @@ def test_reads_the_dotenv_regular_file(ambient):
 def test_dotenv_parses_complex_field_json(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".broker.env").write_text(
-        "BROKER_CAPABILITY_ROOTS='"
-        '{"cap-key-v1":"dotenv-root"}'
-        "'\n"
+        'BROKER_CAPABILITY_ROOTS=\'{"cap-key-v1":"dotenv-root"}\'\n'
     )
     monkeypatch.delenv("BROKER_CAPABILITY_ROOTS", raising=False)
 
     settings = BrokerSettings(_secrets_dir=tmp_path / "missing-secrets")
 
-    assert settings.broker_capability_roots[
-        "cap-key-v1"
-    ].get_secret_value() == "dotenv-root"
+    assert (
+        settings.broker_capability_roots["cap-key-v1"].get_secret_value()
+        == "dotenv-root"
+    )
 
 
 def test_reads_the_process_environment(ambient):
@@ -85,9 +82,7 @@ def test_sensitive_mounted_values_are_masked_in_settings_repr(ambient, tmp_path)
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
     (secrets_dir / "postgres_password").write_text("mounted-db-secret\n")
-    (secrets_dir / "claude_code_oauth_token").write_text(
-        "mounted-claude-secret\n"
-    )
+    (secrets_dir / "claude_code_oauth_token").write_text("mounted-claude-secret\n")
 
     settings = RuntimeSettings(_secrets_dir=secrets_dir)
 
@@ -95,8 +90,7 @@ def test_sensitive_mounted_values_are_masked_in_settings_repr(ambient, tmp_path)
     assert settings.postgres_password.get_secret_value() == "mounted-db-secret"
     assert settings.claude_code_oauth_token is not None
     assert (
-        settings.claude_code_oauth_token.get_secret_value()
-        == "mounted-claude-secret"
+        settings.claude_code_oauth_token.get_secret_value() == "mounted-claude-secret"
     )
     assert "mounted-db-secret" not in repr(settings)
     assert "mounted-claude-secret" not in repr(settings)

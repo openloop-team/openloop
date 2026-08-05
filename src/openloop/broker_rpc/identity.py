@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from uuid import UUID, uuid4
 
 import jwt
@@ -22,14 +22,13 @@ from openloop.broker.models import (
     validate_uuid,
 )
 
-
 MAX_IDENTITY_TOKEN_BYTES = 8192
 MAX_IDENTITY_INTENTS = 16
 MAX_IDENTITY_LIFETIME_SECONDS = 300
 IDENTITY_CLOCK_SKEW_SECONDS = 30
 
 
-class WorkloadIntent(str, Enum):
+class WorkloadIntent(StrEnum):
     CREATE_JOB = "CREATE_JOB"
     INSPECT_JOB = "INSPECT_JOB"
     START_SEGMENT = "START_SEGMENT"
@@ -165,9 +164,8 @@ class WorkloadIdentityIssuer:
         if not isinstance(intents, (set, frozenset, tuple, list)):
             raise TypeError("intents must be a bounded collection")
         intent_set = frozenset(intents)
-        if (
-            not 1 <= len(intent_set) <= MAX_IDENTITY_INTENTS
-            or any(not isinstance(intent, WorkloadIntent) for intent in intent_set)
+        if not 1 <= len(intent_set) <= MAX_IDENTITY_INTENTS or any(
+            not isinstance(intent, WorkloadIntent) for intent in intent_set
         ):
             raise ValueError("identity intents are invalid")
         jwt_id = validate_uuid("jwt_id", self._id_factory())
@@ -275,9 +273,7 @@ class WorkloadIdentityVerifier:
             worker_id = _canonical_uuid(
                 "worker_instance_id", claims["worker_instance_id"]
             )
-            assignment_id = _canonical_uuid(
-                "assignment_id", claims["assignment_id"]
-            )
+            assignment_id = _canonical_uuid("assignment_id", claims["assignment_id"])
             jwt_id = _canonical_uuid("jti", claims["jti"])
             isolation_mode = IsolationMode(claims["isolation_mode"])
             required_isolation = IsolationMode(claims["required_isolation"])

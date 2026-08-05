@@ -1,0 +1,15 @@
+# Revisions whose changes are purely mechanical, and which `git blame` should
+# therefore look straight through to the commit that last touched the code for
+# a reason.
+#
+# GitHub applies this file automatically. To get the same locally, once:
+#
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Only add a revision here if it changed no behavior at all — a formatter run,
+# a bulk rename. Anything a reviewer would want attributed stays off the list.
+
+# style: format with ruff — the one-time repo-wide `ruff format` pass that made
+# `ruff format --check` enforceable in CI. 169 files, whitespace and quoting
+# only, identical suite outcome before and after.
+65834cee00220414c9b22dc7b23404d4cfab235a

@@ -49,7 +49,7 @@ class Artifact:
 Deliverable = Prose | Artifact
 
 
-def coerce(result: "Deliverable | str") -> Deliverable:
+def coerce(result: Deliverable | str) -> Deliverable:
     """Widen plain strings (the historical seam type) into :class:`Prose`."""
     if isinstance(result, str):
         return Prose(text=result)

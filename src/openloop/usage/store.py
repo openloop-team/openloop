@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 
@@ -26,9 +26,7 @@ class UsageRecord:
     completion_tokens: int = 0
     cost_usd: float = 0.0
     outcome: str = "ok"  # ok | blocked | rate_limited | over_task_budget | error
-    created_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     # Attribution envelope (review finding 4). Populated for broker-run worker
     # spend; legacy chat/worker and non-broker records leave every field None
     # and stay append-only. `job_id` is the app-wide coding-job identity
@@ -51,9 +49,7 @@ def _month_start(now: datetime) -> datetime:
 class UsageStore(Protocol):
     async def record(self, usage: UsageRecord) -> bool: ...
 
-    async def monthly_total(
-        self, scope_key: str, now: datetime | None = None
-    ) -> float:
+    async def monthly_total(self, scope_key: str, now: datetime | None = None) -> float:
         """Total USD spent against `scope_key` in the current calendar month."""
         ...
 
@@ -77,10 +73,8 @@ class InMemoryUsageStore:
         self.records.append(usage)
         return True
 
-    async def monthly_total(
-        self, scope_key: str, now: datetime | None = None
-    ) -> float:
-        now = now or datetime.now(timezone.utc)
+    async def monthly_total(self, scope_key: str, now: datetime | None = None) -> float:
+        now = now or datetime.now(UTC)
         start = _month_start(now)
         return sum(
             r.cost_usd

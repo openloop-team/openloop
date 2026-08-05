@@ -55,8 +55,7 @@ def _lacks_issued_identity(file: str) -> bool:
     if not isinstance(meta, dict):
         return False
     return not (
-        isinstance(meta.get("id"), str)
-        and re.match(r"^[0-9a-f]{32}$", meta["id"])
+        isinstance(meta.get("id"), str) and re.match(r"^[0-9a-f]{32}$", meta["id"])
     )
 
 
@@ -135,8 +134,7 @@ def _cmd_agents_id_issue(args: argparse.Namespace) -> int:
 
     if name in sibling_names:
         print(
-            f"error: duplicate agent name {name!r} "
-            f"(also {sibling_names[name]})",
+            f"error: duplicate agent name {name!r} (also {sibling_names[name]})",
             file=sys.stderr,
         )
         return 1
@@ -145,8 +143,7 @@ def _cmd_agents_id_issue(args: argparse.Namespace) -> int:
     inserted = _insert_metadata_id(text, minted)
     if inserted is None:
         print(
-            f"error: {path}: could not find the metadata block to insert "
-            "the id into",
+            f"error: {path}: could not find the metadata block to insert the id into",
             file=sys.stderr,
         )
         return 1
@@ -157,8 +154,7 @@ def _cmd_agents_id_issue(args: argparse.Namespace) -> int:
     print(preview)
     print()
     print(
-        "This becomes the agent's permanent identity "
-        "(billing scope + spend guard key)."
+        "This becomes the agent's permanent identity (billing scope + spend guard key)."
     )
     if not args.yes:
         if not sys.stdin.isatty():
@@ -213,9 +209,10 @@ def _insert_metadata_id(text: str, minted: str) -> tuple[str, str] | None:
     if child_prefix is None or last_child is None:
         return None
     id_line = f"{child_prefix}id: {minted}\n"
-    preview = "".join(
-        f"    {line.rstrip()}\n" for line in lines[meta_idx : last_child + 1]
-    ) + f"+   {child_prefix}id: {minted}"
+    preview = (
+        "".join(f"    {line.rstrip()}\n" for line in lines[meta_idx : last_child + 1])
+        + f"+   {child_prefix}id: {minted}"
+    )
     new_lines = [*lines[: last_child + 1], id_line, *lines[last_child + 1 :]]
     return "".join(new_lines), preview
 
@@ -243,7 +240,7 @@ def _cmd_broker_keys(args: argparse.Namespace) -> int:
         _derive_receipt_key,
     )
 
-    settings = RuntimeSettings()   # entrypoint: load from .runtime.env + env
+    settings = RuntimeSettings()  # entrypoint: load from .runtime.env + env
 
     def public_of(private: Any) -> str:
         return base64.b64encode(private.public_key().public_bytes_raw()).decode()
@@ -263,6 +260,11 @@ def _cmd_broker_keys(args: argparse.Namespace) -> int:
     # Derive everything before printing, so a malformed value can't leave a
     # half-written map that looks paste-ready.
     try:
+        if settings.broker_identity_private_key is None:
+            # Raised as ValueError so the handler below renders it as a CLI
+            # error; unset, it would otherwise reach the decoder as None and
+            # fail with a traceback instead.
+            raise ValueError("broker_identity_private_key is not set")
         identity = {
             settings.broker_identity_key_id: public_of(
                 _decode_identity_seed(settings.broker_identity_private_key)

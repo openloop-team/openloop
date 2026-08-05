@@ -47,10 +47,10 @@ import logging
 import shutil
 import tempfile
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -83,7 +83,11 @@ if TYPE_CHECKING:
 # Persist-after-each-step callback invoked after each completed step so a crash
 # leaves an accurate mid-phase record (completed_steps + state_json), not just a
 # status. The orchestrator owns the git-side steps; the worker reports its own.
-StepCallback = Callable[["WorkerState"], Awaitable[None]]
+# Coroutine, not Awaitable: the OpenHands worker hands these to
+# asyncio.run_coroutine_threadsafe, which rejects awaitables that are not
+# coroutines at runtime. Every implementation is an `async def` already, so this
+# narrows the declared contract to what the code has always required.
+StepCallback = Callable[["WorkerState"], Coroutine[Any, Any, None]]
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +114,7 @@ class WorkerRunAborted(RuntimeError):
         self.cost_usd = cost_usd
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
+
 
 CODING_WORKER_TOOL_NAME = "workspace_task"
 CODING_WORKER_CODE_WRITE = "code:write"
@@ -145,6 +150,7 @@ class CodingWorkerPrArgs(BaseModel):
     @classmethod
     def _strip(cls, value):
         return value.strip() if isinstance(value, str) else value
+
 
 # Named steps one attempt walks through. The orchestrator owns the git-side
 # steps (clone, branch, commit, push); the worker reports its own ("edit").
@@ -228,11 +234,22 @@ class WorkerState:
         return data
 
     @classmethod
-    def from_dict(cls, data: dict) -> "WorkerState":
+    def from_dict(cls, data: dict) -> WorkerState:
         fields = {
-            "job_id", "repo", "instruction", "base", "branch",
-            "completed_steps", "title", "body", "agent", "agent_id",
-            "warm_key", "requester_id", "approval_id", "session_id",
+            "job_id",
+            "repo",
+            "instruction",
+            "base",
+            "branch",
+            "completed_steps",
+            "title",
+            "body",
+            "agent",
+            "agent_id",
+            "warm_key",
+            "requester_id",
+            "approval_id",
+            "session_id",
             "openhands_resume",
         }
         values = {k: v for k, v in data.items() if k in fields}
@@ -273,7 +290,7 @@ class WorkerEdit:
     completion_tokens: int = 0
     # OpenHands captures a final authenticated delta before its live container
     # disappears. Other worker backends leave this unset.
-    workspace_artifact: "WorkspaceArtifactRef | None" = None
+    workspace_artifact: WorkspaceArtifactRef | None = None
 
 
 @runtime_checkable
@@ -318,8 +335,8 @@ class AttemptRunner(Protocol):
     async def provision_readonly(self, repo: str, ref: str | None = None) -> Path: ...
 
     async def run_investigation(
-        self, task: "WorkspaceTask", investigator: RepoInvestigator
-    ) -> tuple["EvidenceBundle", "ModelResponse"]: ...
+        self, task: WorkspaceTask, investigator: RepoInvestigator
+    ) -> tuple[EvidenceBundle, ModelResponse]: ...
 
 
 def _branch_for(job_id: str) -> str:
@@ -391,9 +408,7 @@ def _sync_worker_state_to_task(task: WorkspaceTask, state: WorkerState) -> None:
     )
 
 
-def _failed(
-    job_id: str, state: WorkerState, status: str, exc: Exception
-) -> ToolResult:
+def _failed(job_id: str, state: WorkerState, status: str, exc: Exception) -> ToolResult:
     """A failed outcome for a worker/PR step — never raised out of execute()."""
     return ToolResult(
         ok=False,
@@ -463,7 +478,7 @@ def _pr_body(body: str, job_id: str) -> str:
     return f"{body}\n\n{footer}" if body else footer
 
 
-def _pull_request_outcome(state: "WorkerState", pull: dict, summary: str) -> dict:
+def _pull_request_outcome(state: WorkerState, pull: dict, summary: str) -> dict:
     """Build a typed PullRequest outcome for the result data."""
     return {
         "kind": "pull_request",
@@ -498,8 +513,8 @@ class CodingWorkerConnector:
         self,
         orchestrator: AttemptRunner,
         github: GitHubClient,
-        checkpoints: "CheckpointStore | None" = None,
-        investigator: "RepoInvestigator | None" = None,
+        checkpoints: CheckpointStore | None = None,
+        investigator: RepoInvestigator | None = None,
     ) -> None:
         # The orchestrator owns provision → worker → commit → push (and the git
         # credential); this connector never sees a worker that could push.
@@ -734,17 +749,13 @@ class CodingWorkerConnector:
                             raise OpenHandsResumeError(
                                 "finalizing OpenHands recovery is unavailable"
                             )
-                        await reconcile(
-                            state, on_step=self._checkpointer(task)
-                        )
+                        await reconcile(state, on_step=self._checkpointer(task))
                     deliver = getattr(self.orchestrator, "deliver_terminal", None)
                     if deliver is None:
                         raise OpenHandsResumeError(
                             "terminal OpenHands recovery is unavailable"
                         )
-                    outcome = await deliver(
-                        state, on_step=self._checkpointer(task)
-                    )
+                    outcome = await deliver(state, on_step=self._checkpointer(task))
                 elif resume is not None:
                     raise OpenHandsResumeError(
                         f"active OpenHands {resume.status} segment cannot be replayed"
@@ -796,8 +807,7 @@ class CodingWorkerConnector:
         return ToolResult(
             ok=True,
             summary=(
-                f"opened draft PR #{pull.get('number')} in {state.repo} "
-                f"(job {job_id})"
+                f"opened draft PR #{pull.get('number')} in {state.repo} (job {job_id})"
             ),
             data={
                 "job_id": job_id,
@@ -815,7 +825,9 @@ class CodingWorkerConnector:
                     "open_pr": state.open_pr_key(),
                 },
                 "outcome": _pull_request_outcome(
-                    state, pull, f"opened draft PR #{pull.get('number')} in {state.repo}"
+                    state,
+                    pull,
+                    f"opened draft PR #{pull.get('number')} in {state.repo}",
                 ),
             },
         )
@@ -936,12 +948,12 @@ class CodingWorkerConnector:
         if cp.status == "opened":
             return _opened_result(cp)
         try:
-            task, state = self._load_code_task(
-                cp.state_json, expected_task_id=job_id
-            )
+            task, state = self._load_code_task(cp.state_json, expected_task_id=job_id)
             resume = state.openhands_resume
             if resume is None or resume.status != "parked":
-                raise OpenHandsResumeError("coding worker job is not awaiting a decision")
+                raise OpenHandsResumeError(
+                    "coding worker job is not awaiting a decision"
+                )
             outcome = await self.orchestrator.resume_attempt(
                 state,
                 decision,
@@ -989,12 +1001,19 @@ class CodingWorkerConnector:
                 },
             )
         except Exception as exc:  # noqa: BLE001
-            state = locals().get("state")
-            task = locals().get("task")
-            if isinstance(state, WorkerState) and isinstance(task, WorkspaceTask):
-                await self._save(task, state, "failed", error=str(exc))
-                return _failed(job_id, state, "failed", exc)
-            return ToolResult(ok=False, summary=f"coding worker job {job_id} failed: {exc}")
+            # Rebound under new names: `state` and `task` are already typed in
+            # this scope, and locals() hands back Any | None for whichever of
+            # them the try block managed to reach before raising.
+            failed_state = locals().get("state")
+            failed_task = locals().get("task")
+            if isinstance(failed_state, WorkerState) and isinstance(
+                failed_task, WorkspaceTask
+            ):
+                await self._save(failed_task, failed_state, "failed", error=str(exc))
+                return _failed(job_id, failed_state, "failed", exc)
+            return ToolResult(
+                ok=False, summary=f"coding worker job {job_id} failed: {exc}"
+            )
 
     async def _open_pr(self, state: WorkerState, outcome: WorkerOutcome) -> dict:
         """Open the draft PR, reusing an existing one for this head if present.
@@ -1090,9 +1109,7 @@ class CodingWorkerConnector:
                             raise OpenHandsResumeError(
                                 "OpenHands parking reconciler is unavailable"
                             )
-                        await reconcile(
-                            state, on_step=self._checkpointer(task)
-                        )
+                        await reconcile(state, on_step=self._checkpointer(task))
                         await self._save(task, state, "parked")
                         resumed.append(cp.job_id)
                         continue
@@ -1122,8 +1139,7 @@ class CodingWorkerConnector:
                     await self._save(task, state, "failed", error=str(exc))
                     continue
             if any(
-                worker_data.get(key) is not None
-                for key in self._VERSIONED_STATE_KEYS
+                worker_data.get(key) is not None for key in self._VERSIONED_STATE_KEYS
             ):
                 logger.error(
                     "quarantining coding-worker checkpoint %s: versioned or "
@@ -1202,7 +1218,11 @@ class CodingWorkerConnector:
 
 @runtime_checkable
 class _Completer(Protocol):
-    async def complete(self, model: str, messages: list[dict], **kwargs): ...
+    # Two positional arguments and nothing else — that is the whole call shape
+    # used below. A **kwargs here would oblige every implementation to accept
+    # arbitrary keywords, which ModelGateway's keyword-only signature does not,
+    # so the protocol would exclude its only real implementation.
+    async def complete(self, model: str, messages: list[dict]): ...
 
 
 class GitWorkspaceOrchestrator:
@@ -1243,8 +1263,8 @@ class GitWorkspaceOrchestrator:
         scope: CredentialScope | None = None,
         remote_base: str = "https://github.com",
         workspace_root: Path | None = None,
-        ledger: "WorkerSpendLedger | None" = None,
-        warm_pool: "WarmWorkspacePool | None" = None,
+        ledger: WorkerSpendLedger | None = None,
+        warm_pool: WarmWorkspacePool | None = None,
     ) -> None:
         self.worker = worker
         self._credentials = credentials
@@ -1321,8 +1341,13 @@ class GitWorkspaceOrchestrator:
                 # so the worker sees a pristine tree — same as a cold clone.
                 await self._git(
                     *_auth_config(token),
-                    "fetch", "--depth", "1", "origin", state.base,
-                    cwd=workspace, redact=_auth_secrets(token),
+                    "fetch",
+                    "--depth",
+                    "1",
+                    "origin",
+                    state.base,
+                    cwd=workspace,
+                    redact=_auth_secrets(token),
                 )
                 await self._git("reset", "--hard", "FETCH_HEAD", cwd=workspace)
                 await self._git("clean", "-fdx", cwd=workspace)
@@ -1332,8 +1357,13 @@ class GitWorkspaceOrchestrator:
             else:
                 await self._git(
                     *_auth_config(token),
-                    "clone", "--depth", "1", "--branch", state.base,
-                    f"{self._remote_base}/{state.repo}.git", str(workspace),
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    state.base,
+                    f"{self._remote_base}/{state.repo}.git",
+                    str(workspace),
                     redact=_auth_secrets(token),
                 )
                 await step("clone")
@@ -1344,9 +1374,10 @@ class GitWorkspaceOrchestrator:
             # The worker edits the prepared workspace. No credential in scope:
             # not in its arguments, not anywhere under the workspace.
             logger.info(
-                "coding-worker attempt job=%s repo=%s branch=%s backend=%s "
-                "(warm=%s)",
-                state.job_id, state.repo, state.branch,
+                "coding-worker attempt job=%s repo=%s branch=%s backend=%s (warm=%s)",
+                state.job_id,
+                state.repo,
+                state.branch,
                 type(self.worker).__name__,
                 bool(lease and lease.warm),
             )
@@ -1407,9 +1438,14 @@ class GitWorkspaceOrchestrator:
                 )
             await self._git("add", "-A", cwd=workspace)
             await self._git(
-                "-c", "user.email=worker@openloop.team",
-                "-c", "user.name=OpenLoop coding worker",
-                "commit", "-m", edit.title, cwd=workspace,
+                "-c",
+                "user.email=worker@openloop.team",
+                "-c",
+                "user.name=OpenLoop coding worker",
+                "commit",
+                "-m",
+                edit.title,
+                cwd=workspace,
             )
             await step("commit")
 
@@ -1427,7 +1463,11 @@ class GitWorkspaceOrchestrator:
             # that a resumed run may carry a freshly regenerated diff.
             await self._git(
                 *_auth_config(push_token),
-                "push", "--force", "origin", state.branch, cwd=workspace,
+                "push",
+                "--force",
+                "origin",
+                state.branch,
+                cwd=workspace,
                 redact=_auth_secrets(push_token),
             )
             await step("push")
@@ -1443,8 +1483,12 @@ class GitWorkspaceOrchestrator:
             logger.info(
                 "coding-worker attempt done job=%s branch=%s backend=%s pushed "
                 "($%.4f, %d+%d tok)",
-                state.job_id, state.branch, type(self.worker).__name__,
-                edit.cost_usd, edit.prompt_tokens, edit.completion_tokens,
+                state.job_id,
+                state.branch,
+                type(self.worker).__name__,
+                edit.cost_usd,
+                edit.prompt_tokens,
+                edit.completion_tokens,
             )
             # Keep the checkout warm for this thread's next turn (a no-op for the
             # ephemeral path). The push already succeeded, so the warm tree is a
@@ -1483,15 +1527,18 @@ class GitWorkspaceOrchestrator:
         if self._workspace_root is not None:
             self._workspace_root.mkdir(parents=True, exist_ok=True)
         workspace = Path(
-            tempfile.mkdtemp(
-                prefix="openloop-investigate-", dir=self._workspace_root
-            )
+            tempfile.mkdtemp(prefix="openloop-investigate-", dir=self._workspace_root)
         )
         try:
             await self._git(
                 *_auth_config(token),
-                "clone", "--depth", "1", "--branch", ref or "main",
-                f"{self._remote_base}/{repo}.git", str(workspace),
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                ref or "main",
+                f"{self._remote_base}/{repo}.git",
+                str(workspace),
                 redact=_auth_secrets(token),
             )
         except BaseException:
@@ -1500,8 +1547,8 @@ class GitWorkspaceOrchestrator:
         return workspace
 
     async def run_investigation(
-        self, task: "WorkspaceTask", investigator: RepoInvestigator
-    ) -> tuple["EvidenceBundle", "ModelResponse"]:
+        self, task: WorkspaceTask, investigator: RepoInvestigator
+    ) -> tuple[EvidenceBundle, ModelResponse]:
         """Run one read-only investigation with the same spend bracket
         ``run_attempt`` gives a coding-worker attempt (contract-convergence
         gap #4: investigation spend was untracked and uncapped).
@@ -1537,9 +1584,7 @@ class GitWorkspaceOrchestrator:
             # Observability parity with run_attempt's state.budget_usd stamp;
             # enforcement still happens in settle() below, not by reading this
             # back.
-            task.budget_usd = self._ledger.per_task_usd_for(
-                task.agent, task.agent_id
-            )
+            task.budget_usd = self._ledger.per_task_usd_for(task.agent, task.agent_id)
 
         workspace: Path | None = None
         try:
@@ -1713,7 +1758,7 @@ class GitWorkspaceOrchestrator:
             shutil.rmtree(workspace, ignore_errors=True)
 
     async def _restore_artifact(
-        self, workspace: Path, artifact_ref: "WorkspaceArtifactRef"
+        self, workspace: Path, artifact_ref: WorkspaceArtifactRef
     ):
         store = getattr(self.worker, "artifact_store", None)
         if store is None:
@@ -1756,9 +1801,7 @@ class GitWorkspaceOrchestrator:
             resume.cumulative_completion_tokens,
         )
         resume.last_settled_cumulative_cost = resume.cumulative_cost
-        resume.last_settled_cumulative_prompt_tokens = (
-            resume.cumulative_prompt_tokens
-        )
+        resume.last_settled_cumulative_prompt_tokens = resume.cumulative_prompt_tokens
         resume.last_settled_cumulative_completion_tokens = (
             resume.cumulative_completion_tokens
         )
@@ -1952,7 +1995,9 @@ class GitWorkspaceOrchestrator:
         if store is None:
             raise OpenHandsResumeError("OpenHands artifact store is unavailable")
         identity = resume.workspace_artifact.artifact.identity
-        with store.open_verified(resume.workspace_artifact.artifact, identity) as verified:
+        with store.open_verified(
+            resume.workspace_artifact.artifact, identity
+        ) as verified:
             if verified.manifest.base_commit != resume.resolved_base_commit:
                 raise OpenHandsResumeError("OpenHands parking artifact base mismatch")
         if resume.broker_job_id is not None:
@@ -2038,7 +2083,9 @@ class GitWorkspaceOrchestrator:
         if store is None:
             raise OpenHandsResumeError("OpenHands artifact store is unavailable")
         identity = resume.workspace_artifact.artifact.identity
-        with store.open_verified(resume.workspace_artifact.artifact, identity) as verified:
+        with store.open_verified(
+            resume.workspace_artifact.artifact, identity
+        ) as verified:
             if (
                 verified.manifest.base_commit != resume.resolved_base_commit
                 or verified.manifest.pr_title is None
@@ -2149,7 +2196,7 @@ class GitWorkspaceOrchestrator:
         *args: str,
         cwd: Path | None = None,
         stdin: str | None = None,
-        redact: "str | tuple[str, ...] | None" = None,
+        redact: str | tuple[str, ...] | None = None,
     ) -> str:
         return await self._run("git", *args, cwd=cwd, stdin=stdin, redact=redact)
 
@@ -2158,7 +2205,7 @@ class GitWorkspaceOrchestrator:
         *cmd: str,
         cwd: Path | None = None,
         stdin: str | None = None,
-        redact: "str | tuple[str, ...] | None" = None,
+        redact: str | tuple[str, ...] | None = None,
     ) -> str:
         return await _run_process(*cmd, cwd=cwd, stdin=stdin, redact=redact)
 
@@ -2187,7 +2234,7 @@ class BuiltinCodingWorker:
         model: str,
         gateway: _Completer | None = None,
         *,
-        sandbox: "Sandbox | None" = None,
+        sandbox: Sandbox | None = None,
         max_context_bytes: int = 60_000,
     ) -> None:
         from openloop.sandbox import HostSandbox
@@ -2281,7 +2328,7 @@ async def _run_process(
     *cmd: str,
     cwd: Path | None = None,
     stdin: str | None = None,
-    redact: "str | tuple[str, ...] | None" = None,
+    redact: str | tuple[str, ...] | None = None,
 ) -> str:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -2290,9 +2337,7 @@ async def _run_process(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    out, err = await proc.communicate(
-        stdin.encode() if stdin is not None else None
-    )
+    out, err = await proc.communicate(stdin.encode() if stdin is not None else None)
     if proc.returncode != 0:
         # Redact secrets from BOTH the command and git's stderr — the failing
         # command line carries the auth header, and this text is returned in
@@ -2322,7 +2367,7 @@ def _auth_secrets(token: str) -> tuple[str, str]:
     return (token, _basic_auth(token))
 
 
-def _redact(text: str, secrets: "str | tuple[str, ...] | None") -> str:
+def _redact(text: str, secrets: str | tuple[str, ...] | None) -> str:
     if isinstance(secrets, str):
         secrets = (secrets,)
     for secret in secrets or ():
@@ -2341,9 +2386,9 @@ def _parse_generation(text: str) -> tuple[str, str, str]:
         head = text
     for line in head.splitlines():
         if line.startswith("TITLE:"):
-            title = line[len("TITLE:"):].strip() or title
+            title = line[len("TITLE:") :].strip() or title
         elif line.startswith("BODY:"):
-            body = line[len("BODY:"):].strip()
+            body = line[len("BODY:") :].strip()
     if not diff.strip():
         raise RuntimeError("model returned no diff")
     if not diff.endswith("\n"):

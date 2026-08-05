@@ -14,7 +14,6 @@ from openloop.broker.models import (
     VerifiedCheckpointReceipt,
 )
 
-
 OWNER = BrokerOwner("tenant-contract", "workload-contract")
 OTHER_OWNER = BrokerOwner("tenant-other", "workload-other")
 CAPABILITY_DIGEST = "a" * 64
@@ -126,9 +125,7 @@ async def quiesce_generation(
         generation,
         barrier_id,
     )
-    result = await ledger.mark_quiesced(
-        OWNER, ticket.operation_id, job_id, generation
-    )
+    result = await ledger.mark_quiesced(OWNER, ticket.operation_id, job_id, generation)
     return ticket, result, barrier_id
 
 

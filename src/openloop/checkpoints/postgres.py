@@ -8,7 +8,7 @@ enough; no pgvector needed.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from openloop.checkpoints.store import WorkerCheckpoint
 from openloop.postgres import BorrowedPostgresStore
@@ -104,7 +104,7 @@ class PostgresCheckpointStore(BorrowedPostgresStore):
 
 
 def _row_to_checkpoint(row) -> WorkerCheckpoint:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return WorkerCheckpoint(
         job_id=row["job_id"],
         repo=row["repo"],
@@ -112,7 +112,9 @@ def _row_to_checkpoint(row) -> WorkerCheckpoint:
         base=row["base"],
         branch=row["branch"],
         status=row["status"],
-        completed_steps=json.loads(row["completed_steps"]) if row["completed_steps"] else [],
+        completed_steps=json.loads(row["completed_steps"])
+        if row["completed_steps"]
+        else [],
         state_json=json.loads(row["state_json"]) if row["state_json"] else {},
         title=row["title"],
         body=row["body"],

@@ -10,9 +10,9 @@ from pathlib import Path
 
 from openloop.agents import load_agent
 from openloop.approvals import InMemoryApprovalStore
+from openloop.testing import FakeGitHub
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
-from openloop.testing import FakeGitHub
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 

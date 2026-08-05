@@ -124,10 +124,10 @@ def test_build_lock_redis_missing_package_falls_back(monkeypatch):
     def boom(url, **kw):
         raise ImportError("no redis")
 
-    monkeypatch.setattr(RedisLock, "from_url", classmethod(lambda cls, url, **kw: boom(url)))
-    lock = builders.build_lock(
-        Settings(lock_backend="redis", redis_url="redis://x")
+    monkeypatch.setattr(
+        RedisLock, "from_url", classmethod(lambda cls, url, **kw: boom(url))
     )
+    lock = builders.build_lock(Settings(lock_backend="redis", redis_url="redis://x"))
     assert isinstance(lock, InProcessLock)
 
 
@@ -152,6 +152,7 @@ def test_lifespan_falls_back_when_redis_ping_fails(monkeypatch, settings):
 
 
 # --- recovery pass: leader runs, contended retries (Finding #1) ----------
+
 
 async def test_recovery_pass_leads_and_runs_reconcilers():
     engine, runner = _SpyEngine(), _SpyRunner()

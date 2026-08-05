@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import os
-from pathlib import Path
 import stat
+from collections.abc import Mapping
 from threading import RLock
 from types import MappingProxyType
 
@@ -16,7 +15,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from openloop.broker.models import validate_identifier
-
 
 MAX_KEY_FILE_BYTES = 16 * 1024
 
@@ -146,7 +144,7 @@ class VerificationKeySet:
         paths: Mapping[str, str | os.PathLike[str]],
         *,
         expected_uid: int | None = None,
-    ) -> "VerificationKeySet":
+    ) -> VerificationKeySet:
         keys = {
             key_id: load_ed25519_public_key(path, expected_uid=expected_uid)
             for key_id, path in paths.items()

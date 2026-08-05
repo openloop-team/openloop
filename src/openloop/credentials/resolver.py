@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 
@@ -113,7 +113,7 @@ class GitHubAppResolver:
         self._refresh_margin = timedelta(seconds=refresh_margin_seconds)
         self._jwt_encoder = jwt_encoder
         self._transport = transport
-        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._now = now or (lambda: datetime.now(UTC))
         # Short-TTL cache — the one place a credential may live between calls.
         self._token: str | None = None
         self._expires_at: datetime | None = None
@@ -138,9 +138,7 @@ class GitHubAppResolver:
     async def _mint(self) -> tuple[str, datetime]:
         import httpx
 
-        body = (
-            {"repositories": self.repositories} if self.repositories else None
-        )
+        body = {"repositories": self.repositories} if self.repositories else None
         try:
             async with httpx.AsyncClient(
                 timeout=30, transport=self._transport
@@ -163,9 +161,7 @@ class GitHubAppResolver:
             raise CredentialError(
                 f"minting GitHub App installation token failed: {exc}"
             ) from exc
-        expires_at = datetime.fromisoformat(
-            data["expires_at"].replace("Z", "+00:00")
-        )
+        expires_at = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00"))
         return data["token"], expires_at
 
     def _app_jwt(self) -> str:

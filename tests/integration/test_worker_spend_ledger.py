@@ -11,11 +11,11 @@ the gateway's approval hop on both paths.
 """
 
 from pathlib import Path
-import pytest
 
 from openloop.agents import load_agent
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.credentials import EnvCredentialResolver
+from openloop.testing import FakeCodingWorker, FakeGitHub
 from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import (
     CodingWorkerConnector,
@@ -30,7 +30,6 @@ from openloop.usage import (
 )
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from openloop.workflows.coding_worker import build_coding_worker_workflow
-from openloop.testing import FakeCodingWorker, FakeGitHub
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
@@ -104,7 +103,8 @@ async def test_workflow_path_fails_closed_over_cap(monkeypatch):
     )
 
     await engine.start(
-        "workspace_task", "j1",
+        "workspace_task",
+        "j1",
         {"job_id": "j1", "repo": "acme/x", "instruction": "x"},
     )
     instance = await engine.send_event("j1", "await_approval", {})
@@ -122,8 +122,10 @@ async def test_in_run_abort_records_partial_spend_and_fails_closed(monkeypatch):
     github = FakeGitHub()
     agent = _agent(per_task_usd=0.50)
     ledger = WorkerSpendLedger(
-        usage=usage, model="m",
-        agents={agent.metadata.name: agent}, default_agent=agent.metadata.name,
+        usage=usage,
+        model="m",
+        agents={agent.metadata.name: agent},
+        default_agent=agent.metadata.name,
     )
 
     class AbortingWorker:
@@ -132,18 +134,24 @@ async def test_in_run_abort_records_partial_spend_and_fails_closed(monkeypatch):
             assert state.budget_usd == 0.50
             raise WorkerRunAborted(
                 "in-run spend $0.55 reached the $0.50 per-task cap",
-                cost_usd=0.55, prompt_tokens=120, completion_tokens=30,
+                cost_usd=0.55,
+                prompt_tokens=120,
+                completion_tokens=30,
             )
 
     orch = GitWorkspaceOrchestrator(
-        AbortingWorker(), EnvCredentialResolver({"github": "tok"}), ledger=ledger,
+        AbortingWorker(),
+        EnvCredentialResolver({"github": "tok"}),
+        ledger=ledger,
     )
 
     async def fake_run(*cmd, cwd=None, stdin=None, redact=None):
         return ""
 
     monkeypatch.setattr(orch, "_run", fake_run)
-    connector = CodingWorkerConnector(orch, github, checkpoints=InMemoryCheckpointStore())
+    connector = CodingWorkerConnector(
+        orch, github, checkpoints=InMemoryCheckpointStore()
+    )
 
     result = await connector.execute(
         "code:write", {"repo": "acme/x", "instruction": "x", "job_id": "j1"}
@@ -167,10 +175,15 @@ async def test_connector_path_monthly_gate_fails_closed(monkeypatch):
         ),
         github,
     )
-    await usage.record(UsageRecord(
-        scope_key=_SCOPE, workspace="acme",
-        agent="dev-platform", model="m", cost_usd=50.0,
-    ))
+    await usage.record(
+        UsageRecord(
+            scope_key=_SCOPE,
+            workspace="acme",
+            agent="dev-platform",
+            model="m",
+            cost_usd=50.0,
+        )
+    )
 
     result = await connector.execute(
         "code:write", {"repo": "acme/x", "instruction": "x", "job_id": "j1"}
@@ -194,13 +207,19 @@ async def test_workflow_path_monthly_gate_fails_closed(monkeypatch):
             github,
         )
     )
-    await usage.record(UsageRecord(
-        scope_key=_SCOPE, workspace="acme",
-        agent="dev-platform", model="m", cost_usd=50.0,
-    ))
+    await usage.record(
+        UsageRecord(
+            scope_key=_SCOPE,
+            workspace="acme",
+            agent="dev-platform",
+            model="m",
+            cost_usd=50.0,
+        )
+    )
 
     await engine.start(
-        "workspace_task", "j1",
+        "workspace_task",
+        "j1",
         {"job_id": "j1", "repo": "acme/x", "instruction": "x"},
     )
     instance = await engine.send_event("j1", "await_approval", {})
@@ -221,7 +240,9 @@ async def test_within_budget_run_is_recorded_and_ships(monkeypatch):
     result = await connector.execute(
         "code:write",
         {
-            "repo": "acme/x", "instruction": "x", "job_id": "j2",
+            "repo": "acme/x",
+            "instruction": "x",
+            "job_id": "j2",
             # The engine-less path receives session_id via _args_for_execute the
             # same way the gateway stamps it into the approval args (step 5).
             "session_id": "sess-direct",
@@ -274,12 +295,11 @@ async def test_spend_follows_the_invoking_agent_through_the_approval_hop(
 
     engine = WorkflowEngine(InMemoryWorkflowStore())
     engine.register(build_coding_worker_workflow(orch, github))
-    gateway = ToolGateway(
-        tools=[CodingWorkerConnector(orch, github)], engine=engine
-    )
+    gateway = ToolGateway(tools=[CodingWorkerConnector(orch, github)], engine=engine)
 
     pending = await gateway.invoke(
-        invoking, "coding_worker.pr:write",
+        invoking,
+        "coding_worker.pr:write",
         {"repo": "acme/x", "instruction": "x"},
         session_id="sess-abc",
     )
@@ -291,9 +311,7 @@ async def test_spend_follows_the_invoking_agent_through_the_approval_hop(
     # args, so it survives into the durable workflow state.
     assert pending.approval.args["session_id"] == "sess-abc"
 
-    resolved = await gateway.resolve(
-        pending.approval.id, "@maciag.artur", approve=True
-    )
+    resolved = await gateway.resolve(pending.approval.id, "@maciag.artur", approve=True)
     await engine.wait_background(pending.approval.args["job_id"])
 
     assert resolved.result.ok  # within docs-bot's cap, over the default's
@@ -348,9 +366,7 @@ async def test_recreated_same_name_agent_fails_the_approved_job_closed(
     store = InMemoryWorkflowStore()
     engine = WorkflowEngine(store)
     engine.register(build_coding_worker_workflow(orch, github))
-    gateway = ToolGateway(
-        tools=[CodingWorkerConnector(orch, github)], engine=engine
-    )
+    gateway = ToolGateway(tools=[CodingWorkerConnector(orch, github)], engine=engine)
 
     pending = await gateway.invoke(
         invoking, "coding_worker.pr:write", {"repo": "acme/x", "instruction": "x"}

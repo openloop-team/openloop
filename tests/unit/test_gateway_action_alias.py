@@ -1,7 +1,8 @@
 from pathlib import Path
 
 from openloop.agents import load_agent
-from openloop.tools.gateway import ACTION_ALIASES, _canonical_action, _summarize
+from openloop.tools.aliases import ACTION_ALIASES
+from openloop.tools.gateway import _canonical_action, _summarize
 from openloop.tools.policy import is_allowed
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"

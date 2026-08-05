@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 import json
-from pathlib import Path
 import struct
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -27,25 +27,26 @@ from .capability import JobCapability
 from .errors import RpcErrorCode, RpcFailure, RpcProtocolProblem
 from .identity import WorkloadIdentityToken, WorkloadIntent
 from .models import (
+    RPC_VERSION,
+    CheckpointGenerationAccess,
     CreateJobPayload,
     CreateJobResult,
-    CheckpointGenerationAccess,
     FinalizeJobPayload,
     FinalizeJobResult,
     InspectJobPayload,
     InspectJobResult,
-    RPC_VERSION,
     QuiesceSegmentPayload,
     QuiesceSegmentResult,
     ReleaseSegmentPayload,
     ReleaseSegmentResult,
-    RunningGenerationAccess,
+    RpcPayload,
     RpcRequest,
     RpcResponse,
+    RpcResult,
+    RunningGenerationAccess,
     StartSegmentPayload,
     StartSegmentResult,
 )
-
 
 MAX_RPC_FRAME_BYTES = 32 * 1024
 MAX_RPC_JSON_DEPTH = 8
@@ -257,6 +258,10 @@ def decode_request(frame: bytes) -> RpcRequest:
             if value["job_capability"] is None
             else JobCapability(_text(value["job_capability"]))
         )
+        # One variable per branch, each holding a different member of the union
+        # RpcRequest.payload accepts; without this the first branch would pin it
+        # to CreateJobPayload.
+        payload: RpcPayload
         if method is WorkloadIntent.CREATE_JOB:
             payload_value = _exact(value["payload"], {"idempotency_key"})
             payload = CreateJobPayload(_text(payload_value["idempotency_key"]))
@@ -349,7 +354,9 @@ def _ticket_dict(ticket: OperationTicket) -> dict[str, object]:
         "operation_id": str(ticket.operation_id),
         "command": ticket.command.value,
         "job_id": str(ticket.job_id) if ticket.job_id else None,
-        "conversation_id": str(ticket.conversation_id) if ticket.conversation_id else None,
+        "conversation_id": str(ticket.conversation_id)
+        if ticket.conversation_id
+        else None,
         "generation": ticket.generation,
         "job_state": ticket.job_state.value if ticket.job_state else None,
         "generation_state": (
@@ -643,8 +650,10 @@ def _decode_checkpoint_access(value: object) -> CheckpointGenerationAccess:
 
 
 def _response_dict(response: RpcResponse) -> dict[str, object]:
-    result = None
-    error = None
+    # Heterogeneous by construction: each branch below emits the shape for one
+    # result type, mixing strings, bools, and nested dicts.
+    result: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
     if isinstance(response.result, CreateJobResult):
         result = {
             "type": WorkloadIntent.CREATE_JOB.value,
@@ -728,6 +737,9 @@ def decode_response(frame: bytes) -> RpcResponse:
             if not isinstance(result, dict):
                 raise RpcProtocolProblem()
             result_type = result.get("type")
+            # As in _decode_request: the branches below each build a different
+            # member of the RpcResult union.
+            decoded: RpcResult
             if result_type == WorkloadIntent.CREATE_JOB.value:
                 item = _exact(result, {"type", "ticket", "capability"})
                 decoded = CreateJobResult(

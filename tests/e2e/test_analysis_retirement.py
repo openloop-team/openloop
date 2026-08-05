@@ -8,8 +8,8 @@ from uuid import uuid4
 
 import asyncpg
 import pytest
-from tests.support.postgres import require_postgres, postgres_dsn
 
+from tests.support.postgres import postgres_dsn, require_postgres
 
 DSN = postgres_dsn()
 RETIREMENT_SQL = (
@@ -77,10 +77,7 @@ async def _run_retirement(connection) -> None:
 
 
 async def _table_exists(connection, name: str) -> bool:
-    return (
-        await connection.fetchval("SELECT to_regclass($1)::text", name)
-        is not None
-    )
+    return await connection.fetchval("SELECT to_regclass($1)::text", name) is not None
 
 
 @pytest.mark.parametrize(

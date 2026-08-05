@@ -18,6 +18,7 @@ pytestmark = pytest.mark.unit
 
 # --- InProcessLock --------------------------------------------------------
 
+
 async def test_in_process_lock_is_exclusive_then_releasable():
     lock = InProcessLock()
 
@@ -50,6 +51,7 @@ async def test_distinct_keys_do_not_contend():
 
 # --- guard context manager ------------------------------------------------
 
+
 async def test_guard_yields_leadership_and_releases_on_exit():
     lock = InProcessLock()
 
@@ -75,6 +77,7 @@ async def test_guard_releases_even_when_body_raises():
 
 
 # --- RedisLock over a fake client ----------------------------------------
+
 
 class FakeRedis:
     """Minimal async Redis stand-in: SET NX + EVAL compare-and-delete.
@@ -155,6 +158,7 @@ async def test_redis_lock_setup_pings_and_close_closes():
 
 # --- lease renewal (Finding: TTL vs long sweeps) -------------------------
 
+
 async def test_in_process_renew_is_owner_fenced():
     lock = InProcessLock()
     token = await lock.acquire("k", ttl_seconds=10)
@@ -226,6 +230,7 @@ async def test_guard_without_renew_interval_does_not_renew():
 
 
 # --- PostgresLock key hashing (no DB) ------------------------------------
+
 
 def test_postgres_lock_id_is_deterministic_and_in_bigint_range():
     a = PostgresLock._lock_id("startup-recovery")

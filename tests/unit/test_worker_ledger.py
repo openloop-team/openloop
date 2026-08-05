@@ -10,6 +10,7 @@ import pytest
 
 from openloop.agents.schema import Agent, Budget
 from openloop.credentials import EnvCredentialResolver
+from openloop.testing import FakeCodingWorker
 from openloop.tools.coding_worker import (
     GitWorkspaceOrchestrator,
     WorkerState,
@@ -20,7 +21,6 @@ from openloop.usage import (
     WorkerBudgetExceeded,
     WorkerSpendLedger,
 )
-from openloop.testing import FakeCodingWorker
 from tests.support.agents import make_agent
 
 # Deterministic identities, so scope keys stay expressible in assertions and
@@ -75,17 +75,27 @@ def _ledger(
 
 def _state(job_id="j1", agent=None, agent_id=None):
     return WorkerState(
-        job_id=job_id, repo="a/b", instruction="x", base="main",
-        branch=f"openloop/job-{job_id}", agent=agent, agent_id=agent_id,
+        job_id=job_id,
+        repo="a/b",
+        instruction="x",
+        base="main",
+        branch=f"openloop/job-{job_id}",
+        agent=agent,
+        agent_id=agent_id,
     )
 
 
 async def _spent(usage, scope_key, cost_usd):
     """Seed accumulated monthly spend for a scope."""
-    await usage.record(UsageRecord(
-        scope_key=scope_key, workspace="acme", agent="seed", model="m",
-        cost_usd=cost_usd,
-    ))
+    await usage.record(
+        UsageRecord(
+            scope_key=scope_key,
+            workspace="acme",
+            agent="seed",
+            model="m",
+            cost_usd=cost_usd,
+        )
+    )
 
 
 # --- settle: record + per-task cap ---
@@ -431,9 +441,7 @@ async def test_check_monthly_gates_on_the_pinned_ids_budget():
     await _spent(usage, _scope("docs-bot"), 1.0)
 
     with pytest.raises(WorkerBudgetExceeded, match="docs-bot"):
-        await ledger.check_monthly(
-            "old-name", agent_id=IDS["docs-bot"], job_id="j1"
-        )
+        await ledger.check_monthly("old-name", agent_id=IDS["docs-bot"], job_id="j1")
 
 
 async def test_check_monthly_unresolvable_pinned_id_fails_closed_without_record():
@@ -441,9 +449,7 @@ async def test_check_monthly_unresolvable_pinned_id_fails_closed_without_record(
     ledger = _ledger(usage, monthly_usd=50.0)
 
     with pytest.raises(WorkerBudgetExceeded, match="unknown agent identity"):
-        await ledger.check_monthly(
-            "dev-platform", agent_id="f" * 32, job_id="j1"
-        )
+        await ledger.check_monthly("dev-platform", agent_id="f" * 32, job_id="j1")
 
     assert usage.records == []
 
@@ -576,9 +582,7 @@ async def test_orchestrator_attributes_spend_to_state_agent(monkeypatch):
         "dev-platform": _agent(per_task_usd=0.50),
         "docs-bot": _agent("docs-bot", per_task_usd=5.0),
     }
-    orch, commands = _orchestrator(
-        monkeypatch, _ledger(usage, agents), cost_usd=0.75
-    )
+    orch, commands = _orchestrator(monkeypatch, _ledger(usage, agents), cost_usd=0.75)
 
     await orch.run_attempt(_state(agent="docs-bot"))
 

@@ -18,7 +18,7 @@ workflow store.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 # Coarse lifecycle, for querying/observability. The fine-grained truth is
@@ -32,7 +32,7 @@ TERMINAL_OK = "opened"
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass(slots=True)
@@ -82,7 +82,5 @@ class InMemoryCheckpointStore:
         self._by_id[checkpoint.job_id] = checkpoint
 
     async def recent(self, limit: int = 50) -> list[WorkerCheckpoint]:
-        ordered = sorted(
-            self._by_id.values(), key=lambda c: c.updated_at, reverse=True
-        )
+        ordered = sorted(self._by_id.values(), key=lambda c: c.updated_at, reverse=True)
         return ordered[:limit]

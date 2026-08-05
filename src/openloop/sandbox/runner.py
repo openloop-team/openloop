@@ -43,7 +43,5 @@ async def _run(*cmd: str, cwd: Path | None = None, stdin: str | None = None) -> 
 class HostSandbox:
     """Runs the command as a plain subprocess in the workspace. No isolation."""
 
-    async def exec(
-        self, workspace: Path, *cmd: str, stdin: str | None = None
-    ) -> str:
+    async def exec(self, workspace: Path, *cmd: str, stdin: str | None = None) -> str:
         return await _run(*cmd, cwd=workspace, stdin=stdin)

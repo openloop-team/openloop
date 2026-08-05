@@ -7,13 +7,12 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import BinaryIO
 
 import httpx
-
 
 LOGICAL_RELAY_HOST = "http://openhands-relay.invalid"
 RELAY_CAPABILITY_HEADER = "X-OpenLoop-Relay-Capability"
@@ -47,7 +46,7 @@ class OpenHandsRelayClientError(OpenHandsRelayError):
     """The fixed OpenHands relay client boundary is malformed."""
 
 
-class RelayMode(str, Enum):
+class RelayMode(StrEnum):
     RUNNING = "running"
     CHECKPOINT = "checkpoint"
 
@@ -110,8 +109,8 @@ def _http_timeout(read_timeout: float) -> httpx.Timeout:
 
 @lru_cache(maxsize=1)
 def _relay_workspace_class():
-    from pydantic import Field, PrivateAttr
     from openhands.sdk.workspace import RemoteWorkspace
+    from pydantic import Field, PrivateAttr
 
     class _RelayRemoteWorkspace(RemoteWorkspace):
         api_key: str | None = Field(default=None, exclude=True, repr=False)
@@ -136,7 +135,12 @@ def _relay_workspace_class():
 
         @property
         def client(self) -> httpx.Client:
-            client = self._client
+            # Read via getattr to break an inference cycle: _client is a
+            # PrivateAttr on the SDK base class (whose types this project does
+            # not follow) and is also assigned below, in this same property, so
+            # a direct read has no type mypy can settle on. The base's __init__
+            # always establishes it, making the default unreachable.
+            client: httpx.Client | None = getattr(self, "_client", None)
             if client is None:
                 headers = dict(self._headers)
                 headers[RELAY_CAPABILITY_HEADER] = self._relay_endpoint.relay_capability

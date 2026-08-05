@@ -14,7 +14,6 @@ from openloop.broker_rpc.identity import (
     WorkloadIntent,
 )
 
-
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 OWNER = BrokerOwner("tenant-a", "workload-a")
 WORKER_ID = UUID("00000000-0000-4000-8000-000000000101")

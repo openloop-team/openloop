@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from openloop.broker.ledger import BrokerLedger
 from openloop.broker.models import (
@@ -37,19 +37,18 @@ from openloop.broker_rpc.identity import (
     WorkloadIntent,
 )
 from openloop.broker_rpc.models import (
+    RPC_VERSION,
     CreateJobPayload,
     CreateJobResult,
     FinalizeJobPayload,
     InspectJobPayload,
     QuiesceSegmentPayload,
-    RPC_VERSION,
     ReleaseSegmentPayload,
     RpcRequest,
     StartSegmentPayload,
 )
 from tests.support.broker_repository_contract import SequenceIds
-from tests.support.postgres import require_postgres, postgres_dsn
-
+from tests.support.postgres import postgres_dsn, require_postgres
 
 DSN = postgres_dsn()
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
@@ -152,9 +151,7 @@ async def rpc_postgres():
         )
         ledger = BrokerLedger(repository, id_factory=SequenceIds(start=20_000))
         capability = JobCapabilityAuthority(
-            CapabilityRootRing(
-                {"cap-v1": bytes(range(32))}, current_version="cap-v1"
-            )
+            CapabilityRootRing({"cap-v1": bytes(range(32))}, current_version="cap-v1")
         )
         app = BrokerRpcApplication(
             ledger=ledger,
@@ -164,9 +161,7 @@ async def rpc_postgres():
             policy=BrokerRpcPolicy("default", "docker", "postgres", 300),
             segment_coordinator=DisabledSegmentCoordinator(),
         )
-        yield RpcPostgresFixture(
-            app, issuer, ledger, capability, audit, pool
-        )
+        yield RpcPostgresFixture(app, issuer, ledger, capability, audit, pool)
     finally:
         await audit.close()
         await repository.close()
@@ -183,12 +178,8 @@ async def test_concurrent_exact_create_persists_one_capability_digest_and_two_au
 ):
     fixture = rpc_postgres
     first, second = await asyncio.gather(
-        fixture.app.handle(
-            fixture.create_request("rpc-postgres-create-01"), PEER
-        ),
-        fixture.app.handle(
-            fixture.create_request("rpc-postgres-create-01"), PEER
-        ),
+        fixture.app.handle(fixture.create_request("rpc-postgres-create-01"), PEER),
+        fixture.app.handle(fixture.create_request("rpc-postgres-create-01"), PEER),
     )
     assert isinstance(first.result, CreateJobResult)
     assert isinstance(second.result, CreateJobResult)
@@ -212,12 +203,8 @@ async def test_concurrent_exact_create_persists_one_capability_digest_and_two_au
             "SELECT row_to_json(j)::text FROM broker_jobs j WHERE job_id = $1",
             first.result.ticket.job_id,
         )
-        assert await connection.fetchval(
-            "SELECT count(*) FROM broker_audit"
-        ) == 1
-        assert await connection.fetchval(
-            "SELECT count(*) FROM broker_rpc_audit"
-        ) == 2
+        assert await connection.fetchval("SELECT count(*) FROM broker_audit") == 1
+        assert await connection.fetchval("SELECT count(*) FROM broker_rpc_audit") == 2
     assert dict(job) == {
         "minimum_isolation": "shared",
         "control_key_version": "cap-v1",
@@ -310,9 +297,7 @@ async def test_persisted_authorization_survives_restart_and_denials_are_generic(
     job_id = created.result.ticket.job_id
     authorization = await fixture.ledger.inspect_job_authorization(OWNER, job_id)
     assert (
-        fixture.capability.derive(
-            OWNER, job_id, authorization.authorization
-        )
+        fixture.capability.derive(OWNER, job_id, authorization.authorization)
         == created.result.capability
     )
 

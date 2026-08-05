@@ -4,16 +4,15 @@ from uuid import UUID
 
 import pytest
 
-from openloop.broker_control.durable import (
-    LocalDurableStateAdapter,
-    LocalDurableStateProblem,
-)
 from openloop.broker_control.development import (
     local_durable_adapter_for_docker,
     validate_local_durable_binding,
 )
+from openloop.broker_control.durable import (
+    LocalDurableStateAdapter,
+    LocalDurableStateProblem,
+)
 from openloop.broker_runtime import DockerRuntimeConfig
-
 
 JOB_ID = UUID("00000000-0000-4000-8000-000000000401")
 DIGEST = "d" * 64

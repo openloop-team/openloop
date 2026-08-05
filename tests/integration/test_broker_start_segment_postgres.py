@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from openloop.broker.ledger import BrokerLedger
 from openloop.broker.models import BrokerOwner, GenerationState
@@ -26,12 +26,11 @@ from openloop.broker_rpc.coordinator import (
     SegmentCoordinatorCode,
     SegmentCoordinatorProblem,
 )
-from openloop.broker_rpc.models import StartSegmentPayload
 from openloop.broker_rpc.keys import VerificationKeySet
+from openloop.broker_rpc.models import StartSegmentPayload
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 from tests.support.broker_repository_contract import SequenceIds
-from tests.support.postgres import require_postgres, postgres_dsn
-
+from tests.support.postgres import postgres_dsn, require_postgres
 
 DSN = postgres_dsn()
 OWNER = BrokerOwner("tenant-start-postgres", "workload-start-postgres")
@@ -178,9 +177,7 @@ async def test_restart_replays_persisted_old_versions_without_secrets(
         clock=lambda: datetime.now(UTC), maximum_lifetime_seconds=600
     )
     authority_v2 = _authority(current="runtime-v2")
-    coordinator = _coordinator(
-        restarted_ledger, state_root, authority_v2, runtime
-    )
+    coordinator = _coordinator(restarted_ledger, state_root, authority_v2, runtime)
 
     result = await coordinator.start_segment(
         OWNER,
@@ -198,9 +195,7 @@ async def test_restart_replays_persisted_old_versions_without_secrets(
             "postgres-start-key-01",
         ),
     )
-    recovery = await restarted_ledger.inspect_job_for_recovery(
-        OWNER, created.job_id
-    )
+    recovery = await restarted_ledger.inspect_job_for_recovery(OWNER, created.job_id)
     generation = recovery.generation_record
     assert result.access == replay.access
     assert replay.replayed is True

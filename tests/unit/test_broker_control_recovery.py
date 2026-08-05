@@ -58,9 +58,7 @@ def _reconciler(ledger, coordinator, _repository, locator, *, page_limit=100):
 
 
 async def test_recovery_completes_quiescing_before_deadline(tmp_path):
-    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(
-        tmp_path
-    )
+    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(tmp_path)
     await coordinator.start_segment(
         OWNER, StartSegmentPayload(job_id, 0, "recovery-start-0001")
     )
@@ -86,17 +84,13 @@ async def test_recovery_completes_quiescing_before_deadline(tmp_path):
 
 
 async def test_recovery_parks_quiesced_generation_with_valid_receipt(tmp_path):
-    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(
-        tmp_path
-    )
+    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(tmp_path)
     started = await coordinator.start_segment(
         OWNER, StartSegmentPayload(job_id, 0, "recovery-start-0002")
     )
     await coordinator.quiesce_segment(
         OWNER,
-        QuiesceSegmentPayload(
-            job_id, 1, "recovery-quiesce-02", "recovery-barrier-2"
-        ),
+        QuiesceSegmentPayload(job_id, 1, "recovery-quiesce-02", "recovery-barrier-2"),
     )
     token = _signed_receipt(
         job_id=job_id,
@@ -125,9 +119,7 @@ async def test_recovery_parks_quiesced_generation_with_valid_receipt(tmp_path):
 
 
 async def test_recovery_expires_running_and_finalizes_failed(tmp_path):
-    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(
-        tmp_path
-    )
+    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(tmp_path)
     await coordinator.start_segment(
         OWNER, StartSegmentPayload(job_id, 0, "recovery-start-0003")
     )
@@ -155,24 +147,18 @@ async def test_recovery_expires_running_and_finalizes_failed(tmp_path):
 async def test_recovery_expired_quiesced_performs_second_lookup_and_fails_closed(
     tmp_path,
 ):
-    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(
-        tmp_path
-    )
+    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(tmp_path)
     await coordinator.start_segment(
         OWNER, StartSegmentPayload(job_id, 0, "recovery-start-0004")
     )
     await coordinator.quiesce_segment(
         OWNER,
-        QuiesceSegmentPayload(
-            job_id, 1, "recovery-quiesce-04", "recovery-barrier-4"
-        ),
+        QuiesceSegmentPayload(job_id, 1, "recovery-quiesce-04", "recovery-barrier-4"),
     )
     repository._clock.now = NOW + timedelta(seconds=301)
     locator = ReceiptLocator()
 
-    report = await _reconciler(
-        ledger, coordinator, repository, locator
-    ).run_pass()
+    report = await _reconciler(ledger, coordinator, repository, locator).run_pass()
 
     snapshot = await ledger.inspect_job_for_recovery(OWNER, job_id)
     assert snapshot.state is JobState.TERMINAL
@@ -184,17 +170,13 @@ async def test_recovery_expired_quiesced_performs_second_lookup_and_fails_closed
 async def test_recovery_expired_quiesced_parks_when_second_lookup_finds_receipt(
     tmp_path,
 ):
-    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(
-        tmp_path
-    )
+    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(tmp_path)
     started = await coordinator.start_segment(
         OWNER, StartSegmentPayload(job_id, 0, "recovery-start-0005")
     )
     await coordinator.quiesce_segment(
         OWNER,
-        QuiesceSegmentPayload(
-            job_id, 1, "recovery-quiesce-05", "recovery-barrier-5"
-        ),
+        QuiesceSegmentPayload(job_id, 1, "recovery-quiesce-05", "recovery-barrier-5"),
     )
     repository._clock.now = NOW + timedelta(seconds=301)
     token = _signed_receipt(
@@ -206,9 +188,7 @@ async def test_recovery_expired_quiesced_parks_when_second_lookup_finds_receipt(
     )
     locator = SequenceReceiptLocator([None, token])
 
-    report = await _reconciler(
-        ledger, coordinator, repository, locator
-    ).run_pass()
+    report = await _reconciler(ledger, coordinator, repository, locator).run_pass()
 
     snapshot = await ledger.inspect_job_for_recovery(OWNER, job_id)
     assert snapshot.state is JobState.PARKED
@@ -220,9 +200,7 @@ async def test_recovery_expired_quiesced_parks_when_second_lookup_finds_receipt(
 async def test_recovery_expired_quiesced_retries_unavailable_second_lookup(
     tmp_path,
 ):
-    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(
-        tmp_path
-    )
+    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(tmp_path)
     started = await coordinator.start_segment(
         OWNER, StartSegmentPayload(job_id, 0, "recovery-start-lookup")
     )
@@ -265,9 +243,7 @@ async def test_recovery_expired_quiesced_retries_unavailable_second_lookup(
 async def test_recovery_running_uses_repository_observation_and_reason(
     tmp_path, monkeypatch
 ):
-    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(
-        tmp_path
-    )
+    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(tmp_path)
     await coordinator.start_segment(
         OWNER, StartSegmentPayload(job_id, 0, "recovery-start-clock")
     )
@@ -283,9 +259,7 @@ async def test_recovery_running_uses_repository_observation_and_reason(
     async def scan_recovery_candidates(_cursor, _limit):
         return (candidate,)
 
-    monkeypatch.setattr(
-        ledger, "scan_recovery_candidates", scan_recovery_candidates
-    )
+    monkeypatch.setattr(ledger, "scan_recovery_candidates", scan_recovery_candidates)
 
     report = await _reconciler(
         ledger, coordinator, repository, ReceiptLocator()
@@ -305,9 +279,7 @@ async def test_concurrent_recovery_passes_converge_on_one_parked_outcome(
     )
     await coordinator.quiesce_segment(
         OWNER,
-        QuiesceSegmentPayload(
-            job_id, 1, "recovery-quiesce-06", "recovery-barrier-6"
-        ),
+        QuiesceSegmentPayload(job_id, 1, "recovery-quiesce-06", "recovery-barrier-6"),
     )
     token = _signed_receipt(
         job_id=job_id,
@@ -333,17 +305,13 @@ async def test_concurrent_recovery_passes_converge_on_one_parked_outcome(
 
 
 async def test_recovery_completes_persisted_releasing_intent(tmp_path):
-    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(
-        tmp_path
-    )
+    coordinator, ledger, repository, runtime, _, _, _, job_id = await _fixture(tmp_path)
     started = await coordinator.start_segment(
         OWNER, StartSegmentPayload(job_id, 0, "recovery-start-0007")
     )
     await coordinator.quiesce_segment(
         OWNER,
-        QuiesceSegmentPayload(
-            job_id, 1, "recovery-quiesce-07", "recovery-barrier-7"
-        ),
+        QuiesceSegmentPayload(job_id, 1, "recovery-quiesce-07", "recovery-barrier-7"),
     )
     receipt = _receipt_verifier().verify(
         _signed_receipt(
@@ -354,9 +322,7 @@ async def test_recovery_completes_persisted_releasing_intent(tmp_path):
             suffix="recovery-7",
         )
     )
-    await ledger.begin_internal_release(
-        OWNER, job_id, 1, receipt, ReleaseTarget.PARKED
-    )
+    await ledger.begin_internal_release(OWNER, job_id, 1, receipt, ReleaseTarget.PARKED)
 
     report = await _reconciler(
         ledger, coordinator, repository, ReceiptLocator()

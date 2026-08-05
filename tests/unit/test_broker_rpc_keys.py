@@ -58,9 +58,7 @@ def test_safe_key_loader_rejects_symlink_and_writable_file(tmp_path):
 def test_verification_key_set_reload_is_atomic(tmp_path):
     _, _, first_path = _write_keys(tmp_path, "first")
     _, _, second_path = _write_keys(tmp_path, "second")
-    keys = VerificationKeySet.load(
-        {"issuer-v1": first_path}, expected_uid=os.getuid()
-    )
+    keys = VerificationKeySet.load({"issuer-v1": first_path}, expected_uid=os.getuid())
     first = keys.snapshot()
     bad_path = tmp_path / "bad.pem"
     bad_path.write_text("not a key", encoding="utf-8")
@@ -70,4 +68,3 @@ def test_verification_key_set_reload_is_atomic(tmp_path):
     assert keys.snapshot() == first
     keys.reload({"issuer-v2": second_path}, expected_uid=os.getuid())
     assert set(keys.snapshot()) == {"issuer-v2"}
-

@@ -30,8 +30,8 @@ from openloop.broker.models import (
 )
 from tests.support.broker_repository_contract import (
     CAPABILITY_DIGEST,
-    DURABLE_STATE_REF,
     DURABLE_DIGEST,
+    DURABLE_STATE_REF,
     OTHER_OWNER,
     OWNER,
     MutableClock,
@@ -173,7 +173,9 @@ async def test_recovery_scan_reports_finalizing_jobs_without_generation_state(
     assert candidates[0].generation_state is None
 
 
-async def test_create_exact_replay_returns_original_ids_without_audit(ledger, repository):
+async def test_create_exact_replay_returns_original_ids_without_audit(
+    ledger, repository
+):
     first = await _create(ledger)
     replay = await _create(ledger)
     assert replay.replayed is True
@@ -184,7 +186,9 @@ async def test_create_exact_replay_returns_original_ids_without_audit(ledger, re
     assert len(await repository.operations_for_test()) == 1
 
 
-async def test_authorized_create_replay_returns_stored_authorization(ledger, repository):
+async def test_authorized_create_replay_returns_stored_authorization(
+    ledger, repository
+):
     issued = []
 
     def authorization_factory(owner, job_id, minimum_isolation):
@@ -265,9 +269,7 @@ async def test_owner_and_expected_generation_are_fenced(ledger, repository):
     with pytest.raises(OwnerMismatch):
         await ledger.inspect_job(OTHER_OWNER, created.job_id)
     with pytest.raises(JobNotFound):
-        await ledger.inspect_job(
-            OWNER, UUID("f0000000-0000-4000-8000-000000000001")
-        )
+        await ledger.inspect_job(OWNER, UUID("f0000000-0000-4000-8000-000000000001"))
     with pytest.raises(StaleGeneration):
         await begin_generation_start(
             ledger,
@@ -327,9 +329,9 @@ async def test_receipt_must_bind_owner_job_conversation_generation_and_barrier(
                 receipt,
                 ReleaseTarget.PARKED,
             )
-    assert (await ledger.inspect_job(OWNER, created.job_id)).generation_record.state is (
-        GenerationState.QUIESCED
-    )
+    assert (
+        await ledger.inspect_job(OWNER, created.job_id)
+    ).generation_record.state is (GenerationState.QUIESCED)
     assert len(await repository.audit_records_for_test()) == 5
 
 
@@ -449,13 +451,11 @@ async def test_unknown_abandonment_replay_operation_cannot_mutate(ledger, reposi
             1,
             GenerationState.STARTING,
             "start_failed",
-            replay_operation_id=UUID(
-                "f0000000-0000-4000-8000-000000000002"
-            ),
+            replay_operation_id=UUID("f0000000-0000-4000-8000-000000000002"),
         )
-    assert (await ledger.inspect_job(OWNER, created.job_id)).generation_record.state is (
-        GenerationState.STARTING
-    )
+    assert (
+        await ledger.inspect_job(OWNER, created.job_id)
+    ).generation_record.state is (GenerationState.STARTING)
     assert len(await repository.audit_records_for_test()) == 2
 
 
@@ -500,9 +500,9 @@ async def test_exact_completion_replays_after_aggregate_advances(ledger, reposit
     )
     assert replay.replayed is True
     assert replay.generation_state is GenerationState.RUNNING
-    assert (await ledger.inspect_job(OWNER, created.job_id)).generation_record.state is (
-        GenerationState.QUIESCED
-    )
+    assert (
+        await ledger.inspect_job(OWNER, created.job_id)
+    ).generation_record.state is (GenerationState.QUIESCED)
     assert len(await repository.audit_records_for_test()) == 5
 
 
@@ -635,9 +635,7 @@ async def test_concurrent_same_key_start_is_one_mutation_plus_replay(
     assert len(await repository.audit_records_for_test()) == 2
 
 
-async def test_concurrent_different_start_intents_have_one_winner(
-    ledger, repository
-):
+async def test_concurrent_different_start_intents_have_one_winner(ledger, repository):
     created = await _create(ledger)
     results = await asyncio.gather(
         begin_generation_start(
@@ -657,18 +655,20 @@ async def test_concurrent_different_start_intents_have_one_winner(
         return_exceptions=True,
     )
     assert sum(not isinstance(result, BaseException) for result in results) == 1
-    assert sum(
-        isinstance(result, (InvalidTransition, StaleGeneration)) for result in results
-    ) == 1
+    assert (
+        sum(
+            isinstance(result, (InvalidTransition, StaleGeneration))
+            for result in results
+        )
+        == 1
+    )
     assert len(await repository.audit_records_for_test()) == 2
     snapshot = await ledger.inspect_job(OWNER, created.job_id)
     assert snapshot.generation == 1
     assert snapshot.generation_record.state is GenerationState.STARTING
 
 
-async def test_audit_and_public_results_contain_no_protected_values(
-    ledger, repository
-):
+async def test_audit_and_public_results_contain_no_protected_values(ledger, repository):
     created, _ = await _create_running(ledger)
     public = await ledger.inspect_job(OWNER, created.job_id)
     audit = await repository.audit_records_for_test()
@@ -688,9 +688,7 @@ async def test_audit_and_public_results_contain_no_protected_values(
     ]
 
 
-async def test_abandonment_fails_the_superseded_pending_operation(
-    ledger, repository
-):
+async def test_abandonment_fails_the_superseded_pending_operation(ledger, repository):
     created = await _create(ledger)
     start = await begin_generation_start(
         ledger,

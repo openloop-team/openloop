@@ -22,9 +22,7 @@ _MASTER_KEY = base64.b64encode(b"x" * 32).decode()
 
 def test_builtin_worker_builds_with_flag_off():
     # Baseline: the default (flag off, builtin/host) yields a real worker.
-    settings = Settings(
-        coding_worker_backend="builtin", coding_worker_sandbox="host"
-    )
+    settings = Settings(coding_worker_backend="builtin", coding_worker_sandbox="host")
     assert build_coding_worker(settings) is not None
 
 
@@ -123,9 +121,7 @@ def test_ingress_sweep_failure_does_not_disable_external_worker(
     handle = _ExternalBrokerHandle(ingress)
 
     with caplog.at_level(logging.WARNING, logger="openloop"):
-        worker = build_coding_worker(
-            _external_settings(tmp_path), broker_handle=handle
-        )
+        worker = build_coding_worker(_external_settings(tmp_path), broker_handle=handle)
 
     assert worker is not None
     assert ingress.max_ages == [builders._INGRESS_STALE_SWEEP_SECONDS]

@@ -50,8 +50,9 @@ import logging
 import os
 import shutil
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from pydantic import SecretStr
 
@@ -148,7 +149,7 @@ class ClaudeCodeCodingWorker:
     async def run(
         self,
         workspace: Path,
-        state: "WorkerState",
+        state: WorkerState,
         on_step: StepCallback | None = None,
     ) -> WorkerEdit:
         cmd = self._command(self._prompt(state))
@@ -209,7 +210,7 @@ class ClaudeCodeCodingWorker:
         cmd += list(self.extra_args)
         return cmd
 
-    def _prompt(self, state: "WorkerState") -> str:
+    def _prompt(self, state: WorkerState) -> str:
         """The task handed to the agent: the instruction plus hard boundaries.
 
         The rules restate what the architecture already enforces (no credential
@@ -258,7 +259,7 @@ class ClaudeCodeCodingWorker:
         completion_tokens = int(usage.get("output_tokens") or 0)
         return cost, prompt_tokens, completion_tokens
 
-    def _read_pr_file(self, workspace: Path, state: "WorkerState") -> tuple[str, str]:
+    def _read_pr_file(self, workspace: Path, state: WorkerState) -> tuple[str, str]:
         """Consume the PR-metadata handoff file (never committed).
 
         A run that didn't write it still produced an edit worth reviewing, so
@@ -270,7 +271,8 @@ class ClaudeCodeCodingWorker:
         except (FileNotFoundError, OSError):
             logger.warning(
                 "claude run for job %s wrote no %s — using fallback title",
-                state.job_id, PR_FILE,
+                state.job_id,
+                PR_FILE,
             )
             title = state.instruction.strip().splitlines()[0][:72]
             return title or "Automated change", ""
@@ -292,9 +294,7 @@ class ClaudeCodeCodingWorker:
         child_env = None
         if self._claude_auth is not None:
             child_env = dict(os.environ)
-            child_env["CLAUDE_CODE_OAUTH_TOKEN"] = (
-                self._claude_auth.get_secret_value()
-            )
+            child_env["CLAUDE_CODE_OAUTH_TOKEN"] = self._claude_auth.get_secret_value()
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=str(cwd),
@@ -304,7 +304,7 @@ class ClaudeCodeCodingWorker:
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
             return (-1, "", "", True)

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
 import hashlib
-from importlib import resources
 import json
 import re
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
+from importlib import resources
 from typing import Any
 from uuid import UUID
 
@@ -65,7 +65,6 @@ from .repository import (
     require_generation_transition,
     require_job_transition,
 )
-
 
 # ASCII "BROKERLD" interpreted as a positive signed 64-bit advisory-lock key.
 BROKER_MIGRATION_LOCK_ID = 0x42524F4B45524C44
@@ -200,9 +199,7 @@ def _decode_ticket(value: str | dict[str, Any]) -> OperationTicket:
         command=CommandKind(payload["command"]),
         job_id=UUID(payload["job_id"]) if payload.get("job_id") else None,
         conversation_id=(
-            UUID(payload["conversation_id"])
-            if payload.get("conversation_id")
-            else None
+            UUID(payload["conversation_id"]) if payload.get("conversation_id") else None
         ),
         generation=payload.get("generation"),
         job_state=JobState(payload["job_state"]) if payload.get("job_state") else None,
@@ -286,9 +283,7 @@ def _job_from_row(row: Any) -> JobRecord:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         minimum_isolation=(
-            IsolationMode(minimum_isolation)
-            if minimum_isolation is not None
-            else None
+            IsolationMode(minimum_isolation) if minimum_isolation is not None else None
         ),
         authorization=authorization,
     )
@@ -522,7 +517,7 @@ class Migration:
     checksum: str
 
     @classmethod
-    def from_bytes(cls, version: int, name: str, content: bytes) -> "Migration":
+    def from_bytes(cls, version: int, name: str, content: bytes) -> Migration:
         return cls(
             version=version,
             name=name,
@@ -727,7 +722,9 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
     async def _job(
         connection: Any, owner: BrokerOwner, job_id: UUID, *, lock: bool = True
     ) -> JobRecord:
-        row = await connection.fetchrow(_SELECT_JOB if lock else _SELECT_JOB_READ, job_id)
+        row = await connection.fetchrow(
+            _SELECT_JOB if lock else _SELECT_JOB_READ, job_id
+        )
         if row is None:
             raise JobNotFound(job_id)
         job = _job_from_row(row)
@@ -786,19 +783,13 @@ class PostgresBrokerRepository(BorrowedPostgresStore):
             ),
             job.authorization.key_version if job.authorization else None,
             job.authorization.epoch if job.authorization else None,
-            (
-                job.authorization.capability_digest
-                if job.authorization
-                else None
-            ),
+            (job.authorization.capability_digest if job.authorization else None),
         )
         if row is None:
             raise ConcurrentMutation(job.job_id)
 
     @staticmethod
-    async def _update_job(
-        connection: Any, before: JobRecord, after: JobRecord
-    ) -> None:
+    async def _update_job(connection: Any, before: JobRecord, after: JobRecord) -> None:
         row = await connection.fetchrow(
             _UPDATE_JOB,
             after.job_id,

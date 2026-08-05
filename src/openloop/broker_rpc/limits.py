@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import time
 from collections import OrderedDict
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass
-import math
-import time
 
 
 def _positive_int(name: str, value: object, *, maximum: int) -> int:
@@ -109,12 +109,8 @@ class TokenBucketLimiter:
         max_keys: int,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._capacity = float(
-            _positive_int("capacity", capacity, maximum=65536)
-        )
-        self._refill = _positive_seconds(
-            "refill_per_second", refill_per_second
-        )
+        self._capacity = float(_positive_int("capacity", capacity, maximum=65536))
+        self._refill = _positive_seconds("refill_per_second", refill_per_second)
         self._max_keys = _positive_int("max_keys", max_keys, maximum=65536)
         if not callable(clock):
             raise TypeError("clock must be callable")

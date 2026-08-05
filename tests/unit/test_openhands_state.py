@@ -76,7 +76,9 @@ def test_key_derivation_is_stable_separated_and_per_job():
     )
 
 
-@pytest.mark.parametrize("encoded", ["", "not base64!", base64.b64encode(b"short").decode()])
+@pytest.mark.parametrize(
+    "encoded", ["", "not base64!", base64.b64encode(b"short").decode()]
+)
 def test_master_key_must_be_valid_base64_and_exactly_32_bytes(encoded):
     with pytest.raises(OpenHandsStateError):
         OpenHandsKeyDeriver.from_base64(encoded, master_key_id="key-v1")

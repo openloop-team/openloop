@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from openloop.broker.models import POSTGRES_BIGINT_MAX
 from openloop.tools.openhands_relay import RelayClientEndpoint, RelayMode
-
 
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
 
@@ -35,7 +34,7 @@ def _generation(value: object) -> int:
 def _deadline(value: object) -> datetime:
     if not isinstance(value, datetime):
         raise TypeError("deadline must be a datetime")
-    if value.tzinfo is None or value.utcoffset() != timezone.utc.utcoffset(value):
+    if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
         raise ValueError("deadline must be timezone-aware UTC")
     if value.microsecond:
         raise ValueError("deadline must have whole-second precision")
@@ -68,7 +67,7 @@ class RuntimeHealthFailure(RuntimeDriverError):
     """The generation failed its fixed relay health gate."""
 
 
-class RuntimeResourceState(str, Enum):
+class RuntimeResourceState(StrEnum):
     ABSENT = "absent"
     CREATED = "created"
     RUNNING = "running"
@@ -251,9 +250,7 @@ class RuntimeDriver(Protocol):
         self, identity: GenerationRuntimeIdentity
     ) -> GenerationObservation: ...
 
-    async def quiesce(
-        self, spec: OpenHandsGenerationSpec
-    ) -> QuiescedGeneration: ...
+    async def quiesce(self, spec: OpenHandsGenerationSpec) -> QuiescedGeneration: ...
 
     async def release(
         self, identity: GenerationRuntimeIdentity

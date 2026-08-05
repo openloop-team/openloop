@@ -74,7 +74,10 @@ class BrokerLedger:
     @staticmethod
     def _prepare(command):
         if hasattr(command, "request_digest"):
-            command.request_digest
+            # Force the digest here, and discard it. request_digest canonicalizes
+            # the command to JSON before hashing, so a command that cannot be
+            # canonicalized raises at prepare time rather than at persist time.
+            _ = command.request_digest
         return command
 
     async def create_job(
@@ -143,9 +146,7 @@ class BrokerLedger:
         authorization = None
         if minimum_isolation is not None:
             assert authorization_factory is not None
-            authorization = authorization_factory(
-                owner, job_id, minimum_isolation
-            )
+            authorization = authorization_factory(owner, job_id, minimum_isolation)
             if not isinstance(authorization, JobAuthorizationMetadata):
                 raise TypeError(
                     "authorization_factory must return JobAuthorizationMetadata"
@@ -440,9 +441,7 @@ class BrokerLedger:
             raise TypeError("limit must be an integer")
         if not 1 <= limit <= 1000:
             raise ValueError("limit must be between 1 and 1000")
-        result = await self._repository.scan_recovery_candidates(
-            after_job_id, limit
-        )
+        result = await self._repository.scan_recovery_candidates(after_job_id, limit)
         if not isinstance(result, tuple) or any(
             not isinstance(item, RecoveryCandidate) for item in result
         ):

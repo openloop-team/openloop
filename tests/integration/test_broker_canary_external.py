@@ -5,23 +5,22 @@ from __future__ import annotations
 import base64
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import time
 import uuid
+from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import yaml
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from tests.support.fake_openai import fake_openai
+from openloop.wiring.broker import _derive_receipt_key
 from tests.integration.test_openhands_broker_canary_live import (
     run_phase5_checkpoint_park_resume_finalize_real_docker as _run_phase5_canary,
 )
-from openloop.wiring.broker import _derive_receipt_key
-
+from tests.support.fake_openai import fake_openai
 
 pytestmark = [
     pytest.mark.integration,
@@ -162,18 +161,12 @@ def _write_partitioned_environments(project: Path) -> None:
                 "BROKER_RUNTIME_CURRENT_VERSION=runtime-key-v1",
                 "BROKER_IDENTITY_PUBLIC_KEYS="
                 + json.dumps(
-                    {
-                        "identity-v1": base64.b64encode(identity_public).decode()
-                    },
+                    {"identity-v1": base64.b64encode(identity_public).decode()},
                     separators=(",", ":"),
                 ),
                 "BROKER_RECEIPT_PUBLIC_KEYS="
                 + json.dumps(
-                    {
-                        "receipt-key-v1": base64.b64encode(
-                            receipt_public
-                        ).decode()
-                    },
+                    {"receipt-key-v1": base64.b64encode(receipt_public).decode()},
                     separators=(",", ":"),
                 ),
                 "",
@@ -420,8 +413,7 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
             assert adapter_host["SecurityOpt"] == ["no-new-privileges:true"]
             assert adapter_host["PortBindings"] == {}
             adapter_mounts = {
-                mount["Destination"]: mount
-                for mount in adapter_document["Mounts"]
+                mount["Destination"]: mount for mount in adapter_document["Mounts"]
             }
             assert adapter_mounts["/var/run/docker.sock"]["Type"] == "bind"
             assert adapter_mounts["/run/openloop-docker"]["Type"] == "volume"
@@ -470,12 +462,10 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
             )[0]
             assert broker_document["Image"] == runtime_document["Image"]
             broker_mounts = {
-                mount["Destination"]: mount
-                for mount in broker_document["Mounts"]
+                mount["Destination"]: mount for mount in broker_document["Mounts"]
             }
             runtime_mounts = {
-                mount["Destination"]: mount
-                for mount in runtime_document["Mounts"]
+                mount["Destination"]: mount for mount in runtime_document["Mounts"]
             }
             assert "/var/run/docker.sock" not in broker_mounts
             assert broker_mounts["/run/openloop-docker"]["RW"] is False
@@ -693,18 +683,12 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
                 ).splitlines()
             )
             expected_database_url = (
-                "DATABASE_URL="
-                "postgresql://openloop@postgres:5432/openloop"
+                "DATABASE_URL=postgresql://openloop@postgres:5432/openloop"
             )
             assert expected_database_url in runtime_env
             assert expected_database_url in broker_env
-            assert (
-                "DOCKER_HOST=unix:///run/openloop-docker/docker.sock"
-                in broker_env
-            )
-            assert not any(
-                line.startswith("DOCKER_HOST=") for line in runtime_env
-            )
+            assert "DOCKER_HOST=unix:///run/openloop-docker/docker.sock" in broker_env
+            assert not any(line.startswith("DOCKER_HOST=") for line in runtime_env)
             secret_environment_names = (
                 "PGPASSWORD=",
                 "POSTGRES_PASSWORD=",
@@ -715,8 +699,7 @@ def test_compose_external_broker_distinct_uids_secret_partition_and_real_job():
             )
             for container_env in (runtime_env, broker_env):
                 assert not any(
-                    line.startswith(secret_environment_names)
-                    for line in container_env
+                    line.startswith(secret_environment_names) for line in container_env
                 )
         finally:
             _compose(

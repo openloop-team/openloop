@@ -28,8 +28,13 @@ def test_evidence_bundle_maps_to_artifact_with_provenance_body():
 
 def test_pull_request_maps_to_prose_summary():
     d = to_deliverable(
-        PullRequest(repo="a/b", branch="openloop/job-x", pr_number=7,
-                    pr_url="https://gh/pr/7", summary="Opened draft PR #7.")
+        PullRequest(
+            repo="a/b",
+            branch="openloop/job-x",
+            pr_number=7,
+            pr_url="https://gh/pr/7",
+            summary="Opened draft PR #7.",
+        )
     )
     assert isinstance(d, Prose)
     assert "#7" in d.text
@@ -44,6 +49,8 @@ def test_failed_maps_to_prose():
 def test_outcome_is_not_keyed_on_entry_action():
     # Structural decoupling proof: an EvidenceBundle and a PullRequest are the
     # same union; nothing binds a construction to which action started the task.
-    outcomes = [Diagnosis(text="x"), PullRequest(repo="a/b", branch="b",
-                pr_number=None, pr_url=None, summary="s")]
+    outcomes = [
+        Diagnosis(text="x"),
+        PullRequest(repo="a/b", branch="b", pr_number=None, pr_url=None, summary="s"),
+    ]
     assert all(to_deliverable(o) is not None for o in outcomes)

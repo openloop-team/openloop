@@ -5,10 +5,22 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Any, Literal
 
 from openloop.tools.openhands_artifacts import WorkspaceArtifact
 from openloop.tools.openhands_state import validate_state_identifier
+
+
+def _untrusted(raw: dict, name: str) -> Any:
+    """Read one field of a decoded JSON document, unnarrowed.
+
+    Every from_dict below feeds these straight into a frozen dataclass whose
+    __post_init__ is the real validator — it rejects a missing or wrong-typed
+    value with an OpenHandsResumeError. Returning Any says the decoder is not
+    the thing making the guarantee, rather than asserting a str that the JSON
+    has not been checked to contain.
+    """
+    return raw.get(name)
 
 
 OPENHANDS_RESUME_SCHEMA_VERSION = 1
@@ -97,13 +109,13 @@ class WorkspaceArtifactRef:
         }
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "WorkspaceArtifactRef":
+    def from_dict(cls, raw: dict) -> WorkspaceArtifactRef:
         if not isinstance(raw, dict):
             raise OpenHandsResumeError("invalid OpenHands workspace artifact")
         return cls(
             artifact=WorkspaceArtifact.from_dict(raw),
-            format=raw.get("format"),
-            base_commit=raw.get("base_commit"),
+            format=_untrusted(raw, "format"),
+            base_commit=_untrusted(raw, "base_commit"),
         )
 
 
@@ -130,14 +142,14 @@ class ResumeDecision:
         }
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "ResumeDecision":
+    def from_dict(cls, raw: dict) -> ResumeDecision:
         if not isinstance(raw, dict):
             raise OpenHandsResumeError("invalid OpenHands resume decision")
         return cls(
-            kind=raw.get("kind"),
-            decision_id=raw.get("decision_id"),
-            event_id=raw.get("event_id"),
-            actor_id=raw.get("actor_id"),
+            kind=_untrusted(raw, "kind"),
+            decision_id=_untrusted(raw, "decision_id"),
+            event_id=_untrusted(raw, "event_id"),
+            actor_id=_untrusted(raw, "actor_id"),
         )
 
 
@@ -205,9 +217,7 @@ class OpenHandsResumeState:
                 f"unsupported OpenHands resume schema version {self.schema_version}"
             )
         if self.minimum_reader_version > OPENHANDS_RESUME_READER_VERSION:
-            raise OpenHandsResumeError(
-                "OpenHands resume state requires a newer reader"
-            )
+            raise OpenHandsResumeError("OpenHands resume state requires a newer reader")
         if self.minimum_reader_version < 1:
             raise OpenHandsResumeError("invalid OpenHands minimum reader version")
         if self.status not in _STATUSES:
@@ -285,6 +295,12 @@ class OpenHandsResumeState:
                     self.workspace_artifact,
                 )
             ):
+                raise OpenHandsResumeError(
+                    f"OpenHands {self.status} state is missing decision data"
+                )
+            # Restated on its own: the all() above already covers it, but a
+            # truthiness test inside a call does not narrow the attribute.
+            if self.workspace_artifact is None:
                 raise OpenHandsResumeError(
                     f"OpenHands {self.status} state is missing decision data"
                 )
@@ -383,7 +399,7 @@ class OpenHandsResumeState:
         }
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "OpenHandsResumeState":
+    def from_dict(cls, raw: dict) -> OpenHandsResumeState:
         if not isinstance(raw, dict):
             raise OpenHandsResumeError("invalid OpenHands resume state")
         allowed = set(cls.__dataclass_fields__)

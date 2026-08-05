@@ -66,9 +66,7 @@ def test_stage_materialize_and_replay_preserve_checkout(tmp_path):
     assert (destination / "link").readlink() == Path("script.sh")
 
 
-def test_stage_builds_in_private_namespace_before_atomic_publish(
-    tmp_path, monkeypatch
-):
+def test_stage_builds_in_private_namespace_before_atomic_publish(tmp_path, monkeypatch):
     source = _source_tree(tmp_path)
     root = tmp_path / "ingress"
     root.mkdir(mode=0o700)

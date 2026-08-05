@@ -10,10 +10,11 @@ import json
 import os
 import struct
 import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Iterator
+from typing import Any, BinaryIO
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -24,7 +25,6 @@ from openloop.tools.openhands_state import (
     OpenHandsStateLayout,
     validate_state_identifier,
 )
-
 
 _MAGIC = b"OLWART01"
 _ENVELOPE_VERSION = 1
@@ -45,6 +45,16 @@ class WorkspaceArtifactConflict(WorkspaceArtifactError):
 
 class WorkspaceArtifactVerificationError(WorkspaceArtifactError):
     """An artifact did not authenticate or match its expected identity."""
+
+
+def _untrusted(raw: dict, name: str) -> Any:
+    """Read one field of a decoded JSON document, unnarrowed.
+
+    The value goes straight into a frozen dataclass that validates its own
+    fields, so returning Any keeps the guarantee where it is actually made
+    instead of claiming a type the JSON has not been checked to hold.
+    """
+    return raw.get(name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,9 +91,8 @@ class WorkspaceArtifactManifest:
 
     def __post_init__(self) -> None:
         validate_state_identifier(self.format, field="artifact format")
-        if (
-            len(self.base_commit) not in (40, 64)
-            or any(c not in "0123456789abcdef" for c in self.base_commit)
+        if len(self.base_commit) not in (40, 64) or any(
+            c not in "0123456789abcdef" for c in self.base_commit
         ):
             raise WorkspaceArtifactError(
                 "artifact base_commit must be a lowercase Git object ID"
@@ -105,7 +114,7 @@ class WorkspaceArtifactManifest:
         if self.pr_body is not None and self.pr_title is None:
             raise WorkspaceArtifactError("artifact PR body requires a title")
 
-    def with_plaintext_sha256(self, digest: str) -> "WorkspaceArtifactManifest":
+    def with_plaintext_sha256(self, digest: str) -> WorkspaceArtifactManifest:
         return WorkspaceArtifactManifest(
             format=self.format,
             base_commit=self.base_commit,
@@ -134,9 +143,8 @@ class WorkspaceArtifact:
             or "\\" in self.key
         ):
             raise WorkspaceArtifactError("invalid artifact descriptor key")
-        if (
-            len(self.ciphertext_sha256) != 64
-            or any(c not in "0123456789abcdef" for c in self.ciphertext_sha256)
+        if len(self.ciphertext_sha256) != 64 or any(
+            c not in "0123456789abcdef" for c in self.ciphertext_sha256
         ):
             raise WorkspaceArtifactError("invalid artifact ciphertext SHA-256")
         if self.ciphertext_bytes <= 0 or self.envelope_version <= 0:
@@ -154,7 +162,7 @@ class WorkspaceArtifact:
         }
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "WorkspaceArtifact":
+    def from_dict(cls, raw: dict) -> WorkspaceArtifact:
         if not isinstance(raw, dict):
             raise WorkspaceArtifactError("invalid artifact descriptor")
         identity = raw.get("identity")
@@ -162,10 +170,13 @@ class WorkspaceArtifact:
             raise WorkspaceArtifactError("invalid artifact identity descriptor")
         return cls(
             identity=WorkspaceArtifactIdentity(
-                job_id=identity.get("job_id"),
-                conversation_id=identity.get("conversation_id"),
-                segment_id=identity.get("segment_id"),
-                kind=identity.get("kind"),
+                # Passed through unnarrowed: these come from an untrusted JSON
+                # document and WorkspaceArtifactIdentity's own validation is
+                # what rejects a missing or wrong-typed value.
+                job_id=_untrusted(identity, "job_id"),
+                conversation_id=_untrusted(identity, "conversation_id"),
+                segment_id=_untrusted(identity, "segment_id"),
+                kind=_untrusted(identity, "kind"),
             ),
             key=str(raw.get("key", "")),
             ciphertext_sha256=str(raw.get("ciphertext_sha256", "")),
@@ -193,7 +204,7 @@ class VerifiedWorkspaceArtifact:
             self.stream.close()
         self._scratch_path.unlink(missing_ok=True)
 
-    def __enter__(self) -> "VerifiedWorkspaceArtifact":
+    def __enter__(self) -> VerifiedWorkspaceArtifact:
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> None:
@@ -357,9 +368,7 @@ class WorkspaceArtifactStore:
                 scratch_stream.write(decryptor.finalize())
                 scratch_stream.flush()
 
-            manifest = self._verify_plaintext_payload(
-                scratch_stream, expected_identity
-            )
+            manifest = self._verify_plaintext_payload(scratch_stream, expected_identity)
             return VerifiedWorkspaceArtifact(manifest, scratch_stream, scratch_path)
         except InvalidTag as exc:
             if scratch_stream is not None:
@@ -446,7 +455,9 @@ class WorkspaceArtifactStore:
                 if not chunk:
                     break
                 if not isinstance(chunk, bytes):
-                    raise WorkspaceArtifactError("artifact plaintext stream must be binary")
+                    raise WorkspaceArtifactError(
+                        "artifact plaintext stream must be binary"
+                    )
                 digest.update(chunk)
                 stream.write(chunk)
             stream.flush()
@@ -574,7 +585,9 @@ class WorkspaceArtifactStore:
             raise WorkspaceArtifactVerificationError("missing encrypted manifest")
         manifest_length = struct.unpack(">I", length_bytes)[0]
         if not 0 < manifest_length <= _MAX_MANIFEST_BYTES:
-            raise WorkspaceArtifactVerificationError("invalid encrypted manifest length")
+            raise WorkspaceArtifactVerificationError(
+                "invalid encrypted manifest length"
+            )
         encoded = stream.read(manifest_length)
         if len(encoded) != manifest_length:
             raise WorkspaceArtifactVerificationError("truncated encrypted manifest")

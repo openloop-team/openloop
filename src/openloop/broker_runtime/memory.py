@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from openloop.tools.openhands_relay import (
     RelayClientEndpoint,
@@ -39,7 +39,7 @@ class InMemoryRuntimeDriver(RuntimeDriver):
             or not 1 <= maximum_lifetime_seconds <= 86_400
         ):
             raise ValueError("maximum_lifetime_seconds must be in 1-86400")
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._maximum_lifetime_seconds = maximum_lifetime_seconds
         self._specs: dict[GenerationRuntimeIdentity, OpenHandsGenerationSpec] = {}
         self._modes: dict[GenerationRuntimeIdentity, RelayMode] = {}
@@ -63,9 +63,7 @@ class InMemoryRuntimeDriver(RuntimeDriver):
             mode=mode,
         ).endpoint
 
-    def describe_endpoint(
-        self, spec: OpenHandsGenerationSpec
-    ) -> RelayClientEndpoint:
+    def describe_endpoint(self, spec: OpenHandsGenerationSpec) -> RelayClientEndpoint:
         return self._endpoint(spec, RelayMode.RUNNING)
 
     def _expired(self, identity: GenerationRuntimeIdentity) -> bool:
@@ -99,9 +97,7 @@ class InMemoryRuntimeDriver(RuntimeDriver):
             observation=observation,
         )
 
-    async def quiesce(
-        self, spec: OpenHandsGenerationSpec
-    ) -> QuiescedGeneration:
+    async def quiesce(self, spec: OpenHandsGenerationSpec) -> QuiescedGeneration:
         if not isinstance(spec, OpenHandsGenerationSpec):
             raise TypeError("spec must be an OpenHandsGenerationSpec")
         identity = spec.identity
@@ -128,17 +124,11 @@ class InMemoryRuntimeDriver(RuntimeDriver):
         if not isinstance(identity, GenerationRuntimeIdentity):
             raise TypeError("identity must be a GenerationRuntimeIdentity")
         present = identity in self._specs
-        state = (
-            RuntimeResourceState.RUNNING
-            if present
-            else RuntimeResourceState.ABSENT
-        )
+        state = RuntimeResourceState.RUNNING if present else RuntimeResourceState.ABSENT
         return GenerationObservation(
             identity=identity,
             network=(
-                RuntimeResourceState.CREATED
-                if present
-                else RuntimeResourceState.ABSENT
+                RuntimeResourceState.CREATED if present else RuntimeResourceState.ABSENT
             ),
             agent=state,
             relay=state,
@@ -148,9 +138,7 @@ class InMemoryRuntimeDriver(RuntimeDriver):
             expired=self._expired(identity),
         )
 
-    async def release(
-        self, identity: GenerationRuntimeIdentity
-    ) -> ReleaseObservation:
+    async def release(self, identity: GenerationRuntimeIdentity) -> ReleaseObservation:
         if not isinstance(identity, GenerationRuntimeIdentity):
             raise TypeError("identity must be a GenerationRuntimeIdentity")
         self._specs.pop(identity, None)

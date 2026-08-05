@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-import re
 from uuid import UUID
 
 from openloop.broker.models import (
     GenerationState,
-    JobState,
     JobSnapshot,
+    JobState,
     OperationTicket,
     ReleaseTarget,
     SignedCheckpointReceipt,
@@ -27,7 +27,6 @@ from openloop.broker.models import (
 from .capability import JobCapability
 from .errors import RpcFailure
 from .identity import WorkloadIdentityToken, WorkloadIntent
-
 
 RPC_VERSION = 2
 _ACCESS_TOKEN = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
@@ -221,10 +220,7 @@ class RunningGenerationAccess:
             or self.deadline.microsecond
         ):
             raise ValueError("deadline must be whole-second UTC")
-        if (
-            not isinstance(self.socket_path, Path)
-            or not self.socket_path.is_absolute()
-        ):
+        if not isinstance(self.socket_path, Path) or not self.socket_path.is_absolute():
             raise ValueError("socket_path must be an absolute pathlib.Path")
         rendered_path = str(self.socket_path)
         if (
@@ -235,10 +231,7 @@ class RunningGenerationAccess:
             raise ValueError("socket_path is outside the relay UDS profile")
         for name in ("relay_capability", "session_api_key"):
             value = getattr(self, name)
-            if (
-                not isinstance(value, str)
-                or _ACCESS_TOKEN.fullmatch(value) is None
-            ):
+            if not isinstance(value, str) or _ACCESS_TOKEN.fullmatch(value) is None:
                 raise ValueError(f"{name} is invalid")
 
     def __repr__(self) -> str:

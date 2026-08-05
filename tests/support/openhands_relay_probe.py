@@ -29,7 +29,6 @@ from openloop.tools.openhands_relay import (
     relay_websocket_callback_client_factory,
 )
 
-
 _OPENHANDS_DISTRIBUTIONS = (
     "openhands-agent-server",
     "openhands-sdk",
@@ -78,7 +77,7 @@ def _http(endpoint: RelayClientEndpoint, request: dict) -> dict:
 
 
 def _conversation(endpoint: RelayClientEndpoint) -> dict:
-    from openhands.sdk import Agent, LLM, Tool
+    from openhands.sdk import LLM, Agent, Tool
     from openhands.sdk.conversation.impl.remote_conversation import RemoteConversation
     from openhands.tools.file_editor import FileEditorTool
     from openhands.tools.terminal import TerminalTool
@@ -121,7 +120,7 @@ def _probe_marker(endpoint: RelayClientEndpoint, request: dict, name: str) -> Pa
 
 
 def _conversation_reconnect(endpoint: RelayClientEndpoint, request: dict) -> dict:
-    from openhands.sdk import Agent, LLM, Tool
+    from openhands.sdk import LLM, Agent, Tool
     from openhands.sdk.conversation.impl.remote_conversation import RemoteConversation
     from openhands.tools.file_editor import FileEditorTool
     from openhands.tools.terminal import TerminalTool

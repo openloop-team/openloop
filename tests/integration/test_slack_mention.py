@@ -7,8 +7,8 @@ with a synthetic event and a :class:`FakeSurfaceDelivery` — the full glue from
 event → Task → target → delivery, without a live Slack connection.
 """
 
-from pathlib import Path
 import types
+from pathlib import Path
 
 import pytest
 
@@ -16,9 +16,9 @@ from openloop.agents import load_agent
 from openloop.models.gateway import ModelResponse
 from openloop.runtime import Task
 from openloop.sessions import InMemorySurfaceSessionStore, SessionRunner
-from openloop.surfaces.approvals import APPROVE_ACTION, approval_blocks
 from openloop.sessions.store import SurfaceSession, SurfaceTarget
-from openloop.surfaces.slack import _run_mention, handle_message, handle_mention
+from openloop.surfaces.approvals import APPROVE_ACTION, approval_blocks
+from openloop.surfaces.slack import _run_mention, handle_mention, handle_message
 from openloop.testing import FakeGitHub, FakeSurfaceDelivery
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
@@ -82,9 +82,7 @@ def _event(text: str, **overrides) -> dict:
 
 
 def _reply(text: str = "done", approval_ids=None) -> ModelResponse:
-    return ModelResponse(
-        text=text, model="m", approval_ids=list(approval_ids or [])
-    )
+    return ModelResponse(text=text, model="m", approval_ids=list(approval_ids or []))
 
 
 async def test_mention_becomes_task_with_slack_identity():
@@ -161,22 +159,30 @@ async def test_handoff_failure_before_delivery_posts_error_in_thread():
 
 # --- thread-reply continuation (Slice 5) --------------------------------
 
+
 async def _seed_thread_session(runner, channel="C01DEV", thread="1700000000.000100"):
     # Match the runtime's agent scope so the (scope-aware) thread lookup finds it.
     md = runner.runtime.agent.metadata
-    await runner.sessions.upsert(SurfaceSession(
-        id="prev",
-        target=SurfaceTarget(
-            surface="slack", workspace=md.workspace, agent=md.name,
-            channel=channel, thread=thread,
-        ),
-        status="completed", final_message_id="f0",
-    ))
+    await runner.sessions.upsert(
+        SurfaceSession(
+            id="prev",
+            target=SurfaceTarget(
+                surface="slack",
+                workspace=md.workspace,
+                agent=md.name,
+                channel=channel,
+                thread=thread,
+            ),
+            status="completed",
+            final_message_id="f0",
+        )
+    )
 
 
 def _reply_event(text, **overrides):
-    return _event(text, thread_ts="1700000000.000100", ts="1700000000.000200",
-                  **overrides)
+    return _event(
+        text, thread_ts="1700000000.000100", ts="1700000000.000200", **overrides
+    )
 
 
 async def test_thread_reply_continues_existing_session():
@@ -238,8 +244,10 @@ async def test_thread_reply_mentioning_another_user_is_handled():
     await _seed_thread_session(runner)
 
     await handle_message(
-        runner, _reply_event("can you ask <@U999> about it?"),
-        FakeSay(), bot_user_id="U0BOT",
+        runner,
+        _reply_event("can you ask <@U999> about it?"),
+        FakeSay(),
+        bot_user_id="U0BOT",
     )
 
     assert len(runtime.tasks) == 1

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
 import inspect
 import math
 import os
-from pathlib import Path
 import struct
+from collections.abc import Awaitable, Callable
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from openloop.broker.models import (
@@ -42,7 +42,6 @@ from .models import (
     StartSegmentPayload,
     StartSegmentResult,
 )
-
 
 IdentityProvider = Callable[
     [WorkloadIntent], WorkloadIdentityToken | Awaitable[WorkloadIdentityToken]

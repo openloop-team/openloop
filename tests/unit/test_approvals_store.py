@@ -5,7 +5,7 @@ in-memory backend; the e2e Postgres module has real-SQL twins.
 """
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from openloop.approvals import ApprovalRequest, InMemoryApprovalStore
 
@@ -20,7 +20,7 @@ def _request(rid: str, *, created_at: datetime | None = None) -> ApprovalRequest
         approvers=["@u"],
         summary="s",
         id=rid,
-        created_at=created_at or datetime.now(timezone.utc),
+        created_at=created_at or datetime.now(UTC),
     )
 
 
@@ -64,7 +64,7 @@ async def test_claim_decision_returns_the_decided_row_to_the_winner():
 
 async def test_decided_unreconciled_orders_excludes_and_paginates():
     store = InMemoryApprovalStore()
-    base = datetime(2026, 7, 19, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 19, tzinfo=UTC)
     for i in range(5):
         await store.create(_request(f"r{i}", created_at=base + timedelta(minutes=i)))
     # Decide r0..r3; leave r4 pending. Mark r1 reconciled (excluded).

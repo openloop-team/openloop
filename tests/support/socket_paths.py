@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 import os
-from pathlib import Path
 import secrets
 import tempfile
+from collections.abc import Iterable
+from pathlib import Path
 
 from openloop.broker_rpc.server import MAX_UNIX_SOCKET_PATH_BYTES
-
 
 TEST_SOCKET_TMPDIR_ENV = "OPENLOOP_TEST_SOCKET_TMPDIR"
 _DIRECTORY_PREFIX = "ol-"
@@ -40,9 +39,7 @@ def _resolve_candidate(candidate: Path) -> Path:
     try:
         resolved = candidate.resolve(strict=True)
     except OSError as error:
-        raise ShortSocketPathProblem(
-            "socket temporary root does not exist"
-        ) from error
+        raise ShortSocketPathProblem("socket temporary root does not exist") from error
     if not resolved.is_dir() or not os.access(resolved, os.W_OK | os.X_OK):
         raise ShortSocketPathProblem(
             "socket temporary root must be a writable directory"
@@ -78,10 +75,14 @@ def select_short_socket_parent(
             )
         return resolved
 
-    proposed = tuple(candidates) if candidates is not None else (
-        Path("/tmp"),
-        Path("/private/tmp"),
-        Path(tempfile.gettempdir()),
+    proposed = (
+        tuple(candidates)
+        if candidates is not None
+        else (
+            Path("/tmp"),
+            Path("/private/tmp"),
+            Path(tempfile.gettempdir()),
+        )
     )
     viable: dict[Path, None] = {}
     for candidate in proposed:

@@ -8,17 +8,16 @@ effect, the winner's identity everywhere, and crash-window healing.
 
 import asyncio
 import logging
+from datetime import UTC
 from pathlib import Path
-
-import pytest
 
 from openloop.agents import load_agent
 from openloop.approvals import ApprovalRequest, InMemoryApprovalStore
+from openloop.testing import FakeGitHub, FakeWorkerOrchestrator
 from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import CodingWorkerConnector
 from openloop.tools.gateway import _workflow_initial_state
 from openloop.tools.github import GitHubConnector
-from openloop.testing import FakeGitHub, FakeWorkerOrchestrator
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
@@ -256,9 +255,7 @@ async def test_unregistered_tool_approve_refused_pre_claim():
     gw, _ = _direct_gateway()
     # A row whose tool nobody registered (connector disabled/drifted); legacy
     # None marker so it classifies "unknown".
-    req = await _seed_direct_request(
-        gw, ["@a"], tool="ghost", workflow_backed=None
-    )
+    req = await _seed_direct_request(gw, ["@a"], tool="ghost", workflow_backed=None)
     inv = await gw.resolve(req.id, "@a", approve=True)
     assert inv.status == "forbidden"
     assert "not registered" in inv.message
@@ -267,9 +264,7 @@ async def test_unregistered_tool_approve_refused_pre_claim():
 
 async def test_unregistered_tool_deny_claims_and_reports_legacy_unmarked():
     gw, _ = _direct_gateway()
-    req = await _seed_direct_request(
-        gw, ["@a"], tool="ghost", workflow_backed=None
-    )
+    req = await _seed_direct_request(gw, ["@a"], tool="ghost", workflow_backed=None)
     inv = await gw.resolve(req.id, "@a", approve=False)
     assert inv.status == "denied"
     stored = await gw.approvals.get(req.id)
@@ -352,7 +347,7 @@ async def test_duplicate_click_decided_row_connector_absent_reports_decision():
 async def test_deny_direct_request_never_cancels_colliding_workflow():
     gw, engine, _, orchestrator = _workflow_gateway()
     # Park a real workflow named "live".
-    live = await _seed_workflow_request(gw, ["@a"], job_id="live")
+    _live = await _seed_workflow_request(gw, ["@a"], job_id="live")
     # A direct request whose model-supplied args carry job_id="live".
     direct = await _seed_direct_request(
         gw, ["@a"], args={"repo": "acme/x", "title": "T", "job_id": "live"}
@@ -402,9 +397,7 @@ async def test_mark_failure_after_direct_execute_is_contained(caplog):
 async def test_reconcile_wakes_approved_parked_instance_no_session():
     gw, engine, github, orchestrator = _workflow_gateway()
     # Approved row, its instance still parked (crash after claim, before wake).
-    req = await _seed_workflow_request(
-        gw, ["@a"], status="approved", decided_by="@a"
-    )
+    req = await _seed_workflow_request(gw, ["@a"], status="approved", decided_by="@a")
     healed = await gw.reconcile_decisions()
     assert healed == 1
     await _drive(engine, req.workflow_instance_id)
@@ -428,9 +421,7 @@ async def test_reconcile_recreates_missing_instance():
 async def test_reconcile_cancels_denied_non_terminal_instance():
     gw, engine, _, orchestrator = _workflow_gateway()
     # Denied row, instance still parked (crash after deny claim, before cancel).
-    req = await _seed_workflow_request(
-        gw, ["@a"], status="denied", decided_by="@a"
-    )
+    req = await _seed_workflow_request(gw, ["@a"], status="denied", decided_by="@a")
     healed = await gw.reconcile_decisions()
     assert healed == 1
     inst = await engine.store.get(req.workflow_instance_id)
@@ -452,13 +443,21 @@ async def test_reconcile_tristate_direct_vs_legacy_unknown():
     gw, _ = _direct_gateway()  # only github registered
     # Post-migration direct row (False), connector absent → marked, no cancel.
     direct = await _seed_direct_request(
-        gw, ["@a"], tool="ghost", workflow_backed=False,
-        status="approved", decided_by="@a",
+        gw,
+        ["@a"],
+        tool="ghost",
+        workflow_backed=False,
+        status="approved",
+        decided_by="@a",
     )
     # Legacy row (None), unknown tool → deferred unmarked.
     legacy = await _seed_direct_request(
-        gw, ["@a"], tool="ghost", workflow_backed=None,
-        status="approved", decided_by="@a",
+        gw,
+        ["@a"],
+        tool="ghost",
+        workflow_backed=None,
+        status="approved",
+        decided_by="@a",
     )
     await gw.reconcile_decisions()
     assert (await gw.approvals.get(direct.id)).effect_at is not None
@@ -478,7 +477,11 @@ async def test_reconcile_missing_connector_defers_then_heals():
         tools=[GitHubConnector(github)], approvals=approvals, engine=engine
     )
     req = await _seed_workflow_request(
-        gw, ["@a"], park=False, status="approved", decided_by="@a",
+        gw,
+        ["@a"],
+        park=False,
+        status="approved",
+        decided_by="@a",
         workflow_backed=None,  # legacy → classified by registry (unknown here)
     )
     healed = await gw.reconcile_decisions()
@@ -504,9 +507,7 @@ async def test_reconcile_stamped_denied_connector_absent_cancels_immediately():
         tools=[GitHubConnector(github)], approvals=approvals, engine=engine
     )
     # Stamped True denied row, connector absent — cancel needs no connector.
-    req = await _seed_workflow_request(
-        gw, ["@a"], status="denied", decided_by="@a"
-    )
+    req = await _seed_workflow_request(gw, ["@a"], status="denied", decided_by="@a")
     healed = await gw.reconcile_decisions()
     assert healed == 1
     inst = await engine.store.get(req.workflow_instance_id)
@@ -518,18 +519,27 @@ async def test_reconcile_poison_head_pagination_heals_younger_rows():
     gw, engine, github, orchestrator = _workflow_gateway()
     # A batch of unavailable (unknown-tool, legacy) approved rows at the head,
     # then a healable direct row behind them. Small limit forces pagination.
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    base = datetime(2026, 7, 19, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 19, tzinfo=UTC)
     for i in range(5):
         await _seed_direct_request(
-            gw, ["@a"], tool="ghost", workflow_backed=None,
-            status="approved", decided_by="@a",
-            id=f"poison{i}", created_at=base + timedelta(minutes=i),
+            gw,
+            ["@a"],
+            tool="ghost",
+            workflow_backed=None,
+            status="approved",
+            decided_by="@a",
+            id=f"poison{i}",
+            created_at=base + timedelta(minutes=i),
         )
-    healable = await _seed_direct_request(
-        gw, ["@a"], status="approved", decided_by="@a",
-        id="healable", created_at=base + timedelta(minutes=10),
+    _healable = await _seed_direct_request(
+        gw,
+        ["@a"],
+        status="approved",
+        decided_by="@a",
+        id="healable",
+        created_at=base + timedelta(minutes=10),
     )
     # Shrink the batch size so the poison rows fill the first page.
     gw.approvals.decided_unreconciled = _small_limit(gw.approvals, 3)
@@ -539,12 +549,16 @@ async def test_reconcile_poison_head_pagination_heals_younger_rows():
 
 async def test_reconcile_per_row_isolation_continues_past_raise():
     gw, engine, github, orchestrator = _workflow_gateway()
-    good1 = await _seed_direct_request(gw, ["@a"], status="approved", decided_by="@a", id="g1")
+    _good1 = await _seed_direct_request(
+        gw, ["@a"], status="approved", decided_by="@a", id="g1"
+    )
     # A row whose classification will raise inside _reconcile_decision.
     boom = await _seed_workflow_request(
         gw, ["@a"], job_id="boom", status="approved", decided_by="@a"
     )
-    good2 = await _seed_direct_request(gw, ["@a"], status="approved", decided_by="@a", id="g2")
+    _good2 = await _seed_direct_request(
+        gw, ["@a"], status="approved", decided_by="@a", id="g2"
+    )
 
     original = gw._ensure_approved_workflow
 

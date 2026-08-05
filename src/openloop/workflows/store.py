@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 # Terminal statuses never resume; "running" resumes on startup (crashed mid-step);
@@ -29,7 +29,7 @@ TERMINAL = ("completed", "failed", "cancelled", "abandoned")
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass(slots=True)
@@ -195,11 +195,7 @@ class InMemoryWorkflowStore:
         self, instance_id: str, event: str, payload: dict
     ) -> WorkflowInstance | None:
         stored = self._by_id.get(instance_id)
-        if (
-            stored is None
-            or stored.status != "waiting"
-            or stored.waiting_on != event
-        ):
+        if stored is None or stored.status != "waiting" or stored.waiting_on != event:
             return None
         stored.state.setdefault("events", {})[event] = copy.deepcopy(payload)
         stored.completed_steps.append(event)
@@ -210,7 +206,5 @@ class InMemoryWorkflowStore:
         return copy.deepcopy(stored)
 
     async def recent(self, limit: int = 100) -> list[WorkflowInstance]:
-        ordered = sorted(
-            self._by_id.values(), key=lambda i: i.updated_at, reverse=True
-        )
+        ordered = sorted(self._by_id.values(), key=lambda i: i.updated_at, reverse=True)
         return [copy.deepcopy(i) for i in ordered[:limit]]

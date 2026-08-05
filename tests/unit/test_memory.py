@@ -1,6 +1,7 @@
 """Tests for the in-memory store, scope isolation, and recall ranking."""
 
 from pathlib import Path
+
 import pytest
 
 from openloop.agents import load_agent
@@ -30,12 +31,8 @@ async def test_recall_is_scope_isolated():
 
 async def test_semantic_recall_orders_by_similarity():
     store = InMemoryStore()
-    await store.remember(
-        MemoryRecord(scope_key="s", text="far", embedding=[0.0, 1.0])
-    )
-    await store.remember(
-        MemoryRecord(scope_key="s", text="near", embedding=[1.0, 0.0])
-    )
+    await store.remember(MemoryRecord(scope_key="s", text="far", embedding=[0.0, 1.0]))
+    await store.remember(MemoryRecord(scope_key="s", text="near", embedding=[1.0, 0.0]))
     recalled = await store.recall("s", query_embedding=[0.9, 0.1], limit=2)
     assert recalled[0].text == "near"
 

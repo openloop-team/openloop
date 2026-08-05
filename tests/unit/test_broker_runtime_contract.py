@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -15,8 +15,7 @@ from openloop.broker_runtime import (
 )
 from openloop.tools.openhands_relay import RelayMode
 
-
-NOW = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
 OPERATION_ID = UUID("11111111-1111-4111-8111-111111111111")
 JOB_ID = UUID("22222222-2222-4222-8222-222222222222")
 CONVERSATION_ID = UUID("33333333-3333-4333-8333-333333333333")

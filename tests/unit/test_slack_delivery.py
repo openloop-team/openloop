@@ -31,8 +31,16 @@ class FakeSlackClient:
         self._seq = 0
 
     async def chat_postMessage(
-        self, *, channel, thread_ts=None, text=None, markdown_text=None,
-        blocks=None, metadata=None, unfurl_links=None, unfurl_media=None,
+        self,
+        *,
+        channel,
+        thread_ts=None,
+        text=None,
+        markdown_text=None,
+        blocks=None,
+        metadata=None,
+        unfurl_links=None,
+        unfurl_media=None,
     ):
         self._seq += 1
         ts = f"{self._seq}.0001"
@@ -52,8 +60,15 @@ class FakeSlackClient:
         return {"ts": ts}
 
     async def files_upload_v2(
-        self, *, content, filename, title=None, snippet_type=None,
-        channel=None, thread_ts=None, **kwargs
+        self,
+        *,
+        content,
+        filename,
+        title=None,
+        snippet_type=None,
+        channel=None,
+        thread_ts=None,
+        **kwargs,
     ):
         if self.upload_error:
             raise RuntimeError("missing files:write scope")
@@ -68,7 +83,10 @@ class FakeSlackClient:
             }
         )
         fid = f"F{len(self.uploads)}"
-        return {"ok": True, "files": [{"id": fid, "permalink": f"https://files.slack/{fid}"}]}
+        return {
+            "ok": True,
+            "files": [{"id": fid, "permalink": f"https://files.slack/{fid}"}],
+        }
 
     async def assistant_threads_setStatus(
         self, *, channel_id, thread_ts, status, loading_messages=None, **kwargs
@@ -192,9 +210,7 @@ async def test_recover_returns_existing_message_instead_of_duplicating():
 
     first = await delivery.post_final(_target(), "answer", key="s1:final")
     # The crash-retry path finds the tagged message and returns its id.
-    again = await delivery.post_final(
-        _target(), "answer", key="s1:final", recover=True
-    )
+    again = await delivery.post_final(_target(), "answer", key="s1:final", recover=True)
 
     assert again == first
     assert len(client.posted) == 1  # no duplicate
@@ -242,8 +258,12 @@ async def test_lookup_failure_degrades_to_posting():
 
 def _approval_request() -> ApprovalRequest:
     return ApprovalRequest(
-        agent="a", action="github.issues:write", tool="github",
-        permission="write", args={}, approvers=["@maciag.artur"],
+        agent="a",
+        action="github.issues:write",
+        tool="github",
+        permission="write",
+        args={},
+        approvers=["@maciag.artur"],
         summary="create issue",
     )
 
@@ -388,7 +408,9 @@ async def test_upload_failure_fallback_sanitizes_content():
     delivery = SlackSurfaceDelivery(client)
     artifact = Artifact(
         content="ERROR at line 3: <!channel> deploy failed <!here>",
-        title="Log", filename="run.log", summary="Run failed — log below.",
+        title="Log",
+        filename="run.log",
+        summary="Run failed — log below.",
     )
 
     await delivery.post_final(_target(), artifact)

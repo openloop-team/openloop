@@ -8,7 +8,7 @@ Requires the `vector` extension (the `pgvector/pgvector` image ships it).
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from openloop.memory.store import MemoryRecord
 from openloop.postgres import BorrowedPostgresStore
@@ -108,7 +108,7 @@ class PostgresMemoryStore(BorrowedPostgresStore):
                 text=row["text"],
                 kind=row["kind"],
                 metadata=json.loads(row["metadata"]) if row["metadata"] else {},
-                created_at=row["created_at"] or datetime.now(timezone.utc),
+                created_at=row["created_at"] or datetime.now(UTC),
             )
             for row in rows
         ]

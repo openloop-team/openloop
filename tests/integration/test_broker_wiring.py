@@ -10,7 +10,6 @@ import base64
 import logging
 import os
 from contextlib import AsyncExitStack
-from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -30,12 +29,14 @@ from openloop.wiring.broker import (
     build_broker_client,
     build_broker_service,
 )
+from tests.support.postgres import postgres_dsn, require_postgres
 from tests.support.settings import (
     IsolatedBrokerSettings,
     IsolatedCoprocessBrokerSettings,
+)
+from tests.support.settings import (
     IsolatedSettings as Settings,
 )
-from tests.support.postgres import require_postgres, postgres_dsn
 
 _DSN = postgres_dsn()
 
@@ -268,9 +269,11 @@ _EXTERNAL_RECEIPT_ROOT = bytes([4]) * 32
 def _external_settings(tmp_path, sock_dir, **overrides):
     identity_private = Ed25519PrivateKey.from_private_bytes(_EXTERNAL_SEED)
     identity_pub = identity_private.public_key().public_bytes_raw()
-    receipt_pub = _derive_receipt_key(
-        _EXTERNAL_RECEIPT_ROOT, "broker-receipt", "receipt-key-v1"
-    ).public_key().public_bytes_raw()
+    receipt_pub = (
+        _derive_receipt_key(_EXTERNAL_RECEIPT_ROOT, "broker-receipt", "receipt-key-v1")
+        .public_key()
+        .public_bytes_raw()
+    )
     ingress_root = tmp_path / "ingress"
     receipts_root = tmp_path / "receipts"
     for path in (ingress_root, receipts_root):

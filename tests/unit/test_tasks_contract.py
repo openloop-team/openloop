@@ -51,9 +51,15 @@ def test_profile_registry_matches_legacy_gate_decisions():
 
 def test_from_dict_rehydrates_old_flat_coding_worker_layout():
     old = {
-        "job_id": "j1", "repo": "a/b", "instruction": "x", "base": "main",
-        "agent": "dev", "agent_id": "id1", "approval_id": "ap1",
-        "session_id": "s1", "warm_key": "w1",
+        "job_id": "j1",
+        "repo": "a/b",
+        "instruction": "x",
+        "base": "main",
+        "agent": "dev",
+        "agent_id": "id1",
+        "approval_id": "ap1",
+        "session_id": "s1",
+        "warm_key": "w1",
         "worker_state": {"job_id": "j1", "repo": "a/b", "branch": "openloop/job-j1"},
     }
     t = WorkspaceTask.from_dict(old)
@@ -82,9 +88,10 @@ def test_workspace_task_budget_usd_roundtrips():
     assert again.budget_usd == 12.5
     assert again == t
     # Default is unset, not silently zero.
-    assert WorkspaceTask(
-        task_id="x", profile="code", entry_action="code:write"
-    ).budget_usd is None
+    assert (
+        WorkspaceTask(task_id="x", profile="code", entry_action="code:write").budget_usd
+        is None
+    )
 
 
 def test_from_dict_rehydrates_old_direct_worker_checkpoint_layout():

@@ -15,8 +15,12 @@ from openloop.sessions import (
 def _scope(*, agent="dev-platform", channel="C1", thread="100.1"):
     # event_id is deliberately varied/None — it must NOT affect the thread scope.
     return SurfaceTarget(
-        surface="slack", workspace="acme", agent=agent,
-        channel=channel, thread=thread, event_id="ignored",
+        surface="slack",
+        workspace="acme",
+        agent=agent,
+        channel=channel,
+        thread=thread,
+        event_id="ignored",
     )
 
 
@@ -116,7 +120,7 @@ async def test_try_begin_turn_is_exclusive():
     scope = _scope()
     await store.append_inbox(scope, "e1", {"text": "one"})
 
-    assert await store.try_begin_turn(scope) is True   # first handler wins
+    assert await store.try_begin_turn(scope) is True  # first handler wins
     assert await store.try_begin_turn(scope) is False  # second is refused
 
     await store.end_turn(scope)
@@ -150,12 +154,12 @@ async def test_reset_active_claims_unwedges_a_crashed_leader():
     store = InMemoryThreadRecordStore()
     scope = _scope()
     await store.append_inbox(scope, "e1", {"text": "one"})
-    assert await store.try_begin_turn(scope) is True   # "leader" claims...
+    assert await store.try_begin_turn(scope) is True  # "leader" claims...
     # ...then "crashes" (never releases). A second claim is refused.
     assert await store.try_begin_turn(scope) is False
 
     assert await store.reset_active_claims() == 1
-    assert await store.try_begin_turn(scope) is True   # claimable again
+    assert await store.try_begin_turn(scope) is True  # claimable again
 
 
 # --- warm-context handle (Phase B) ---

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, StrEnum
 from uuid import UUID
 
 from openloop.broker.errors import BrokerError
@@ -31,15 +31,12 @@ from .receipts import (
 )
 
 
-class RecoveryOutcome(str, Enum):
+class RecoveryOutcome(StrEnum):
     REPAIRED = "repaired"
     DEFERRED = "deferred"
     STALE = "stale"
     FAILED_CLOSED = "failed_closed"
     ERROR = "error"
-
-    def __str__(self) -> str:
-        return self.value
 
 
 class _ReceiptLookupStatus(Enum):
@@ -87,9 +84,7 @@ class RecoveryItemReport:
         if self.source_generation_state is not None and not isinstance(
             self.source_generation_state, GenerationState
         ):
-            raise TypeError(
-                "source_generation_state must be a GenerationState or None"
-            )
+            raise TypeError("source_generation_state must be a GenerationState or None")
         if not isinstance(self.outcome, RecoveryOutcome):
             raise TypeError("outcome must be a RecoveryOutcome")
         if self.reason_code not in RECOVERY_REASON_CODES:
@@ -106,9 +101,7 @@ class RecoveryPassReport:
     error: int
 
     @classmethod
-    def from_items(
-        cls, items: tuple[RecoveryItemReport, ...]
-    ) -> "RecoveryPassReport":
+    def from_items(cls, items: tuple[RecoveryItemReport, ...]) -> RecoveryPassReport:
         if not isinstance(items, tuple) or any(
             not isinstance(item, RecoveryItemReport) for item in items
         ):
@@ -191,9 +184,7 @@ class BrokerLifecycleReconciler:
             reason_code=reason_code,
         )
 
-    async def _recover_one(
-        self, candidate: RecoveryCandidate
-    ) -> RecoveryItemReport:
+    async def _recover_one(self, candidate: RecoveryCandidate) -> RecoveryItemReport:
         try:
             snapshot = await self._ledger.inspect_job_for_recovery(
                 candidate.owner, candidate.job_id
@@ -204,16 +195,12 @@ class BrokerLifecycleReconciler:
                 SegmentCoordinatorCode.STATE_CONFLICT,
                 SegmentCoordinatorCode.IDEMPOTENCY_CONFLICT,
             }:
-                return self._report(
-                    candidate, RecoveryOutcome.ERROR, "recovery_error"
-                )
+                return self._report(candidate, RecoveryOutcome.ERROR, "recovery_error")
             return await self._after_conflict(candidate)
         except BrokerError:
             return await self._after_conflict(candidate)
         except Exception:
-            return self._report(
-                candidate, RecoveryOutcome.ERROR, "recovery_error"
-            )
+            return self._report(candidate, RecoveryOutcome.ERROR, "recovery_error")
 
     async def _dispatch(
         self, candidate: RecoveryCandidate, snapshot: RecoverySnapshot
@@ -229,9 +216,7 @@ class BrokerLifecycleReconciler:
             or generation is None
             or snapshot.current_generation != generation.generation
         ):
-            return self._report(
-                candidate, RecoveryOutcome.STALE, "state_changed"
-            )
+            return self._report(candidate, RecoveryOutcome.STALE, "state_changed")
         if generation.state is GenerationState.RUNNING:
             return await self._running(candidate, snapshot)
         if generation.state is GenerationState.QUIESCING:
@@ -261,9 +246,7 @@ class BrokerLifecycleReconciler:
             TerminalOutcome.FAILED,
         )
         await self._finish_finalizing(
-            await self._ledger.inspect_job_for_recovery(
-                snapshot.owner, snapshot.job_id
-            )
+            await self._ledger.inspect_job_for_recovery(snapshot.owner, snapshot.job_id)
         )
         return self._report(
             candidate,
@@ -279,9 +262,7 @@ class BrokerLifecycleReconciler:
         if candidate.observed_at < generation.execution_lease_deadline:
             operation_id = generation.pending_operation_id
             if operation_id is None or snapshot.pending_operation_id != operation_id:
-                return self._report(
-                    candidate, RecoveryOutcome.ERROR, "recovery_error"
-                )
+                return self._report(candidate, RecoveryOutcome.ERROR, "recovery_error")
             await self._coordinator.quiesce_for_recovery(snapshot)
             await self._ledger.mark_quiesced(
                 snapshot.owner,
@@ -302,9 +283,7 @@ class BrokerLifecycleReconciler:
             TerminalOutcome.FAILED,
         )
         await self._finish_finalizing(
-            await self._ledger.inspect_job_for_recovery(
-                snapshot.owner, snapshot.job_id
-            )
+            await self._ledger.inspect_job_for_recovery(snapshot.owner, snapshot.job_id)
         )
         return self._report(
             candidate, RecoveryOutcome.FAILED_CLOSED, "checkpoint_expired"
@@ -388,9 +367,7 @@ class BrokerLifecycleReconciler:
             or current_generation.generation != generation.generation
             or current_generation.state is not GenerationState.QUIESCED
         ):
-            return self._report(
-                candidate, RecoveryOutcome.STALE, "state_changed"
-            )
+            return self._report(candidate, RecoveryOutcome.STALE, "state_changed")
         if late_status is _ReceiptLookupStatus.VALID:
             assert late_receipt is not None
             await self._park(current, late_receipt)
@@ -406,9 +383,7 @@ class BrokerLifecycleReconciler:
             TerminalOutcome.FAILED,
         )
         await self._finish_finalizing(
-            await self._ledger.inspect_job_for_recovery(
-                current.owner, current.job_id
-            )
+            await self._ledger.inspect_job_for_recovery(current.owner, current.job_id)
         )
         return self._report(
             candidate, RecoveryOutcome.FAILED_CLOSED, "checkpoint_expired"
@@ -450,9 +425,7 @@ class BrokerLifecycleReconciler:
             or snapshot.pending_operation_id != generation.pending_operation_id
             or receipt_key(generation.receipt) != self._receipt_lookup_key(snapshot)
         ):
-            return self._report(
-                candidate, RecoveryOutcome.ERROR, "recovery_error"
-            )
+            return self._report(candidate, RecoveryOutcome.ERROR, "recovery_error")
         await self._coordinator.release_for_recovery(snapshot)
         await self._ledger.mark_released(
             snapshot.owner,
@@ -460,9 +433,7 @@ class BrokerLifecycleReconciler:
             snapshot.job_id,
             generation.generation,
         )
-        return self._report(
-            candidate, RecoveryOutcome.REPAIRED, "release_completed"
-        )
+        return self._report(candidate, RecoveryOutcome.REPAIRED, "release_completed")
 
     async def _finish_finalizing(self, snapshot: RecoverySnapshot) -> None:
         if (
@@ -480,25 +451,17 @@ class BrokerLifecycleReconciler:
                 snapshot.terminal_outcome,
             )
             operation_id = ticket.operation_id
-        await self._ledger.mark_terminal(
-            snapshot.owner, operation_id, snapshot.job_id
-        )
+        await self._ledger.mark_terminal(snapshot.owner, operation_id, snapshot.job_id)
 
-    async def _after_conflict(
-        self, candidate: RecoveryCandidate
-    ) -> RecoveryItemReport:
+    async def _after_conflict(self, candidate: RecoveryCandidate) -> RecoveryItemReport:
         try:
             snapshot = await self._ledger.inspect_job_for_recovery(
                 candidate.owner, candidate.job_id
             )
         except Exception:
-            return self._report(
-                candidate, RecoveryOutcome.ERROR, "recovery_error"
-            )
+            return self._report(candidate, RecoveryOutcome.ERROR, "recovery_error")
         if snapshot.state in {JobState.PARKED, JobState.TERMINAL}:
-            return self._report(
-                candidate, RecoveryOutcome.REPAIRED, "state_changed"
-            )
+            return self._report(candidate, RecoveryOutcome.REPAIRED, "state_changed")
         return self._report(candidate, RecoveryOutcome.STALE, "state_changed")
 
 

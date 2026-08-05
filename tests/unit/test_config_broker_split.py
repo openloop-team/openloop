@@ -6,13 +6,13 @@ import pytest
 from pydantic import SecretStr, ValidationError, field_validator
 
 from openloop.broker_config import (
-    BrokerClientConfig,
-    BrokerServiceConfig,
     DEFAULT_EXTERNAL_BROKER_CHECKPOINT_RECEIPT_ROOT,
     DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR,
     DEFAULT_EXTERNAL_BROKER_INGRESS_ROOT,
     DEFAULT_EXTERNAL_BROKER_RUNTIME_ROOT,
     DEFAULT_EXTERNAL_BROKER_STATE_ROOT,
+    BrokerClientConfig,
+    BrokerServiceConfig,
 )
 from openloop.config import BrokerSettings, RuntimeSettings
 from tests.support.settings import (
@@ -195,12 +195,8 @@ def test_broker_public_keys_round_trip_through_env_json(monkeypatch):
 
     settings = BrokerSettings(_env_file=None)
 
-    assert settings.broker_identity_public_keys == {
-        "identity-v1": "cHVibGljLWtleQ=="
-    }
-    assert settings.broker_receipt_public_keys == {
-        "receipt-key-v1": "cmVjZWlwdC1rZXk="
-    }
+    assert settings.broker_identity_public_keys == {"identity-v1": "cHVibGljLWtleQ=="}
+    assert settings.broker_receipt_public_keys == {"receipt-key-v1": "cmVjZWlwdC1rZXk="}
 
 
 def test_uid_settings_are_owned_by_the_process_that_uses_them(monkeypatch):

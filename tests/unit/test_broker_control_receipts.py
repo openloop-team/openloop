@@ -17,7 +17,6 @@ from openloop.broker_control.receipts import (
 )
 from openloop.broker_rpc.keys import VerificationKeySet
 
-
 JOB_ID = UUID("00000000-0000-4000-8000-000000000701")
 CONVERSATION_ID = UUID("00000000-0000-4000-8000-000000000702")
 

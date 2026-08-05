@@ -25,7 +25,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Protocol
 from uuid import UUID
 
 from openloop.broker.models import (
@@ -40,6 +40,7 @@ from openloop.broker_control.workspace_ingress import WorkspaceIngressProblem
 from openloop.broker_rpc.capability import JobCapability
 from openloop.broker_rpc.client import BrokerRpcClient
 from openloop.openhands.workspace_protocol import ArchiveStreamResult
+from openloop.tools.openhands_artifacts import WorkspaceArtifact
 from openloop.tools.openhands_relay_client import (
     RelayClientEndpoint,
     RelayMode,
@@ -54,7 +55,28 @@ _BRIDGE_TIMEOUT_SECONDS = 135.0
 WorkspaceFactory = Callable[[RelayClientEndpoint], object]
 
 
-class WorkspaceIngress:
+class CheckpointReceiptStore(Protocol):
+    """The one publish call this adapter makes against the receipt store.
+
+    Same reasoning as WorkspaceIngress below: the implementation
+    (broker_control.LocalCheckpointReceiptStore) is on the far side of the
+    broker boundary, so this side describes the shape it needs instead of
+    importing the class.
+    """
+
+    async def publish(
+        self, key: CheckpointReceiptKey, descriptor: WorkspaceArtifact
+    ) -> SignedCheckpointReceipt: ...
+
+
+class WorkspaceIngress(Protocol):
+    """The producer-side staging calls this adapter needs, and nothing more.
+
+    A Protocol, not a base class: the only implementation is
+    broker_control.LocalWorkspaceIngress, which lives on the other side of the
+    broker boundary and must not have to inherit from anything here.
+    """
+
     def stage(self, job_id: UUID, generation: int, source: Path) -> object: ...
 
     def prune(self, job_id: UUID, generation: int) -> None: ...
@@ -121,7 +143,7 @@ class BrokerWorkspaceAdapter:
         client: BrokerRpcClient,
         loop: asyncio.AbstractEventLoop,
         receipt_issuer: object | None = None,
-        checkpoint_store: object | None = None,
+        checkpoint_store: CheckpointReceiptStore | None = None,
         workspace_ingress: WorkspaceIngress | None = None,
         tenant_id: str = "openloop",
         workspace_factory: WorkspaceFactory = create_relay_workspace,
@@ -176,7 +198,10 @@ class BrokerWorkspaceAdapter:
             )
             if created.ticket.job_id is None or created.ticket.conversation_id is None:
                 raise BrokerWorkspaceError("broker create returned incomplete identity")
-            if broker_job_id is not None and str(created.ticket.job_id) != broker_job_id:
+            if (
+                broker_job_id is not None
+                and str(created.ticket.job_id) != broker_job_id
+            ):
                 raise BrokerWorkspaceError("persisted broker job identity mismatch")
             state = _JobState(
                 broker_job_id=created.ticket.job_id,
@@ -186,9 +211,8 @@ class BrokerWorkspaceAdapter:
             )
             self._jobs[job_id] = state
         elif (
-            (broker_job_id is not None and str(state.broker_job_id) != broker_job_id)
-            or state.current_generation != current_generation
-        ):
+            broker_job_id is not None and str(state.broker_job_id) != broker_job_id
+        ) or state.current_generation != current_generation:
             raise BrokerWorkspaceError("broker job cursor mismatch")
         assert state.conversation_id is not None
         return BrokerGenerationIdentity(
@@ -251,28 +275,28 @@ class BrokerWorkspaceAdapter:
         return workspace_obj
 
     def generation_identity(self, job_id: str) -> BrokerGenerationIdentity:
-        state = self._running(job_id)
+        state, generation = self._running(job_id)
         assert state.conversation_id is not None
         return BrokerGenerationIdentity(
             state.broker_job_id,
             state.conversation_id,
-            state.running_generation,
+            generation,
         )
 
     def websocket_factory(self, job_id: str):
-        state = self._running(job_id)
+        state, _generation = self._running(job_id)
         if state.endpoint is None:
             raise BrokerWorkspaceError("broker relay endpoint is unavailable")
         return relay_websocket_callback_client_factory(state.endpoint)
 
     def checkpoint_key(self, job_id: str, barrier_id: str) -> CheckpointReceiptKey:
-        state = self._running(job_id)
+        state, generation = self._running(job_id)
         assert state.conversation_id is not None
         return CheckpointReceiptKey(
             self._tenant_id,
             state.broker_job_id,
             state.conversation_id,
-            state.running_generation,
+            generation,
             barrier_id,
         )
 
@@ -376,22 +400,27 @@ class BrokerWorkspaceAdapter:
     # signed receipt is produced by the checkpoint store from the captured
     # artifact (phase 3b-iii); these methods only carry it into the broker.
 
-    def _running(self, job_id: str) -> _JobState:
+    def _running(self, job_id: str) -> tuple[_JobState, int]:
+        """The job's state and its running generation, which is never None here.
+
+        The generation comes back alongside the state rather than being read off
+        it: _JobState.running_generation is Optional across the job's whole
+        lifetime, but having passed the guard below it is an int, and returning
+        it separately is what lets every caller treat it as one.
+        """
         state = self._jobs.get(job_id)
         if state is None or state.running_generation is None:
-            raise BrokerWorkspaceError(
-                f"no running broker segment for job {job_id!r}"
-            )
-        return state
+            raise BrokerWorkspaceError(f"no running broker segment for job {job_id!r}")
+        return state, state.running_generation
 
     def quiesce(self, job_id: str, barrier_id: str) -> None:
         """Quiesce the running segment at a confirmation barrier (checkpoint)."""
-        state = self._running(job_id)
+        state, generation = self._running(job_id)
         result = self._bridge(
             self._client.quiesce_segment(
                 state.broker_job_id,
-                state.running_generation,
-                _quiesce_idempotency_key(job_id, state.running_generation),
+                generation,
+                _quiesce_idempotency_key(job_id, generation),
                 barrier_id,
                 state.capability,
             )
@@ -411,8 +440,7 @@ class BrokerWorkspaceAdapter:
         The next :meth:`create` for this job resumes into the following
         generation (cold resume from durable conversation state).
         """
-        state = self._running(job_id)
-        generation = state.running_generation
+        state, generation = self._running(job_id)
         self._bridge(
             self._client.release_segment(
                 state.broker_job_id,
@@ -435,8 +463,7 @@ class BrokerWorkspaceAdapter:
         outcome: TerminalOutcome = TerminalOutcome.SUCCESS,
     ) -> None:
         """Release the quiesced segment to FINALIZING and finalize the job."""
-        state = self._running(job_id)
-        generation = state.running_generation
+        state, generation = self._running(job_id)
         self._bridge(
             self._client.release_segment(
                 state.broker_job_id,

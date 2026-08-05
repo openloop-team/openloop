@@ -6,7 +6,6 @@ import math
 import subprocess
 from typing import Any
 
-
 DEFAULT_PROCESS_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 

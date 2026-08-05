@@ -20,10 +20,7 @@ class FakeClock:
 def test_limit_scope_key_is_tenant_shaped():
     # One tenant today, but the key carries the tenant dimension so Phase 7
     # swaps key contents, not the seam.
-    assert (
-        limit_scope_key(_agent())
-        == "tenant:default:ws:acme:agent:dev-platform"
-    )
+    assert limit_scope_key(_agent()) == "tenant:default:ws:acme:agent:dev-platform"
     assert limit_scope_key(_agent(), tenant="beta").startswith("tenant:beta:")
 
 

@@ -67,11 +67,21 @@ class PullReadArgs(_GithubArgs):
 
     _strip = field_validator("repo", mode="before")(_stripped)
 
+
 # ToolResult.data goes back to the model verbatim, so trim GitHub's verbose
 # payloads (nested user/reactions/_links objects) to what the model needs.
 _ISSUE_FIELDS = (
-    "number", "title", "state", "html_url", "user", "labels", "assignees",
-    "created_at", "updated_at", "comments", "body",
+    "number",
+    "title",
+    "state",
+    "html_url",
+    "user",
+    "labels",
+    "assignees",
+    "created_at",
+    "updated_at",
+    "comments",
+    "body",
 )
 _PULL_FIELDS = _ISSUE_FIELDS + ("draft", "merged", "merged_at", "head", "base")
 _BODY_MAX_CHARS = 2000
@@ -224,9 +234,7 @@ class GitHubConnector:
         # Schemas are GENERATED from the typed args models the gateway parses
         # with, so declaration and enforcement cannot drift.
         if permission == "issues:write":
-            return _spec(
-                "Create a new GitHub issue in a repository.", IssueWriteArgs
-            )
+            return _spec("Create a new GitHub issue in a repository.", IssueWriteArgs)
         if permission == "issues:read":
             return _spec("Read a GitHub issue by number.", IssueReadArgs)
         if permission == "pulls:write":

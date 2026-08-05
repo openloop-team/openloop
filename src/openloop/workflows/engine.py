@@ -43,9 +43,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from functools import partial
+from typing import Any
 
 from openloop.workflows.store import (
     TERMINAL,
@@ -79,7 +80,9 @@ class WorkflowContext:
             await self._checkpoint(self.instance)
 
 
-StepFn = Callable[[WorkflowContext], Awaitable[None]]
+# Coroutine, not Awaitable: steps are handed to asyncio.create_task, which does
+# not accept an arbitrary awaitable. Every step is an `async def` already.
+StepFn = Callable[[WorkflowContext], Coroutine[Any, Any, None]]
 
 
 @dataclass(slots=True)
@@ -105,7 +108,7 @@ class Workflow:
     # Optional: derive the instance's step list from its immutable initial
     # state (e.g. profile). Deterministic across re-drives, so the engine's
     # name-based completed-step skipping is unchanged.
-    steps_resolver: "Callable[[dict], list[Step]] | None" = None
+    steps_resolver: Callable[[dict], list[Step]] | None = None
 
     def steps_for(self, instance) -> list[Step]:
         if self.steps_resolver is not None:
@@ -141,9 +144,7 @@ class WorkflowEngine:
         self._progress_callbacks: list[
             Callable[[WorkflowInstance], Awaitable[None]]
         ] = []
-        self._park_callbacks: list[
-            Callable[[WorkflowInstance], Awaitable[None]]
-        ] = []
+        self._park_callbacks: list[Callable[[WorkflowInstance], Awaitable[None]]] = []
         # Strong refs to in-flight progress notifications, keyed by instance so a
         # terminal transition can drain just that instance's stragglers (not other
         # workers') before delivering the final answer. Each self-removes on done.
@@ -244,7 +245,9 @@ class WorkflowEngine:
             return await self.store.get(instance_id)
         return await task
 
-    async def cancel(self, instance_id: str, reason: str = "") -> WorkflowInstance | None:
+    async def cancel(
+        self, instance_id: str, reason: str = ""
+    ) -> WorkflowInstance | None:
         """Cancel a parked/running instance (e.g. its approval was denied).
 
         Atomic across replicas: the winning cancel bumps ``drive_gen``, so a
@@ -379,7 +382,9 @@ class WorkflowEngine:
                 instance.status = "failed"
                 instance.error = str(exc)
                 await self._write_owned(instance, gen, release=True)
-                logger.exception("workflow %s failed at step %s", instance.id, step.name)
+                logger.exception(
+                    "workflow %s failed at step %s", instance.id, step.name
+                )
                 await self._notify_terminal(instance)
                 return instance
             instance.completed_steps.append(step.name)
@@ -407,9 +412,7 @@ class WorkflowEngine:
             instance.drive_gen = gen + 1
             instance.leased_until = None
 
-    async def _checkpoint_owned(
-        self, instance: WorkflowInstance, *, gen: int
-    ) -> None:
+    async def _checkpoint_owned(self, instance: WorkflowInstance, *, gen: int) -> None:
         """Mid-step checkpoint: fenced state write plus the progress signal."""
         await self._write_owned(instance, gen)
         if instance.status == "running":
@@ -488,9 +491,14 @@ class WorkflowEngine:
         for callback in self._progress_callbacks:
             task = asyncio.create_task(self._run_progress(callback, instance))
             self._progress_tasks.setdefault(instance.id, set()).add(task)
-            task.add_done_callback(
-                lambda t, iid=instance.id: self._discard_progress(iid, t)
-            )
+
+            # A named function rather than a lambda: the default-argument trick
+            # that pins instance.id per iteration leaves mypy unable to infer
+            # the callback's signature.
+            def _discard(t: asyncio.Task, iid: str = instance.id) -> None:
+                self._discard_progress(iid, t)
+
+            task.add_done_callback(_discard)
 
     def _discard_progress(self, instance_id: str, task: asyncio.Task) -> None:
         tasks = self._progress_tasks.get(instance_id)
@@ -527,9 +535,7 @@ class WorkflowEngine:
         try:
             await callback(instance)
         except Exception:
-            logger.exception(
-                "workflow progress callback failed for %s", instance.id
-            )
+            logger.exception("workflow progress callback failed for %s", instance.id)
 
 
 def _has_pending_non_resumable_step(

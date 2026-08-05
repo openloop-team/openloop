@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
 import re
 import unicodedata
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import StrEnum
 from uuid import UUID
-
 
 POSTGRES_BIGINT_MAX = 2**63 - 1
 MAX_BROKER_JSON_BYTES = 16 * 1024
@@ -19,9 +18,13 @@ _BASE_COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _SIGNED_RECEIPT = re.compile(r"[A-Za-z0-9_.-]+\Z")
 
 
-class _StringEnum(str, Enum):
-    def __str__(self) -> str:
-        return self.value
+class _StringEnum(StrEnum):
+    """Kept as a named base so the enums below read as one family.
+
+    It carries no behavior of its own: StrEnum already renders as the member's
+    value under str(), f-strings, and %s, which is what the hand-written
+    __str__ here used to do.
+    """
 
 
 class JobState(_StringEnum):
@@ -62,7 +65,7 @@ class IsolationMode(_StringEnum):
     SHARED = "shared"
     DEDICATED = "dedicated"
 
-    def allows(self, required: "IsolationMode") -> bool:
+    def allows(self, required: IsolationMode) -> bool:
         if not isinstance(required, IsolationMode):
             raise TypeError("required must be an IsolationMode")
         rank = {IsolationMode.SHARED: 0, IsolationMode.DEDICATED: 1}
@@ -98,9 +101,7 @@ def _contains_control(value: str) -> bool:
     return any(unicodedata.category(character) == "Cc" for character in value)
 
 
-def _validate_utf8(
-    name: str, value: object, *, minimum: int, maximum: int
-) -> str:
+def _validate_utf8(name: str, value: object, *, minimum: int, maximum: int) -> str:
     text = _require_string(name, value)
     length = len(text.encode("utf-8"))
     if not minimum <= length <= maximum:
@@ -152,7 +153,9 @@ def validate_sha256(name: str, value: object) -> str:
 def validate_base_commit(value: object) -> str:
     text = _require_string("base_commit", value)
     if _BASE_COMMIT.fullmatch(text) is None:
-        raise ValueError("base_commit must be 40 or 64 lowercase hexadecimal characters")
+        raise ValueError(
+            "base_commit must be 40 or 64 lowercase hexadecimal characters"
+        )
     return text
 
 
@@ -326,9 +329,7 @@ class JobRecord:
     created_at: datetime
     updated_at: datetime
     minimum_isolation: IsolationMode | None = None
-    authorization: JobAuthorizationMetadata | None = field(
-        default=None, repr=False
-    )
+    authorization: JobAuthorizationMetadata | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         validate_uuid("job_id", self.job_id)
@@ -642,9 +643,7 @@ class RecoverySnapshot:
     updated_at: datetime
     generation_record: RecoveryGenerationSnapshot | None
     minimum_isolation: IsolationMode | None = None
-    authorization: JobAuthorizationMetadata | None = field(
-        default=None, repr=False
-    )
+    authorization: JobAuthorizationMetadata | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)

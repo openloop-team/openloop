@@ -2,8 +2,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from openloop.broker.ledger import BrokerLedger
 from openloop.broker.memory import InMemoryBrokerRepository
@@ -50,13 +50,12 @@ from openloop.broker_rpc.models import (
     QuiesceSegmentResult,
     ReleaseSegmentPayload,
     ReleaseSegmentResult,
-    RunningGenerationAccess,
     RpcRequest,
+    RunningGenerationAccess,
     StartSegmentPayload,
     StartSegmentResult,
 )
 from tests.support.broker_repository_contract import MutableClock, SequenceIds
-
 
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 OWNER = BrokerOwner("tenant-a", "workload-a")
@@ -186,7 +185,9 @@ def _token(
     )
 
 
-def _create_request(issuer, *, request_number=1, owner=OWNER, required=IsolationMode.SHARED):
+def _create_request(
+    issuer, *, request_number=1, owner=OWNER, required=IsolationMode.SHARED
+):
     return RpcRequest(
         RPC_VERSION,
         UUID(f"00000000-0000-4000-8000-{request_number:012d}"),
@@ -340,9 +341,7 @@ async def test_start_authorizes_before_coordinator_and_audits_operation():
     assert isinstance(created, CreateJobResult)
     access = _access(created)
     operation_id = UUID("00000000-0000-4000-8000-000000000451")
-    coordinator.start_result = StartSegmentResult(
-        operation_id, False, access
-    )
+    coordinator.start_result = StartSegmentResult(operation_id, False, access)
 
     response = await app.handle(_start_request(issuer, created), PEER)
 
@@ -496,9 +495,7 @@ async def test_start_audit_failure_returns_no_access_and_retry_can_replay():
     )
     audit.failed = False
 
-    hidden = await app.handle(
-        _start_request(issuer, created, request_number=93), PEER
-    )
+    hidden = await app.handle(_start_request(issuer, created, request_number=93), PEER)
     assert hidden.result is None
     assert hidden.failure.code is RpcErrorCode.INTERNAL
 
@@ -507,9 +504,7 @@ async def test_start_audit_failure_returns_no_access_and_retry_can_replay():
         True,
         _access(created),
     )
-    replay = await app.handle(
-        _start_request(issuer, created, request_number=94), PEER
-    )
+    replay = await app.handle(_start_request(issuer, created, request_number=94), PEER)
     assert isinstance(replay.result, StartSegmentResult)
     assert replay.result.replayed is True
 
@@ -552,9 +547,7 @@ async def test_lifecycle_methods_authorize_dispatch_and_audit_operations():
             RPC_VERSION,
             UUID("00000000-0000-4000-8000-000000000102"),
             WorkloadIntent.QUIESCE_SEGMENT,
-            _token(
-                issuer, intents=frozenset({WorkloadIntent.QUIESCE_SEGMENT})
-            ),
+            _token(issuer, intents=frozenset({WorkloadIntent.QUIESCE_SEGMENT})),
             created.capability,
             QuiesceSegmentPayload(
                 created.ticket.job_id,
@@ -567,9 +560,7 @@ async def test_lifecycle_methods_authorize_dispatch_and_audit_operations():
             RPC_VERSION,
             UUID("00000000-0000-4000-8000-000000000103"),
             WorkloadIntent.RELEASE_SEGMENT,
-            _token(
-                issuer, intents=frozenset({WorkloadIntent.RELEASE_SEGMENT})
-            ),
+            _token(issuer, intents=frozenset({WorkloadIntent.RELEASE_SEGMENT})),
             created.capability,
             ReleaseSegmentPayload(
                 created.ticket.job_id,

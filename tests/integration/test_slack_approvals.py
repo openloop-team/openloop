@@ -1,6 +1,7 @@
 """Tests for the Slack approval blocks and button resolution (no Bolt app)."""
 
 from pathlib import Path
+
 from openloop.agents import load_agent
 from openloop.runtime import Runtime, Task
 from openloop.surfaces.approvals import (
@@ -12,14 +13,14 @@ from openloop.surfaces.approvals import (
     openhands_decision_blocks,
     resolve_from_action,
 )
-from openloop.tools import ToolGateway
-from openloop.tools.github import GitHubConnector
 from openloop.testing import (
     FakeGitHub,
     ScriptedGateway,
     in_memory_workflow_engine,
     tool_call_response,
 )
+from openloop.tools import ToolGateway
+from openloop.tools.github import GitHubConnector
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
@@ -39,10 +40,13 @@ async def _pending(gateway):
 async def test_runtime_surfaces_approval_ids():
     agent = _agent()
     tools = ToolGateway(tools=[GitHubConnector(FakeGitHub())])
-    gateway = ScriptedGateway([
-        tool_call_response("m", [("c1", "github_issues_write",
-                                  {"repo": "acme/x", "title": "T"})]),
-    ])
+    gateway = ScriptedGateway(
+        [
+            tool_call_response(
+                "m", [("c1", "github_issues_write", {"repo": "acme/x", "title": "T"})]
+            ),
+        ]
+    )
     runtime = Runtime(
         agent, gateway=gateway, tools=tools, engine=in_memory_workflow_engine()
     )
@@ -73,9 +77,7 @@ def test_openhands_decision_blocks_are_explicit_and_opaque():
         OPENHANDS_ACCEPT_ACTION,
         OPENHANDS_REJECT_ACTION,
     }
-    assert all(
-        button["value"] == "job-1|decision-1" for button in actions["elements"]
-    )
+    assert all(button["value"] == "job-1|decision-1" for button in actions["elements"])
 
 
 async def test_resolve_approve_executes():

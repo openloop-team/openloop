@@ -3,20 +3,20 @@
 from __future__ import annotations
 
 import base64
-from datetime import UTC, datetime
 import hashlib
 import json
 import os
-from pathlib import Path
 import secrets
 import shutil
 import subprocess
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-import pytest
 
 from openloop.broker.models import (
     BrokerOwner,
@@ -29,7 +29,6 @@ from openloop.broker_rpc.capability import (
 )
 from openloop.broker_rpc.identity import WorkloadIdentityIssuer, WorkloadIntent
 from tests.support.socket_paths import create_short_socket_root
-
 
 pytestmark = [
     pytest.mark.integration,
@@ -319,9 +318,7 @@ def _start_broker(
     return container
 
 
-def _run_client(
-    *, image: str, volume: str, name: str, payload: dict[str, object]
-):
+def _run_client(*, image: str, volume: str, name: str, payload: dict[str, object]):
     result = _docker(
         [
             "run",
@@ -504,9 +501,7 @@ def test_hardened_linux_broker_rpc_has_no_docker_or_tcp_authority() -> None:
                 "create": issue(WorkloadIntent.CREATE_JOB),
                 "replay": issue(WorkloadIntent.CREATE_JOB),
                 "inspect": issue(WorkloadIntent.INSPECT_JOB),
-                "cross_tenant": issue(
-                    WorkloadIntent.INSPECT_JOB, owner=_OTHER_OWNER
-                ),
+                "cross_tenant": issue(WorkloadIntent.INSPECT_JOB, owner=_OTHER_OWNER),
                 "wrong_capability": issue(WorkloadIntent.INSPECT_JOB),
                 "create_dedicated": issue(
                     WorkloadIntent.CREATE_JOB,
@@ -620,13 +615,10 @@ def test_hardened_linux_broker_rpc_has_no_docker_or_tcp_authority() -> None:
                 "-d",
                 "brokercheck",
                 "-Atc",
-                "SELECT row_to_json(a)::text FROM broker_rpc_audit a "
-                "ORDER BY sequence",
+                "SELECT row_to_json(a)::text FROM broker_rpc_audit a ORDER BY sequence",
             ]
         ).stdout
-        logs = first_broker_logs + _docker(
-            ["logs", broker_two], check=False
-        ).stdout
+        logs = first_broker_logs + _docker(["logs", broker_two], check=False).stdout
         postgres_logs = _docker(["logs", postgres], check=False).stdout
         database_digest = JobCapabilityAuthority(
             CapabilityRootRing({"cap-v1": capability_root}, current_version="cap-v1")

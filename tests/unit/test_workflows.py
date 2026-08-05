@@ -3,8 +3,6 @@
 import asyncio
 from datetime import timedelta
 
-import pytest
-
 from openloop.workflows import (
     InMemoryWorkflowStore,
     Step,
@@ -33,7 +31,9 @@ def _engine(workflow=None, store=None):
 
 def _engine_with_lease(workflow, lease_seconds):
     store = InMemoryWorkflowStore()
-    return WorkflowEngine(store, {workflow.name: workflow}, lease_seconds=lease_seconds), store
+    return WorkflowEngine(
+        store, {workflow.name: workflow}, lease_seconds=lease_seconds
+    ), store
 
 
 async def test_runs_until_wait_node_then_parks():
@@ -146,8 +146,15 @@ async def test_resume_incomplete_redrives_running_only():
     from openloop.workflows import WorkflowInstance
 
     await store.create(WorkflowInstance(id="crashed", workflow="t", status="running"))
-    await store.create(WorkflowInstance(id="parked", workflow="t", status="waiting",
-                                        waiting_on="gate", completed_steps=["a"]))
+    await store.create(
+        WorkflowInstance(
+            id="parked",
+            workflow="t",
+            status="waiting",
+            waiting_on="gate",
+            completed_steps=["a"],
+        )
+    )
 
     resumed = await engine.resume_incomplete()
     assert resumed == ["crashed"]
@@ -161,12 +168,14 @@ async def test_resume_incomplete_skips_fresh_lease():
     engine, store = _engine()
     from openloop.workflows import WorkflowInstance
 
-    await store.create(WorkflowInstance(
-        id="active",
-        workflow="t",
-        status="running",
-        leased_until=_now() + timedelta(seconds=30),
-    ))
+    await store.create(
+        WorkflowInstance(
+            id="active",
+            workflow="t",
+            status="running",
+            leased_until=_now() + timedelta(seconds=30),
+        )
+    )
 
     resumed = await engine.resume_incomplete()
 
@@ -180,12 +189,14 @@ async def test_resume_incomplete_redrives_expired_lease():
     engine, store = _engine()
     from openloop.workflows import WorkflowInstance
 
-    await store.create(WorkflowInstance(
-        id="stale",
-        workflow="t",
-        status="running",
-        leased_until=_now() - timedelta(seconds=1),
-    ))
+    await store.create(
+        WorkflowInstance(
+            id="stale",
+            workflow="t",
+            status="running",
+            leased_until=_now() - timedelta(seconds=1),
+        )
+    )
 
     resumed = await engine.resume_incomplete()
 
@@ -342,9 +353,11 @@ async def test_resume_runs_when_only_resumable_steps_remain():
     calls: list[str] = []
     wf = _two_step_workflow(calls)
     engine, store = _engine(wf)
-    await store.create(WorkflowInstance(
-        id="i", workflow="t2", status="running", completed_steps=["gen"]
-    ))
+    await store.create(
+        WorkflowInstance(
+            id="i", workflow="t2", status="running", completed_steps=["gen"]
+        )
+    )
 
     resumed = await engine.resume_incomplete()
     assert resumed == ["i"]
@@ -395,9 +408,11 @@ async def test_start_does_not_redrive_existing_instance():
     calls: list[str] = []
     wf = _two_step_workflow(calls)
     engine, store = _engine(wf)
-    await store.create(WorkflowInstance(
-        id="i", workflow="t2", status="running", completed_steps=["gen"]
-    ))
+    await store.create(
+        WorkflowInstance(
+            id="i", workflow="t2", status="running", completed_steps=["gen"]
+        )
+    )
 
     inst = await engine.start("t2", "i", {})
     assert inst.status == "running"  # returned as-is
@@ -492,7 +507,9 @@ async def test_renew_lease_honors_fence_and_never_decreases_deadline():
     store = InMemoryWorkflowStore()
     await store.create(_instance(state={"v": 1}))
     claimed = await store.claim_drive("w1", lease_seconds=1)
-    assert await store.renew_lease("w1", claimed.drive_gen + 1, lease_seconds=99) is False
+    assert (
+        await store.renew_lease("w1", claimed.drive_gen + 1, lease_seconds=99) is False
+    )
     assert await store.renew_lease("w1", claimed.drive_gen, lease_seconds=60)
     renewed_until = store._by_id["w1"].leased_until
     # A full-field checkpoint must not roll the renewed lease back: the lease

@@ -12,7 +12,7 @@ from __future__ import annotations
 import copy
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 
@@ -54,9 +54,7 @@ class ApprovalRequest:
     # decision reconciler's sweep.
     effect_at: datetime | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    created_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 @runtime_checkable
@@ -147,4 +145,4 @@ class InMemoryApprovalStore:
     async def mark_reconciled(self, request_id: str) -> None:
         stored = self._by_id.get(request_id)
         if stored is not None and stored.effect_at is None:
-            stored.effect_at = datetime.now(timezone.utc)
+            stored.effect_at = datetime.now(UTC)

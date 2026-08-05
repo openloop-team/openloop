@@ -22,7 +22,6 @@ from pathlib import Path
 
 import pytest
 
-
 os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
 
 if (
@@ -51,7 +50,6 @@ from openloop.tools.openhands_relay import (
     install_relay_artifacts,
 )
 from tests.support.socket_paths import create_short_socket_root
-
 
 pytestmark = [
     pytest.mark.integration,

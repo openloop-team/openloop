@@ -9,7 +9,6 @@ from openloop.broker_control.secrets import (
     RuntimeSecretRootRing,
 )
 
-
 OWNER = BrokerOwner("tenant-a", "workload-a")
 JOB_ID = UUID("00000000-0000-4000-8000-000000000301")
 CONVERSATION_ID = UUID("00000000-0000-4000-8000-000000000302")
@@ -59,15 +58,9 @@ def test_runtime_secrets_are_deterministic_verified_and_redacted():
     assert len(values.relay_capability) == 43
     assert len(values.session_api_key) == 43
     assert len(values.conversation_secret) == 43
-    assert values.relay_capability == (
-        "AqHmbqyhp-UnSu28EBCIu1UjnOM-K3ogf-l5lPqzZ6E"
-    )
-    assert values.session_api_key == (
-        "py1KIaudV-8pmV-V3TgZrRFI9O7rVXiOmhaKSjB7w1Q"
-    )
-    assert values.conversation_secret == (
-        "iUdqTee-GlA4w7lGZ63FZsmNIcooe3PROwuVnBznCuQ"
-    )
+    assert values.relay_capability == ("AqHmbqyhp-UnSu28EBCIu1UjnOM-K3ogf-l5lPqzZ6E")
+    assert values.session_api_key == ("py1KIaudV-8pmV-V3TgZrRFI9O7rVXiOmhaKSjB7w1Q")
+    assert values.conversation_secret == ("iUdqTee-GlA4w7lGZ63FZsmNIcooe3PROwuVnBznCuQ")
     assert values.capability_digest == (
         "659419450471d565466a9843cac8f7748bfc56e3326f51ed0174ad123e474a5b"
     )

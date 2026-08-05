@@ -22,7 +22,6 @@ from openloop.tools.openhands_relay_client import (
 )
 from openloop.tools.openhands_relay_profile import compile_openhands_relay
 
-
 JOB_ID = uuid.UUID("fc04973b-dc6b-4472-8903-e0981fbbd38e")
 CONVERSATION_ID = uuid.UUID("9a1db585-06ba-47cd-952d-cd60c2d0d5d1")
 CAPABILITY = "r" * 43

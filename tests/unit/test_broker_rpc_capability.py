@@ -12,7 +12,6 @@ from openloop.broker_rpc.capability import (
     JobCapabilityAuthority,
 )
 
-
 OWNER = BrokerOwner("tenant-a", "workload-a")
 JOB_ID = UUID("00000000-0000-4000-8000-000000000201")
 ROOT_V1 = bytes(range(32))
@@ -30,9 +29,7 @@ def _authority(*, current="cap-v1"):
 
 def test_capability_has_fixed_domain_separated_vector_and_redacted_repr():
     authority = _authority()
-    metadata = authority.issue_metadata(
-        OWNER, JOB_ID, IsolationMode.DEDICATED
-    )
+    metadata = authority.issue_metadata(OWNER, JOB_ID, IsolationMode.DEDICATED)
     capability = authority.derive(OWNER, JOB_ID, metadata)
     assert metadata.key_version == "cap-v1"
     assert metadata.epoch == 1
@@ -57,9 +54,7 @@ def test_capability_has_fixed_domain_separated_vector_and_redacted_repr():
 )
 def test_capability_domains_are_independent(owner, job_id, epoch, key_version):
     authority = _authority()
-    original_metadata = authority.issue_metadata(
-        OWNER, JOB_ID, IsolationMode.SHARED
-    )
+    original_metadata = authority.issue_metadata(OWNER, JOB_ID, IsolationMode.SHARED)
     original = authority.derive(OWNER, JOB_ID, original_metadata)
     changed_metadata = type(original_metadata)(
         key_version=key_version,
@@ -107,7 +102,11 @@ def test_capability_root_file_is_exact_base64url_and_private(tmp_path):
 
 @pytest.mark.parametrize(
     "roots,current",
-    [({}, "cap-v1"), ({"cap-v1": b"short"}, "cap-v1"), ({"cap-v1": ROOT_V1}, "missing")],
+    [
+        ({}, "cap-v1"),
+        ({"cap-v1": b"short"}, "cap-v1"),
+        ({"cap-v1": ROOT_V1}, "missing"),
+    ],
 )
 def test_capability_root_ring_rejects_invalid_configuration(roots, current):
     with pytest.raises(CapabilityProblem):

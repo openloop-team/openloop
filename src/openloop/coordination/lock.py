@@ -34,8 +34,9 @@ import contextlib
 import hashlib
 import logging
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -127,8 +128,9 @@ async def guard(
             try:
                 await lock.release(key, token)
             except Exception:  # noqa: BLE001 — TTL is the backstop; never raise here
-                logger.warning("failed to release lock %r; it will expire", key,
-                               exc_info=True)
+                logger.warning(
+                    "failed to release lock %r; it will expire", key, exc_info=True
+                )
 
 
 class InProcessLock:
@@ -188,7 +190,7 @@ class RedisLock:
         self.namespace = namespace
 
     @classmethod
-    def from_url(cls, url: str, **kwargs) -> "RedisLock":
+    def from_url(cls, url: str, **kwargs) -> RedisLock:
         """Build from a Redis URL (imports ``redis`` lazily so it stays optional)."""
         import redis.asyncio as redis  # noqa: PLC0415 — optional dependency
 
@@ -220,7 +222,9 @@ class RedisLock:
 
     async def close(self) -> None:
         # redis-py 5 uses aclose(); older builds use close(). Tolerate both/none.
-        closer = getattr(self.client, "aclose", None) or getattr(self.client, "close", None)
+        closer = getattr(self.client, "aclose", None) or getattr(
+            self.client, "close", None
+        )
         if closer is not None:
             await closer()
 
@@ -248,14 +252,16 @@ class PostgresLock:
         self._max_size = max_size
         self._password = password
         self._pool = None  # asyncpg.Pool, created in setup()
-        self._held: dict[str, object] = {}  # token -> checked-out Connection
+        # Any, not object: the values are asyncpg Connections, which this module
+        # deliberately does not import, and it calls execute() on them.
+        self._held: dict[str, Any] = {}  # token -> checked-out Connection
 
     async def setup(self) -> None:
         import asyncpg  # noqa: PLC0415 — optional until a Postgres deploy needs it
 
         # min_size=0 keeps idle usage at zero, so explicitly borrow once here:
         # pool construction is lazy and is not itself a connectivity probe.
-        kwargs = {"min_size": 0, "max_size": self._max_size}
+        kwargs: dict[str, Any] = {"min_size": 0, "max_size": self._max_size}
         if self._password is not None:
             kwargs["password"] = self._password
         pool = await asyncpg.create_pool(self.dsn, **kwargs)
@@ -282,7 +288,9 @@ class PostgresLock:
         pool = self._require_pool()
         conn = await pool.acquire()
         try:
-            got = await conn.fetchval("SELECT pg_try_advisory_lock($1)", self._lock_id(key))
+            got = await conn.fetchval(
+                "SELECT pg_try_advisory_lock($1)", self._lock_id(key)
+            )
         except BaseException:
             await pool.release(conn)
             raise

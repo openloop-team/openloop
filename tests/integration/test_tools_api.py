@@ -4,9 +4,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from openloop.app import create_app
+from openloop.testing import FakeGitHub
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
-from openloop.testing import FakeGitHub
 
 
 @pytest.fixture
@@ -19,7 +19,7 @@ def client(settings):
             "tools_factory": lambda stores: ToolGateway(
                 tools=[GitHubConnector(fake)], approvals=stores.approvals
             )
-        }
+        },
     )
     with TestClient(app) as c:
         c.fake_github = fake  # type: ignore[attr-defined]

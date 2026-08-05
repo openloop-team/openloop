@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
@@ -41,7 +41,7 @@ class BrokerRpcPolicy:
         validate_lease_seconds(self.execution_lease_seconds)
 
 
-class SegmentCoordinatorCode(str, Enum):
+class SegmentCoordinatorCode(StrEnum):
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
     STATE_CONFLICT = "state_conflict"
     RUNTIME_UNAVAILABLE = "runtime_unavailable"

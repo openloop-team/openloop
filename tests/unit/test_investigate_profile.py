@@ -122,9 +122,7 @@ async def test_execute_investigate_provisions_a_readonly_workspace_and_cleans_up
 
 async def test_execute_investigate_without_investigator_fails_closed():
     conn = _connector()  # no investigator configured
-    args = conn.prepare_args(
-        "investigate:read", {"repo": "a/b", "question": "why?"}
-    )
+    args = conn.prepare_args("investigate:read", {"repo": "a/b", "question": "why?"})
     result = await conn.execute("investigate:read", args)
 
     assert result.ok is False
@@ -207,7 +205,9 @@ async def test_run_investigation_records_spend_for_the_invoking_agent(monkeypatc
     usage = InMemoryUsageStore()
     agent = make_agent("dev-platform", "acme", budget=Budget(per_task_usd=0.50))
     ledger = WorkerSpendLedger(
-        usage=usage, model="m", agents={"dev-platform": agent},
+        usage=usage,
+        model="m",
+        agents={"dev-platform": agent},
         default_agent="dev-platform",
     )
     orch = _investigation_orchestrator(monkeypatch, ledger)
@@ -235,7 +235,9 @@ async def test_run_investigation_fails_closed_over_the_per_task_cap(monkeypatch)
     usage = InMemoryUsageStore()
     agent = make_agent("dev-platform", "acme", budget=Budget(per_task_usd=0.10))
     ledger = WorkerSpendLedger(
-        usage=usage, model="m", agents={"dev-platform": agent},
+        usage=usage,
+        model="m",
+        agents={"dev-platform": agent},
         default_agent="dev-platform",
     )
     orch = _investigation_orchestrator(monkeypatch, ledger)

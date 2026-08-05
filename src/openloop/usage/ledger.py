@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
 from openloop.agents.schema import Agent
 from openloop.usage.budget import budget_scope_key, check_budget
@@ -88,9 +89,7 @@ class WorkerSpendLedger:
             agent.metadata.id: agent for agent in self.agents.values()
         }
 
-    def _agent_for(
-        self, agent_name: str | None, agent_id: str | None = None
-    ) -> Agent:
+    def _agent_for(self, agent_name: str | None, agent_id: str | None = None) -> Agent:
         if agent_id is not None:
             agent = self._agents_by_id.get(agent_id)
             if agent is None:
@@ -126,10 +125,7 @@ class WorkerSpendLedger:
         return self._agent_for(agent_name, agent_id).spec.budget.per_task_usd
 
     def _missing_cap_reason(self, agent: Agent) -> str | None:
-        if (
-            self.require_per_task_cap
-            and agent.spec.budget.per_task_usd is None
-        ):
+        if self.require_per_task_cap and agent.spec.budget.per_task_usd is None:
             return (
                 f"agent {agent.metadata.name} has no per-task spend cap, "
                 "required by this worker backend"
@@ -158,7 +154,9 @@ class WorkerSpendLedger:
         approval/approver/session here would lose them permanently.
         """
         agent = self._agent_for(agent_name, agent_id)
-        envelope = dict(
+        # Annotated because it is splatted into _record below: mypy cannot match
+        # a dict[str, str | None] against that signature's individual parameters.
+        envelope: dict[str, Any] = dict(
             job_id=job_id,
             approval_id=approval_id,
             approver=approver,
@@ -267,8 +265,7 @@ class WorkerSpendLedger:
                 "budget — failing closed (no push, no PR)"
             )
         logger.debug(
-            "worker job %s segment spend recorded: $%.4f (cumulative $%.4f) "
-            "against %s",
+            "worker job %s segment spend recorded: $%.4f (cumulative $%.4f) against %s",
             job_id,
             record_cost,
             cap_cost,

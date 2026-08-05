@@ -34,9 +34,7 @@ from tests.support.broker_repository_contract import SequenceIds
 
 def _receipt_fixture(tmp_path):
     ids = SequenceIds(700)
-    key = CheckpointReceiptKey(
-        "tenant-a", ids(), ids(), 3, "../barrier/with spaces/é"
-    )
+    key = CheckpointReceiptKey("tenant-a", ids(), ids(), 3, "../barrier/with spaces/é")
     private = Ed25519PrivateKey.generate()
     verifier = CheckpointReceiptVerifier(
         public_keys=VerificationKeySet({"receipt-v1": private.public_key()}),
@@ -88,9 +86,7 @@ def _shared_receipt_store(tmp_path, artifacts, verifier, private):
 
 
 async def test_local_receipt_publish_lookup_and_claim_equal_replay(tmp_path):
-    store, key, descriptor, verifier, artifacts, private = _receipt_fixture(
-        tmp_path
-    )
+    store, key, descriptor, verifier, artifacts, private = _receipt_fixture(tmp_path)
 
     first = await store.publish(key, descriptor)
     replay = await store.publish(key, descriptor)
@@ -251,9 +247,7 @@ async def test_read_only_locator_missing_tampered_and_wrong_owner_fail_closed(
     tmp_path,
 ):
     _, key, descriptor, verifier, artifacts, private = _receipt_fixture(tmp_path)
-    store, receipt_root = _shared_receipt_store(
-        tmp_path, artifacts, verifier, private
-    )
+    store, receipt_root = _shared_receipt_store(tmp_path, artifacts, verifier, private)
     await store.publish(key, descriptor)
     locator = ReadOnlyCheckpointReceiptLocator(
         root=receipt_root,
@@ -322,9 +316,7 @@ async def test_read_only_locator_accepts_verified_inode_unlinked_after_open(
     tmp_path, monkeypatch
 ):
     _, key, descriptor, verifier, artifacts, private = _receipt_fixture(tmp_path)
-    store, receipt_root = _shared_receipt_store(
-        tmp_path, artifacts, verifier, private
-    )
+    store, receipt_root = _shared_receipt_store(tmp_path, artifacts, verifier, private)
     signed = await store.publish(key, descriptor)
     sidecar = receipt_root / _dedicated_receipt_relpath(key)
     replacement = sidecar.parent / ".replacement"
@@ -357,9 +349,7 @@ async def test_read_only_locator_accepts_verified_inode_unlinked_after_open(
 
 async def test_shared_receipt_sweeps_only_unlocked_stale_temporaries(tmp_path):
     _, key, descriptor, verifier, artifacts, private = _receipt_fixture(tmp_path)
-    store, receipt_root = _shared_receipt_store(
-        tmp_path, artifacts, verifier, private
-    )
+    store, receipt_root = _shared_receipt_store(tmp_path, artifacts, verifier, private)
     await store.publish(key, descriptor)
     directory = (receipt_root / _dedicated_receipt_relpath(key)).parent
     orphan = directory / ".orphan.checkpoint-receipt.jwt.tmp"
@@ -382,9 +372,7 @@ async def test_shared_receipt_fsyncs_new_children_and_their_parents(
     tmp_path, monkeypatch
 ):
     _, key, descriptor, verifier, artifacts, private = _receipt_fixture(tmp_path)
-    store, receipt_root = _shared_receipt_store(
-        tmp_path, artifacts, verifier, private
-    )
+    store, receipt_root = _shared_receipt_store(tmp_path, artifacts, verifier, private)
     original_fsync = local_receipts_mod.os.fsync
     original_fstat = local_receipts_mod.os.fstat
     synced_inodes = []

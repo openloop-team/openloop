@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from openloop.agents.schema import Agent
@@ -19,9 +19,7 @@ class MemoryRecord:
     kind: str = "message"
     metadata: dict[str, str] = field(default_factory=dict)
     embedding: list[float] | None = None
-    created_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 def scope_key_for(agent: Agent, channel: str | None) -> str:
@@ -44,7 +42,9 @@ def scope_key_for(agent: Agent, channel: str | None) -> str:
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
+    # strict=True is free here: the guard above already returned on a length
+    # mismatch, so this asserts the invariant rather than changing behavior.
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(y * y for y in b))
     if na == 0.0 or nb == 0.0:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-
 ROOT = Path(__file__).parents[2]
 CONFIG = ROOT / "ops/docker-socket-adapter/haproxy.cfg"
 

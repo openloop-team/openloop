@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping
-from dataclasses import dataclass, field
 import hmac as stdlib_hmac
 import re
 import struct
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from uuid import UUID
 
 from cryptography.hazmat.primitives import hashes, hmac
@@ -21,7 +21,6 @@ from openloop.broker.models import (
     validate_sha256,
     validate_uuid,
 )
-
 
 _CONVERSATION_INFO = b"openloop.runtime-secrets.v1/conversation"
 _RELAY_INFO = b"openloop.runtime-secrets.v1/relay"
@@ -152,10 +151,7 @@ class DerivedRuntimeSecrets:
             "conversation_secret",
         ):
             value = getattr(self, name)
-            if (
-                not isinstance(value, str)
-                or _BASE64URL_43.fullmatch(value) is None
-            ):
+            if not isinstance(value, str) or _BASE64URL_43.fullmatch(value) is None:
                 raise ValueError(f"{name} must be a 43-character base64url token")
             try:
                 decoded = base64.urlsafe_b64decode(value + "=")
@@ -280,9 +276,7 @@ class RuntimeSecretAuthority:
         )
         capability_digest = _mac(
             _subkey(runtime_root, _CAPABILITY_VERIFY_INFO),
-            capability_context
-            + _length_prefixed(relay)
-            + _length_prefixed(session),
+            capability_context + _length_prefixed(relay) + _length_prefixed(session),
         ).hex()
         durable_digest = self.durable_digest_for(
             owner,

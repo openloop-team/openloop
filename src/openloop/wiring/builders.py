@@ -7,10 +7,10 @@ live in :mod:`openloop.wiring.compose`.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from openloop.agents.schema import Agent
 from openloop.approvals import ApprovalStore, InMemoryApprovalStore
@@ -18,12 +18,6 @@ from openloop.approvals.postgres import PostgresApprovalStore
 from openloop.checkpoints import CheckpointStore, InMemoryCheckpointStore
 from openloop.checkpoints.postgres import PostgresCheckpointStore
 from openloop.config import RuntimeSettings
-from openloop.credentials import (
-    CredentialResolver,
-    CredentialScope,
-    EnvCredentialResolver,
-    GitHubAppResolver,
-)
 from openloop.coordination import (
     DistributedLock,
     InProcessLock,
@@ -31,9 +25,19 @@ from openloop.coordination import (
     RedisLock,
     guard,
 )
+from openloop.credentials import (
+    CredentialResolver,
+    CredentialScope,
+    EnvCredentialResolver,
+    GitHubAppResolver,
+)
 from openloop.memory import Embedder, InMemoryStore, LiteLLMEmbedder, MemoryStore
 from openloop.memory.postgres import PostgresMemoryStore
 from openloop.models.gateway import ModelGateway
+from openloop.sandbox import (
+    HostSandbox,
+    Sandbox,
+)
 from openloop.sessions import (
     InMemorySurfaceSessionStore,
     InMemoryThreadRecordStore,
@@ -42,36 +46,38 @@ from openloop.sessions import (
 )
 from openloop.sessions.postgres import PostgresSurfaceSessionStore
 from openloop.sessions.threads import PostgresThreadRecordStore
+from openloop.tasks.investigation import RepoInvestigator
 from openloop.tools import ToolGateway
 from openloop.tools.aliases import _canonical_action
-from openloop.sandbox import (
-    HostSandbox,
-    Sandbox,
-)
-from openloop.tools.coding_worker import (
-    CodingWorker,
-    CodingWorkerConnector,
-    CODING_WORKER_CODE_WRITE,
-    BuiltinCodingWorker,
-    GitWorkspaceOrchestrator,
-)
-from openloop.tools.github import GitHubConnector, HttpGitHubClient
-from openloop.tools.mcp import HttpMCPClient, MCPConnector
 from openloop.tools.claude_worker import (
     ClaudeCodeCodingWorker,
     ClaudeCodeUnavailable,
 )
-from openloop.tools.workspace_pool import WarmWorkspacePool
+from openloop.tools.coding_worker import (
+    CODING_WORKER_CODE_WRITE,
+    BuiltinCodingWorker,
+    CodingWorker,
+    CodingWorkerConnector,
+    GitWorkspaceOrchestrator,
+)
+from openloop.tools.github import GitHubConnector, HttpGitHubClient
+from openloop.tools.mcp import HttpMCPClient, MCPConnector
 from openloop.tools.openhands_worker import (
     OpenHandsCodingWorker,
     OpenHandsUnavailable,
 )
-from openloop.tasks.investigation import RepoInvestigator
+from openloop.tools.workspace_pool import WarmWorkspacePool
 from openloop.usage import InMemoryUsageStore, UsageStore, WorkerSpendLedger
 from openloop.usage.postgres import PostgresUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowStore
 from openloop.workflows.coding_worker import build_workspace_task_workflow
 from openloop.workflows.postgres import PostgresWorkflowStore
+
+if TYPE_CHECKING:
+    # Annotation-only, to keep this module's import graph as flat as it is now:
+    # wiring.broker pulls in the whole broker RPC stack, and build_coding_worker
+    # only ever receives a handle that wiring.compose already built.
+    from openloop.wiring.broker import BrokerClientHandle
 
 log = logging.getLogger("openloop")
 
@@ -229,7 +235,8 @@ async def _setup_coordination(
                 "CROSS-PROCESS COORDINATION DISABLED: LOCK_BACKEND=%s could not "
                 "start; multiple replicas may run recovery concurrently. Falling "
                 "back to a process-local lock.",
-                settings.lock_backend, exc_info=True,
+                settings.lock_backend,
+                exc_info=True,
             )
         else:
             log.exception(
@@ -249,11 +256,18 @@ def build_github_credentials(settings: RuntimeSettings) -> CredentialResolver | 
     so it fails loudly, then degrades to the token if one is set — mirroring
     the lock backend's explicit-vs-auto policy.
     """
-    if settings.github_app_configured:
+    app_id = settings.github_app_id
+    key_path = settings.github_app_private_key_path
+    installation_id = settings.github_app_installation_id
+    # github_app_configured is exactly "all three are set", but it says so behind
+    # a property, so bind the three locally and test them here where the types
+    # narrow. Keeping the property in the condition would leave each use below
+    # as str | None.
+    if app_id and key_path and installation_id:
         try:
             import jwt
 
-            private_key = Path(settings.github_app_private_key_path).read_text()
+            private_key = Path(key_path).read_text()
             # Prove the WHOLE signing path at boot, not just importability:
             # PyJWT without its crypto backend, or a malformed key, would
             # otherwise pass this gate and fail on the first tool call — after
@@ -273,9 +287,9 @@ def build_github_credentials(settings: RuntimeSettings) -> CredentialResolver | 
                 settings.github_app_id,
             )
             return GitHubAppResolver(
-                settings.github_app_id,
+                app_id,
                 private_key,
-                settings.github_app_installation_id,
+                installation_id,
                 repositories=settings.github_app_repository_list or None,
             )
     if settings.github_token:
@@ -295,7 +309,7 @@ def _worker_workspace_root(settings: RuntimeSettings) -> Path | None:
     return None
 
 
-def build_worker_sandbox(settings: RuntimeSettings) -> "Sandbox | None":
+def build_worker_sandbox(settings: RuntimeSettings) -> Sandbox | None:
     """Build the builtin worker's host-only command executor.
 
     ``docker`` remains a marker for broker-hosted OpenHands, not an
@@ -316,7 +330,7 @@ def build_worker_sandbox(settings: RuntimeSettings) -> "Sandbox | None":
     return None
 
 
-def build_warm_workspace_pool(settings: RuntimeSettings) -> "WarmWorkspacePool | None":
+def build_warm_workspace_pool(settings: RuntimeSettings) -> WarmWorkspacePool | None:
     """The process-local warm-workspace pool (Phase B), or None when disabled.
 
     Off unless ``CODING_WORKER_WARM_CONTEXT`` is set. Shares the attempt-workspace
@@ -345,8 +359,8 @@ def _provider_key(settings: RuntimeSettings, model: str) -> str | None:
 
 
 def build_coding_worker(
-    settings: RuntimeSettings, broker_handle: object | None = None
-) -> "CodingWorker | None":
+    settings: RuntimeSettings, broker_handle: BrokerClientHandle | None = None
+) -> CodingWorker | None:
     """Pick the worker backend behind ``CODING_WORKER_BACKEND`` — fail-closed.
 
     Returns ``None`` when the requested backend can't run safely (missing
@@ -404,21 +418,24 @@ def build_coding_worker(
             return None
 
         docker = settings.coding_worker_sandbox == "docker"
-        if docker and (
-            not broker_enabled
-            or settings.broker_mode != "external"
-            or broker_handle is None
-        ):
-            log.error(
-                "containerized OpenHands requires the external broker: set "
-                "CODING_WORKER_OPENHANDS_BROKER_ENABLED=1, "
-                "BROKER_MODE=external, and provide a live broker client — "
-                "coding worker DISABLED"
-            )
-            return None
         docker_adapter = None
         artifact_store = None
         if docker:
+            # Nested rather than `if docker and (...)`, so the broker handle
+            # narrows to non-None for the rest of this block. Same condition,
+            # same message, same return — only the shape changed.
+            if (
+                not broker_enabled
+                or settings.broker_mode != "external"
+                or broker_handle is None
+            ):
+                log.error(
+                    "containerized OpenHands requires the external broker: set "
+                    "CODING_WORKER_OPENHANDS_BROKER_ENABLED=1, "
+                    "BROKER_MODE=external, and provide a live broker client — "
+                    "coding worker DISABLED"
+                )
+                return None
             master_secret = settings.coding_worker_openhands_state_master_key
             if master_secret is None:
                 log.error(
@@ -486,9 +503,7 @@ def build_coding_worker(
             network=settings.coding_worker_openhands_network,
             docker_adapter=docker_adapter,
             artifact_store=artifact_store,
-            cold_resume_enabled=(
-                settings.coding_worker_openhands_cold_resume_enabled
-            ),
+            cold_resume_enabled=(settings.coding_worker_openhands_cold_resume_enabled),
         )
         try:
             worker.probe()
@@ -552,7 +567,9 @@ def _exposes_coding_worker(agent: Agent) -> bool:
     # workspace_task/code:write — a raw comparison would hide a legacy-named
     # worker-exposing agent from the boot-time fail-closed cap gate and from
     # ledger owner attribution.
-    target = _canonical_action(f"{CodingWorkerConnector.name}.{CODING_WORKER_CODE_WRITE}")
+    target = _canonical_action(
+        f"{CodingWorkerConnector.name}.{CODING_WORKER_CODE_WRITE}"
+    )
     return any(
         _canonical_action(f"{t.name}.{p}") == target
         for t in agent.spec.tools
@@ -591,7 +608,7 @@ def _build_worker_ledger(
 def _uncapped_worker_agents(
     agents: dict[str, Agent],
     ledger: WorkerSpendLedger,
-    exposes: "Callable[[Agent], bool]" = _exposes_coding_worker,
+    exposes: Callable[[Agent], bool] = _exposes_coding_worker,
 ) -> list[str]:
     """Agents whose worker attempts would run without a per-task cap.
 
@@ -603,8 +620,7 @@ def _uncapped_worker_agents(
     exposed = {a.metadata.name: a for a in agents.values() if exposes(a)}
     exposed.setdefault(ledger.default_agent, agents[ledger.default_agent])
     return sorted(
-        name for name, a in exposed.items()
-        if a.spec.budget.per_task_usd is None
+        name for name, a in exposed.items() if a.spec.budget.per_task_usd is None
     )
 
 
@@ -615,7 +631,7 @@ def build_tool_gateway(
     checkpoints: CheckpointStore,
     engine: WorkflowEngine,
     usage: UsageStore | None = None,
-    broker_handle: object | None = None,
+    broker_handle: BrokerClientHandle | None = None,
 ) -> ToolGateway:
     """Register native connectors plus an MCP connector per configured server.
 
@@ -624,12 +640,11 @@ def build_tool_gateway(
     """
     gateway = ToolGateway(approvals=approvals, engine=engine)
     github_credentials = build_github_credentials(settings)
-    github_client = (
-        HttpGitHubClient(github_credentials)
-        if github_credentials is not None
-        else None
-    )
     if github_credentials is not None:
+        # Built inside the branch rather than as a conditional expression above
+        # it: every use is in here, and this way the client is a client rather
+        # than a client-or-None at each one.
+        github_client = HttpGitHubClient(github_credentials)
         gateway.register(GitHubConnector(github_client))
         log.info("registered native tool: github")
         # The coding worker runs model-generated edits, so it stays off unless
@@ -717,13 +732,9 @@ def build_tool_gateway(
                     ledger.per_task_usd_for(None) if ledger is not None else None,
                 )
         else:
-            log.info(
-                "workspace_task tool not registered: set CODING_WORKER_ENABLED=1"
-            )
+            log.info("workspace_task tool not registered: set CODING_WORKER_ENABLED=1")
     else:
-        log.warning(
-            "github tool not registered: set GITHUB_TOKEN or GITHUB_APP_*"
-        )
+        log.warning("github tool not registered: set GITHUB_TOKEN or GITHUB_APP_*")
 
     mcp_connectors: list[MCPConnector] = []
     seen: set[str] = set()

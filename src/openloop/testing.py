@@ -47,19 +47,24 @@ def tool_call_response(model: str, calls: list[tuple[str, str, dict]]) -> ModelR
     """
     import json
 
-    tool_calls = [ToolCall(id=cid, name=name, arguments=args)
-                  for cid, name, args in calls]
+    tool_calls = [
+        ToolCall(id=cid, name=name, arguments=args) for cid, name, args in calls
+    ]
     raw_message = {
         "role": "assistant",
         "content": None,
         "tool_calls": [
-            {"id": cid, "type": "function",
-             "function": {"name": name, "arguments": json.dumps(args)}}
+            {
+                "id": cid,
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(args)},
+            }
             for cid, name, args in calls
         ],
     }
-    return ModelResponse(text="", model=model, tool_calls=tool_calls,
-                         raw_message=raw_message)
+    return ModelResponse(
+        text="", model=model, tool_calls=tool_calls, raw_message=raw_message
+    )
 
 
 class ScriptedGateway:
@@ -353,9 +358,7 @@ class FakeSurfaceDelivery:
             recover,
         )
 
-    async def post_final(
-        self, target, result, *, key=None, recover=False
-    ) -> str:
+    async def post_final(self, target, result, *, key=None, recover=False) -> str:
         # `result` is a surface-neutral Deliverable (or plain-string prose);
         # recorded verbatim under "text" so assertions read naturally.
         return self._post(

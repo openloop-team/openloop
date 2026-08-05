@@ -7,7 +7,6 @@ import pytest
 from openloop.broker.models import (
     BrokerOwner,
     CommandKind,
-    IsolationMode,
     JobSnapshot,
     JobState,
     OperationTicket,
@@ -21,13 +20,12 @@ from openloop.broker_rpc.models import (
     CreateJobResult,
     InspectJobPayload,
     InspectJobResult,
-    RunningGenerationAccess,
     RpcRequest,
     RpcResponse,
+    RunningGenerationAccess,
     StartSegmentPayload,
     StartSegmentResult,
 )
-
 
 REQUEST_ID = UUID("00000000-0000-4000-8000-000000000301")
 JOB_ID = UUID("00000000-0000-4000-8000-000000000302")
@@ -89,11 +87,32 @@ def test_request_method_payload_and_capability_contract_is_exact():
     assert create.job_capability is None
     assert inspect.job_capability == CAPABILITY
     with pytest.raises(ValueError):
-        RpcRequest(RPC_VERSION, REQUEST_ID, WorkloadIntent.CREATE_JOB, TOKEN, CAPABILITY, create.payload)
+        RpcRequest(
+            RPC_VERSION,
+            REQUEST_ID,
+            WorkloadIntent.CREATE_JOB,
+            TOKEN,
+            CAPABILITY,
+            create.payload,
+        )
     with pytest.raises(ValueError):
-        RpcRequest(RPC_VERSION, REQUEST_ID, WorkloadIntent.INSPECT_JOB, TOKEN, None, inspect.payload)
+        RpcRequest(
+            RPC_VERSION,
+            REQUEST_ID,
+            WorkloadIntent.INSPECT_JOB,
+            TOKEN,
+            None,
+            inspect.payload,
+        )
     with pytest.raises(TypeError):
-        RpcRequest(RPC_VERSION, REQUEST_ID, WorkloadIntent.CREATE_JOB, TOKEN, None, inspect.payload)
+        RpcRequest(
+            RPC_VERSION,
+            REQUEST_ID,
+            WorkloadIntent.CREATE_JOB,
+            TOKEN,
+            None,
+            inspect.payload,
+        )
 
 
 def test_response_contains_exactly_one_typed_result_or_failure():

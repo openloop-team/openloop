@@ -19,11 +19,11 @@ import pytest
 
 from openloop.agents.schema import Agent
 from openloop.approvals import InMemoryApprovalStore
+from openloop.credentials import EnvCredentialResolver
 from openloop.memory import InMemoryStore
 from openloop.models.gateway import ModelGateway
 from openloop.runtime import Runtime, Task
 from openloop.tools import ToolGateway
-from openloop.credentials import EnvCredentialResolver
 from openloop.tools.github import GitHubConnector, HttpGitHubClient
 from openloop.usage import InMemoryUsageStore, budget_scope_key
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
@@ -134,9 +134,7 @@ async def test_live_end_to_end():
 
     tools = ToolGateway(
         tools=[
-            GitHubConnector(
-                HttpGitHubClient(EnvCredentialResolver({"github": token}))
-            )
+            GitHubConnector(HttpGitHubClient(EnvCredentialResolver({"github": token})))
         ],
         approvals=approvals,
     )
@@ -154,15 +152,21 @@ async def test_live_end_to_end():
     issue: dict = {}
     try:
         # 1) Real model call — it must choose the GitHub issue-creation tool.
-        result = await runtime.handle(Task(
-            text=(
-                f"Open a GitHub issue in the repo {repo} with the exact title "
-                f"'{title}' and a short body noting this is an automated "
-                f"end-to-end check. Use the available GitHub tool to create it."
-            ),
-            surface="cli", channel=f"e2e-{title[-8:]}", user="U_e2e",
-        ))
-        assert result.approval_ids, f"model did not call the tool: {result.text[:200]!r}"
+        result = await runtime.handle(
+            Task(
+                text=(
+                    f"Open a GitHub issue in the repo {repo} with the exact title "
+                    f"'{title}' and a short body noting this is an automated "
+                    f"end-to-end check. Use the available GitHub tool to create it."
+                ),
+                surface="cli",
+                channel=f"e2e-{title[-8:]}",
+                user="U_e2e",
+            )
+        )
+        assert result.approval_ids, (
+            f"model did not call the tool: {result.text[:200]!r}"
+        )
         approval_id = result.approval_ids[0]
 
         # 2) Approve — performs the REAL GitHub API write.
@@ -181,9 +185,7 @@ async def test_live_end_to_end():
     finally:
         number = issue.get("number")
         if number:  # close the issue we created so runs don't accumulate junk
-            await HttpGitHubClient(
-                EnvCredentialResolver({"github": token})
-            )._request(
+            await HttpGitHubClient(EnvCredentialResolver({"github": token}))._request(
                 "PATCH", f"/repos/{repo}/issues/{number}", json={"state": "closed"}
             )
         if stores:

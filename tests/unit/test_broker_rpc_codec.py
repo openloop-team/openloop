@@ -1,7 +1,7 @@
 import json
+import struct
 from datetime import UTC, datetime
 from pathlib import Path
-import struct
 from uuid import UUID
 
 import pytest
@@ -13,6 +13,7 @@ from openloop.broker.models import (
     SignedCheckpointReceipt,
     TerminalOutcome,
 )
+from openloop.broker_rpc.capability import JobCapability
 from openloop.broker_rpc.codec import (
     MAX_RPC_FRAME_BYTES,
     decode_request,
@@ -20,8 +21,7 @@ from openloop.broker_rpc.codec import (
     encode_request,
     encode_response,
 )
-from openloop.broker_rpc.capability import JobCapability
-from openloop.broker_rpc.errors import RpcErrorCode, RpcProtocolProblem
+from openloop.broker_rpc.errors import RpcErrorCode, RpcFailure, RpcProtocolProblem
 from openloop.broker_rpc.identity import WorkloadIdentityToken, WorkloadIntent
 from openloop.broker_rpc.models import (
     RPC_VERSION,
@@ -33,14 +33,12 @@ from openloop.broker_rpc.models import (
     QuiesceSegmentResult,
     ReleaseSegmentPayload,
     ReleaseSegmentResult,
-    RunningGenerationAccess,
     RpcRequest,
     RpcResponse,
+    RunningGenerationAccess,
     StartSegmentPayload,
     StartSegmentResult,
 )
-from openloop.broker_rpc.errors import RpcFailure
-
 
 REQUEST_ID = UUID("00000000-0000-4000-8000-000000000311")
 
@@ -184,9 +182,7 @@ def test_checkpoint_release_and_finalize_frames_round_trip_exactly():
                 WorkloadIntent.QUIESCE_SEGMENT,
                 token,
                 capability,
-                QuiesceSegmentPayload(
-                    job_id, 1, "rpc-quiesce-key-01", "barrier-01"
-                ),
+                QuiesceSegmentPayload(job_id, 1, "rpc-quiesce-key-01", "barrier-01"),
             ),
             RpcResponse(
                 RPC_VERSION,

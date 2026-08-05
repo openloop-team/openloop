@@ -33,7 +33,6 @@ from openloop.tools.openhands_relay_profile import (
     install_relay_artifacts,
 )
 
-
 _REQUIRED_DISTRIBUTIONS = (
     "openhands-sdk",
     "openhands-workspace",

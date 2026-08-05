@@ -17,7 +17,7 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from openhands.sdk import Agent, LLM, Tool
+from openhands.sdk import LLM, Agent, Tool
 from openhands.tools.file_editor import FileEditorTool
 from openhands.tools.terminal import TerminalTool
 
@@ -27,7 +27,6 @@ from openloop.tools.openhands_resume import ResumeDecision, WorkerPaused
 from openloop.wiring.broker import _derive_receipt_key, build_broker
 from openloop.wiring.builders import build_coding_worker
 from tests.support.processes import cleanup_process
-
 
 _BROKER_TOPOLOGIES = {"subprocess", "managed"}
 _IDENTITY_SEED = bytes(range(32))
@@ -184,9 +183,7 @@ def _broker_environment(settings: BrokerSettings) -> dict[str, str]:
             "BROKER_STATE_ROOT": settings.broker_state_root,
             "BROKER_RUNTIME_ROOT": settings.broker_runtime_root,
             "BROKER_INGRESS_ROOT": settings.broker_ingress_root,
-            "BROKER_CHECKPOINT_RECEIPT_ROOT": (
-                settings.broker_checkpoint_receipt_root
-            ),
+            "BROKER_CHECKPOINT_RECEIPT_ROOT": (settings.broker_checkpoint_receipt_root),
             "BROKER_SHARED_DATA_GID": str(settings.broker_shared_data_gid),
             "BROKER_EXPECTED_APP_UID": str(settings.broker_expected_app_uid),
             "BROKER_CAPABILITY_ROOTS": json.dumps(

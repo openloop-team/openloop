@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from typing import Any
 
 from openloop.deliverable import Artifact, Deliverable, Prose
 from openloop.runtime import Runtime, Task
@@ -64,6 +65,7 @@ ERROR_TEXT = "⚠️ This task was interrupted and could not be completed."
 # on context size, not a correctness limit — older turns fall back to recall.
 HISTORY_TURN_LIMIT = 20
 
+
 def _is_non_terminal_invocation(inv) -> bool:
     if inv.status in ("started", "approved"):
         # "approved" = a durable decision with no result yet (a losing
@@ -75,7 +77,7 @@ def _is_non_terminal_invocation(inv) -> bool:
     return data.get("status") in {"running", "waiting"}
 
 
-def _prose_of(result: "Deliverable | str") -> str:
+def _prose_of(result: Deliverable | str) -> str:
     """The replay-safe prose of a deliverable — what transcripts/history keep."""
     if isinstance(result, Artifact):
         return result.summary
@@ -84,7 +86,7 @@ def _prose_of(result: "Deliverable | str") -> str:
     return result
 
 
-def _deliverable_from_outcome_data(data) -> "Deliverable | None":
+def _deliverable_from_outcome_data(data) -> Deliverable | None:
     """Rebuild a DIRECT-DELIVER outcome from a terminal result's ``outcome``
     block, or ``None`` for anything that must fall back to the existing
     prose/model-continuation path.
@@ -116,6 +118,7 @@ def _deliverable_from_outcome_data(data) -> "Deliverable | None":
             return None
         from openloop.tasks.outcomes import Diagnosis, EvidenceBundle, to_deliverable
 
+        built: Diagnosis | EvidenceBundle
         if kind == "diagnosis":
             built = Diagnosis(text=outcome["text"])
         else:
@@ -162,12 +165,18 @@ def _inbox_payload(task: Task, target: SurfaceTarget) -> dict:
 
 def _task_target_from_payload(p: dict) -> tuple[Task, SurfaceTarget]:
     task = Task(
-        text=p["text"], surface=p["surface"], channel=p.get("channel"),
-        user=p.get("user"), kind=p.get("kind"),
+        text=p["text"],
+        surface=p["surface"],
+        channel=p.get("channel"),
+        user=p.get("user"),
+        kind=p.get("kind"),
     )
     target = SurfaceTarget(
-        surface=p["surface"], workspace=p["workspace"], agent=p["agent"],
-        channel=p.get("channel"), thread=p.get("thread"),
+        surface=p["surface"],
+        workspace=p["workspace"],
+        agent=p["agent"],
+        channel=p.get("channel"),
+        thread=p.get("thread"),
         event_id=p.get("event_id"),
     )
     return task, target
@@ -181,7 +190,7 @@ class SessionRunner:
         runtime: Runtime,
         sessions: SurfaceSessionStore,
         delivery: SurfaceDelivery,
-        threads: "ThreadRecordStore | None" = None,
+        threads: ThreadRecordStore | None = None,
     ) -> None:
         self.runtime = runtime
         self.sessions = sessions
@@ -216,7 +225,13 @@ class SessionRunner:
         twice). A session still mid-turn is left for the startup reconciler
         (Slice 6) — this inline retry path does not replay the model call.
         """
-        existing = await self.sessions.get_by_event(target.event_id)
+        # A target with no event id has nothing the unique index could match, so
+        # the lookup is skipped rather than issued with None.
+        existing = (
+            await self.sessions.get_by_event(target.event_id)
+            if target.event_id is not None
+            else None
+        )
         if existing is not None:
             return await self._ensure_delivered(existing)
 
@@ -246,7 +261,11 @@ class SessionRunner:
         except Exception:  # noqa: BLE001 — a concurrent duplicate won the race
             # The event_id unique index rejected this insert: another delivery of
             # the same event created the session first. Defer to the winner.
-            racer = await self.sessions.get_by_event(target.event_id)
+            racer = (
+                await self.sessions.get_by_event(target.event_id)
+                if target.event_id is not None
+                else None
+            )
             if racer is not None:
                 return await self._ensure_delivered(racer)
             raise
@@ -475,8 +494,10 @@ class SessionRunner:
             for s in await self.sessions.thread_history(
                 session.target, exclude_id=session.id, limit=HISTORY_TURN_LIMIT
             ):
-                turns.append({"role": "user", "content": s.request_text})
-                turns.append({"role": "assistant", "content": s.result_summary})
+                # Both are unset for a turn that never recorded them; empty
+                # strings keep the transcript shape the model expects.
+                turns.append({"role": "user", "content": s.request_text or ""})
+                turns.append({"role": "assistant", "content": s.result_summary or ""})
         if turns:
             task.history = turns
 
@@ -490,7 +511,11 @@ class SessionRunner:
         return await recover(instance_id)
 
     async def _continue_session(
-        self, session: SurfaceSession, inv, approver: str, message: str,
+        self,
+        session: SurfaceSession,
+        inv,
+        approver: str,
+        message: str,
         approval_id: str | None = None,
     ) -> None:
         """Apply an approval outcome without treating non-terminal work as final."""
@@ -573,7 +598,11 @@ class SessionRunner:
             )
 
     async def _continue_with_model(
-        self, session: SurfaceSession, approval_id: str, inv, approver: str,
+        self,
+        session: SurfaceSession,
+        approval_id: str,
+        inv,
+        approver: str,
         message: str,
     ) -> bool:
         """Re-run the model with the approved tool result folded in, under the SAME
@@ -639,7 +668,7 @@ class SessionRunner:
             )
         return True
 
-    async def _final_deliverable(self, session: SurfaceSession) -> "Deliverable | str":
+    async def _final_deliverable(self, session: SurfaceSession) -> Deliverable | str:
         """What a (re-)delivery of this session's final answer should post."""
         return session.result_summary or "(no response)"
 
@@ -702,7 +731,11 @@ class SessionRunner:
     ) -> str:
         """Authorize, durably record, and asynchronously drive a Slack action."""
         from openloop.tasks import WorkspaceTask
-        from openloop.tools.openhands_resume import OpenHandsResumeState, ResumeDecision
+        from openloop.tools.openhands_resume import (
+            DecisionKind,
+            OpenHandsResumeState,
+            ResumeDecision,
+        )
 
         engine = getattr(self.runtime, "engine", None)
         if engine is None:
@@ -722,7 +755,9 @@ class SessionRunner:
         # there by the same compat shim workflows/coding_worker.py relies on.
         task = WorkspaceTask.from_dict(instance.state or {})
         raw_worker = task.profile_state.get("code", {}).get("worker_state") or {}
-        raw_resume = raw_worker.get("openhands_resume")
+        # Decoded persisted state, so unnarrowed: from_dict below validates it,
+        # and the except returns the user-facing error for anything malformed.
+        raw_resume: Any = raw_worker.get("openhands_resume")
         try:
             resume = OpenHandsResumeState.from_dict(raw_resume)
         except Exception:
@@ -731,8 +766,19 @@ class SessionRunner:
             return "⛔ That decision is stale."
         if actor_id != resume.slack_requester_id:
             return "⛔ Only the user who approved this task may decide."
+        # Written as a branch rather than a membership test so the Literal the
+        # ResumeDecision field wants is produced here. ResumeDecision would
+        # reject an unknown kind too, but by raising out of an action handler;
+        # the check belongs where there is still a reply to return.
+        decision_kind: DecisionKind
+        if kind == "accept":
+            decision_kind = "accept"
+        elif kind == "reject":
+            decision_kind = "reject"
+        else:
+            return "⛔ That decision is not one this task understands."
         decision = ResumeDecision(
-            kind=kind,
+            kind=decision_kind,
             decision_id=decision_id,
             event_id=event_id,
             actor_id=actor_id,
@@ -754,7 +800,9 @@ class SessionRunner:
                     [],
                 )
             except Exception:  # noqa: BLE001 — decision is already durable
-                logger.warning("failed to collapse OpenHands decision card", exc_info=True)
+                logger.warning(
+                    "failed to collapse OpenHands decision card", exc_info=True
+                )
         engine.drive_background(job_id)
         return "✅ Decision recorded; resuming work."
 
@@ -818,7 +866,10 @@ class SessionRunner:
                     decided_by=request.decided_by,
                 )
                 await self._continue_session(
-                    session, inv, approver, resolution_message(inv, approver),
+                    session,
+                    inv,
+                    approver,
+                    resolution_message(inv, approver),
                     approval_id=approval_id,
                 )
                 return True
@@ -840,7 +891,10 @@ class SessionRunner:
             inv = _workflow_invocation(instance)
             inv.decided_by = request.decided_by
             await self._continue_session(
-                session, inv, approver, resolution_message(inv, approver),
+                session,
+                inv,
+                approver,
+                resolution_message(inv, approver),
                 approval_id=approval_id,
             )
             return True
@@ -943,7 +997,10 @@ class SessionRunner:
         return out
 
     async def _post_final(
-        self, session: SurfaceSession, result: "Deliverable | str", *,
+        self,
+        session: SurfaceSession,
+        result: Deliverable | str,
+        *,
         recover: bool = False,
     ) -> None:
         if session.final_message_id is not None:
@@ -988,8 +1045,10 @@ class SessionRunner:
         if session.final_message_id is not None:
             return
         mid = await self.delivery.post_error(
-            session.target, session.error or ERROR_TEXT,
-            key=self._delivery_key(session, "error"), recover=recover,
+            session.target,
+            session.error or ERROR_TEXT,
+            key=self._delivery_key(session, "error"),
+            recover=recover,
         )
         session.final_message_id = mid
         await self.sessions.upsert(session)

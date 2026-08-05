@@ -7,13 +7,13 @@ never duplicates them.
 
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.tasks import WorkspaceTask
+from openloop.testing import FakeGitHub
 from openloop.tools.coding_worker import (
     STEPS,
     CodingWorkerConnector,
     WorkerOutcome,
     WorkerState,
 )
-from openloop.testing import FakeGitHub
 
 
 class CountingRunner:
@@ -34,7 +34,9 @@ class CountingRunner:
             if on_step is not None:
                 await on_step(state)
         state.title, state.body = "Add retries", "Adds retry logic."
-        return WorkerOutcome(branch=state.branch, title="Add retries", body="Adds retry logic.")
+        return WorkerOutcome(
+            branch=state.branch, title="Add retries", body="Adds retry logic."
+        )
 
 
 class RecordingStore(InMemoryCheckpointStore):
@@ -77,13 +79,9 @@ async def test_checkpoint_persisted_after_each_step():
     assert "job_id" not in final.state_json
     assert final.state_json["completed_steps"] == list(STEPS)
     assert final.state_json["budget_usd"] == 2.5
+    assert final.state_json["profile_state"]["code"]["worker_state"]["job_id"] == "j1"
     assert (
-        final.state_json["profile_state"]["code"]["worker_state"]["job_id"]
-        == "j1"
-    )
-    assert (
-        final.state_json["profile_state"]["code"]["worker_state"]["budget_usd"]
-        == 2.5
+        final.state_json["profile_state"]["code"]["worker_state"]["budget_usd"] == 2.5
     )
 
 
@@ -152,14 +150,25 @@ def _seed_checkpoint(job_id, status, steps, *, base="main", branch=None):
 
     branch = branch or f"openloop/job-{job_id}"
     cp = WorkerCheckpoint(
-        job_id=job_id, repo="acme/x", instruction="add retries", base=base,
-        branch=branch, status=status, completed_steps=list(steps),
+        job_id=job_id,
+        repo="acme/x",
+        instruction="add retries",
+        base=base,
+        branch=branch,
+        status=status,
+        completed_steps=list(steps),
         state_json={
-            "job_id": job_id, "repo": "acme/x", "instruction": "add retries",
-            "base": base, "branch": branch, "completed_steps": list(steps),
-            "title": "Add retries", "body": "b",
+            "job_id": job_id,
+            "repo": "acme/x",
+            "instruction": "add retries",
+            "base": base,
+            "branch": branch,
+            "completed_steps": list(steps),
+            "title": "Add retries",
+            "body": "b",
         },
-        title="Add retries", body="b",
+        title="Add retries",
+        body="b",
     )
     return cp
 
@@ -171,9 +180,7 @@ async def test_resume_uses_checkpoint_base_not_args():
     github = FakeGitHub()
     conn = CodingWorkerConnector(runner, github, checkpoints=store)
 
-    await store.upsert(
-        _seed_checkpoint("j1", "open_pr_failed", STEPS, base="develop")
-    )
+    await store.upsert(_seed_checkpoint("j1", "open_pr_failed", STEPS, base="develop"))
     # Note: no "base" in args — must not fall back to "main".
     result = await conn.execute("code:write", {"job_id": "j1"})
 
@@ -225,9 +232,7 @@ async def test_new_workspace_task_checkpoint_resumes_from_core_identity():
             }
         },
     )
-    checkpoint = _seed_checkpoint(
-        "nested1", "running", [], base="develop"
-    )
+    checkpoint = _seed_checkpoint("nested1", "running", [], base="develop")
     checkpoint.state_json = task.to_dict()
     await store.upsert(checkpoint)
 
@@ -278,8 +283,9 @@ async def test_resume_before_push_reruns_worker_and_completes():
     await store.upsert(
         _seed_checkpoint("j1", "running", ["clone", "branch", "edit", "commit"])
     )
-    result = await conn.execute("code:write", {"job_id": "j1", "repo": "acme/x",
-                                             "instruction": "add retries"})
+    result = await conn.execute(
+        "code:write", {"job_id": "j1", "repo": "acme/x", "instruction": "add retries"}
+    )
 
     assert result.ok
     assert runner.runs == 1  # re-ran the local pipeline
@@ -307,7 +313,9 @@ async def test_reconciler_resumes_only_non_terminal_jobs():
     # The two already-pushed jobs just open PRs; only the running one re-runs.
     assert runner.runs == 1
     assert {p["head"] for p in github.pulls} == {
-        "openloop/job-run1", "openloop/job-push1", "openloop/job-fail1"
+        "openloop/job-run1",
+        "openloop/job-push1",
+        "openloop/job-fail1",
     }
     for job_id in ("run1", "push1", "fail1"):
         assert (await store.get(job_id)).status == "opened"
@@ -366,15 +374,25 @@ async def test_existing_pr_is_reused_not_duplicated():
 
     await store.upsert(
         WorkerCheckpoint(
-            job_id="j1", repo="acme/x", instruction="add retries", base="main",
-            branch=branch, status="open_pr_failed",
+            job_id="j1",
+            repo="acme/x",
+            instruction="add retries",
+            base="main",
+            branch=branch,
+            status="open_pr_failed",
             completed_steps=list(STEPS),
             state_json={
-                "job_id": "j1", "repo": "acme/x", "instruction": "add retries",
-                "base": "main", "branch": branch, "completed_steps": list(STEPS),
-                "title": "Add retries", "body": "b",
+                "job_id": "j1",
+                "repo": "acme/x",
+                "instruction": "add retries",
+                "base": "main",
+                "branch": branch,
+                "completed_steps": list(STEPS),
+                "title": "Add retries",
+                "body": "b",
             },
-            title="Add retries", body="b",
+            title="Add retries",
+            body="b",
         )
     )
 

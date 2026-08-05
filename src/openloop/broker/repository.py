@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, is_dataclass
 import hashlib
 import json
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any, ClassVar, Protocol, runtime_checkable
 from uuid import UUID
 
@@ -21,8 +21,8 @@ from .models import (
     JobState,
     OperationResult,
     OperationTicket,
-    RecoverySnapshot,
     RecoveryCandidate,
+    RecoverySnapshot,
     ReleaseTarget,
     TerminalOutcome,
     VerifiedCheckpointReceipt,
@@ -36,7 +36,6 @@ from .models import (
     validate_token,
     validate_uuid,
 )
-
 
 _NO_DIGEST = {"digest": False}
 _OMIT_NONE_DIGEST = {"omit_none": True}
@@ -90,9 +89,13 @@ def _canonical_value(value: object) -> object:
 def canonical_request_json(command: _DigestCommand) -> str:
     if not isinstance(command, _DigestCommand):
         raise TypeError("command does not support canonical request digests")
+    # Every _DigestCommand subclass is a dataclass, but the base cannot say so
+    # — dataclass-ness is not inherited in the type system — and fields() only
+    # accepts a declared dataclass.
+    instance: Any = command
     request = {
         item.name: _canonical_value(getattr(command, item.name))
-        for item in fields(command)
+        for item in fields(instance)
         if item.metadata.get("digest", True)
         and not (
             item.metadata.get("omit_none", False)
@@ -496,15 +499,11 @@ class BrokerRepository(Protocol):
         self, command: AbandonGenerationCommand
     ) -> OperationResult: ...
 
-    async def begin_quiesce(
-        self, command: BeginQuiesceCommand
-    ) -> OperationTicket: ...
+    async def begin_quiesce(self, command: BeginQuiesceCommand) -> OperationTicket: ...
 
     async def mark_quiesced(self, command: MarkQuiescedCommand) -> OperationResult: ...
 
-    async def begin_release(
-        self, command: BeginReleaseCommand
-    ) -> OperationTicket: ...
+    async def begin_release(self, command: BeginReleaseCommand) -> OperationTicket: ...
 
     async def begin_internal_release(
         self, command: BeginInternalReleaseCommand

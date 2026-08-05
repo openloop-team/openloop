@@ -13,18 +13,20 @@ from openloop.tools.openhands_resume import ResumeDecision, WorkerPaused
 from openloop.tools.openhands_state import OpenHandsKeyDeriver, OpenHandsStateLayout
 from openloop.tools.openhands_worker import (
     PR_FILE,
-    _ColdRuntime,
     OpenHandsCodingWorker,
     OpenHandsUnavailable,
+    _ColdRuntime,
 )
-
 
 BASE = "a" * 40
 
 
 def _state(instruction="add retries to the fetcher"):
     return WorkerState(
-        job_id="j1", repo="acme/x", instruction=instruction, base="main",
+        job_id="j1",
+        repo="acme/x",
+        instruction=instruction,
+        base="main",
         branch="openloop/job-j1",
     )
 
@@ -364,7 +366,8 @@ async def test_metrics_api_drift_fails_the_attempt(tmp_path):
     worker = OpenHandsCodingWorker(
         "m",
         conversation_factory=lambda ws, cbs, job_id: (
-            NoStatsConversation(ws, cbs), lambda: None
+            NoStatsConversation(ws, cbs),
+            lambda: None,
         ),
     )
     with pytest.raises(AttributeError):

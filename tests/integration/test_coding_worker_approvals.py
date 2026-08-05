@@ -5,18 +5,19 @@ Mirrors test_tools_approvals.py / test_tool_loop.py but for the multi-step
 """
 
 from pathlib import Path
+
 from openloop.agents import load_agent
 from openloop.runtime import Runtime, Task
-from openloop.tools import ToolGateway
-from openloop.tools.coding_worker import CodingWorkerConnector
-from openloop.tools.github import GitHubConnector
 from openloop.testing import (
-    FakeWorkerOrchestrator,
     FakeGitHub,
+    FakeWorkerOrchestrator,
     ScriptedGateway,
     in_memory_workflow_engine,
     tool_call_response,
 )
+from openloop.tools import ToolGateway
+from openloop.tools.coding_worker import CodingWorkerConnector
+from openloop.tools.github import GitHubConnector
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
@@ -111,7 +112,9 @@ async def test_approve_runs_worker_and_opens_draft_pr():
     gw = _gateway(runner, github)
 
     pending = await gw.invoke(
-        agent, "coding_worker.pr:write", {"repo": "acme/x", "instruction": "add retries"}
+        agent,
+        "coding_worker.pr:write",
+        {"repo": "acme/x", "instruction": "add retries"},
     )
     job_id = pending.approval.args["job_id"]
 
@@ -146,13 +149,20 @@ async def test_tool_loop_holds_coding_worker_for_approval():
     agent = _agent()
     github = FakeGitHub()
     gw = _gateway(github=github)
-    model = ScriptedGateway([
-        tool_call_response(
-            "m",
-            [("c1", "workspace_task_code_write",
-              {"repo": "acme/x", "instruction": "add retries"})],
-        ),
-    ])
+    model = ScriptedGateway(
+        [
+            tool_call_response(
+                "m",
+                [
+                    (
+                        "c1",
+                        "workspace_task_code_write",
+                        {"repo": "acme/x", "instruction": "add retries"},
+                    )
+                ],
+            ),
+        ]
+    )
     runtime = Runtime(
         agent, gateway=model, tools=gw, engine=in_memory_workflow_engine()
     )

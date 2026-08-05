@@ -1,6 +1,7 @@
 """Tests for the Slack app build (HTTP vs Socket Mode) and the socket runner."""
 
 from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 from slack_bolt.async_app import AsyncApp
@@ -30,8 +31,10 @@ def test_build_slack_app_socket_mode_without_signing_secret():
 
 def test_build_slack_app_http_mode_with_signing_secret():
     app = build_slack_app(
-        _runtime(), InMemorySurfaceSessionStore(),
-        bot_token="xoxb-test", signing_secret="shhh",
+        _runtime(),
+        InMemorySurfaceSessionStore(),
+        bot_token="xoxb-test",
+        signing_secret="shhh",
     )
     assert isinstance(app, AsyncApp)
 

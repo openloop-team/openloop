@@ -8,7 +8,9 @@ def _policy():
         default="openai/gpt-4o-mini",
         routes=[
             ModelRoute(match={"task": "code"}, model="anthropic/claude-sonnet-4-6"),
-            ModelRoute(match={"task": "investigate"}, model="openrouter/google/gemini-2.5-pro"),
+            ModelRoute(
+                match={"task": "investigate"}, model="openrouter/google/gemini-2.5-pro"
+            ),
         ],
     )
 

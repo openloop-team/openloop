@@ -5,10 +5,10 @@ import types
 from uuid import uuid4
 
 from openloop.agents.schema import Agent
-from openloop.wiring.builders import build_github_credentials, build_tool_gateway
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.credentials import EnvCredentialResolver, GitHubAppResolver
+from openloop.wiring.builders import build_github_credentials, build_tool_gateway
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from tests.support.settings import IsolatedSettings as Settings
 
@@ -135,14 +135,16 @@ def _build_gateway(settings: Settings, agent: Agent):
 
 
 def test_mcp_tool_with_github_credentials_gets_the_resolver():
-    agent = _mcp_agent({
-        "name": "github-mcp",
-        "type": "mcp",
-        "server": "https://api.githubcopilot.com/mcp/",
-        "credentials": "github",
-        "headers": {"X-MCP-Readonly": "true"},
-        "permissions": ["list_issues"],
-    })
+    agent = _mcp_agent(
+        {
+            "name": "github-mcp",
+            "type": "mcp",
+            "server": "https://api.githubcopilot.com/mcp/",
+            "credentials": "github",
+            "headers": {"X-MCP-Readonly": "true"},
+            "permissions": ["list_issues"],
+        }
+    )
     gateway = _build_gateway(_settings(github_token="tok"), agent)
 
     client = gateway.mcp_connectors[0].client
@@ -152,13 +154,15 @@ def test_mcp_tool_with_github_credentials_gets_the_resolver():
 
 
 def test_mcp_tool_credentials_without_github_auth_degrades_loudly(caplog):
-    agent = _mcp_agent({
-        "name": "github-mcp",
-        "type": "mcp",
-        "server": "https://api.githubcopilot.com/mcp/",
-        "credentials": "github",
-        "permissions": ["list_issues"],
-    })
+    agent = _mcp_agent(
+        {
+            "name": "github-mcp",
+            "type": "mcp",
+            "server": "https://api.githubcopilot.com/mcp/",
+            "credentials": "github",
+            "permissions": ["list_issues"],
+        }
+    )
     gateway = _build_gateway(_settings(), agent)  # no GITHUB_TOKEN / app config
 
     client = gateway.mcp_connectors[0].client
@@ -167,11 +171,13 @@ def test_mcp_tool_credentials_without_github_auth_degrades_loudly(caplog):
 
 
 def test_mcp_tool_without_credentials_stays_unauthenticated():
-    agent = _mcp_agent({
-        "name": "ci-logs",
-        "type": "mcp",
-        "server": "http://localhost:8931",
-        "permissions": ["get_run_logs"],
-    })
+    agent = _mcp_agent(
+        {
+            "name": "ci-logs",
+            "type": "mcp",
+            "server": "http://localhost:8931",
+            "permissions": ["get_run_logs"],
+        }
+    )
     gateway = _build_gateway(_settings(github_token="tok"), agent)
     assert gateway.mcp_connectors[0].client._credentials is None

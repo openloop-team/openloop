@@ -36,8 +36,7 @@ from tests.support.broker_repository_contract import (
     quiesce_generation,
     receipt_for,
 )
-from tests.support.postgres import require_postgres, postgres_dsn
-
+from tests.support.postgres import postgres_dsn, require_postgres
 
 DSN = postgres_dsn()
 
@@ -266,9 +265,7 @@ async def test_postgres_concurrent_conflicting_key_has_one_winner(
         ledger.create_job(
             OWNER, "postgres-race-conflict", "default", "docker", "postgres"
         ),
-        ledger.create_job(
-            OWNER, "postgres-race-conflict", "gpu", "docker", "postgres"
-        ),
+        ledger.create_job(OWNER, "postgres-race-conflict", "gpu", "docker", "postgres"),
         return_exceptions=True,
     )
     assert sum(not isinstance(result, BaseException) for result in results) == 1
@@ -302,9 +299,13 @@ async def test_postgres_concurrent_starts_preserve_one_live_generation(
         return_exceptions=True,
     )
     assert sum(not isinstance(result, BaseException) for result in results) == 1
-    assert sum(
-        isinstance(result, (InvalidTransition, StaleGeneration)) for result in results
-    ) == 1
+    assert (
+        sum(
+            isinstance(result, (InvalidTransition, StaleGeneration))
+            for result in results
+        )
+        == 1
+    )
     async with pool.acquire() as connection:
         live = await connection.fetchval(
             """
@@ -505,8 +506,7 @@ async def test_postgres_recovery_scan_and_internal_operations_are_durable(
             [release.operation_id, finalize.operation_id],
         )
     operation_metadata = {
-        (row["command_kind"], row["source"], row["idempotency_key"])
-        for row in rows
+        (row["command_kind"], row["source"], row["idempotency_key"]) for row in rows
     }
     assert operation_metadata == {
         ("begin_release", "internal", None),
@@ -564,9 +564,12 @@ async def test_postgres_concurrent_repeated_setup_is_idempotent(
     try:
         await asyncio.gather(second.setup(pool), third.setup(pool))
         async with pool.acquire() as connection:
-            assert await connection.fetchval(
-                "SELECT count(*) FROM broker_schema_migrations"
-            ) == 4
+            assert (
+                await connection.fetchval(
+                    "SELECT count(*) FROM broker_schema_migrations"
+                )
+                == 4
+            )
     finally:
         await second.close()
         await third.close()
@@ -591,15 +594,21 @@ async def test_postgres_concurrent_fresh_setup_serializes_bootstrap():
     try:
         await asyncio.gather(first.setup(pool), second.setup(pool))
         async with pool.acquire() as connection:
-            assert await connection.fetchval(
-                "SELECT count(*) FROM broker_schema_migrations"
-            ) == 4
-            assert await connection.fetchval(
-                """
+            assert (
+                await connection.fetchval(
+                    "SELECT count(*) FROM broker_schema_migrations"
+                )
+                == 4
+            )
+            assert (
+                await connection.fetchval(
+                    """
                 SELECT count(*) FROM information_schema.tables
                 WHERE table_schema = current_schema() AND table_name LIKE 'broker_%'
                 """
-            ) == 6
+                )
+                == 6
+            )
     finally:
         await first.close()
         await second.close()
@@ -695,9 +704,13 @@ async def test_postgres_failed_pending_migration_rolls_back_and_detaches(
         await candidate.setup(pool)
     assert candidate._pool is None
     async with pool.acquire() as connection:
-        assert await connection.fetchval(
-            "SELECT to_regclass('broker_should_rollback')"
-        ) is None
-        assert await connection.fetchval(
-            "SELECT max(version) FROM broker_schema_migrations"
-        ) == 4
+        assert (
+            await connection.fetchval("SELECT to_regclass('broker_should_rollback')")
+            is None
+        )
+        assert (
+            await connection.fetchval(
+                "SELECT max(version) FROM broker_schema_migrations"
+            )
+            == 4
+        )

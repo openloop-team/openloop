@@ -13,6 +13,7 @@ class _FakeGateway:
     async def complete(self, model, messages):
         self.calls.append((model, messages))
         from openloop.models.gateway import ModelResponse
+
         return ModelResponse(
             text=self._text,
             model=model,

@@ -14,7 +14,6 @@ from openloop.tools.openhands_relay_client import (
     RelayMode,
 )
 
-
 DEFAULT_HAPROXY_RELAY_IMAGE = (
     "haproxy@sha256:9f196dc9ec57310a1a430939221b33b36c14113497aca7ead9b13f4d5c2d37f5"
 )
@@ -95,9 +94,7 @@ def _render_haproxy_config(endpoint: RelayClientEndpoint) -> str:
     events_search_path = _acl_path(endpoint, "/events/search")
     run_path = _acl_path(endpoint, "/run")
     confirmation_policy_path = _acl_path(endpoint, "/confirmation_policy")
-    confirmation_response_path = _acl_path(
-        endpoint, "/events/respond_to_confirmation"
-    )
+    confirmation_response_path = _acl_path(endpoint, "/events/respond_to_confirmation")
     websocket_path = f"/sockets/events/{endpoint.conversation_id}"
 
     common_acls = f"""\

@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class Gate(str, Enum):
+class Gate(StrEnum):
     """Where a profile's approval boundary sits. A profile's value is a floor;
     agent config may add gating, never remove it."""
 
     START = "start"
-    EFFECT = "effect"  # reserved for mid-task proposed effects (Gate F); unused in Stage 1
+    EFFECT = (
+        "effect"  # reserved for mid-task proposed effects (Gate F); unused in Stage 1
+    )
     NONE = "none"
 
 
@@ -57,7 +59,7 @@ class WorkspaceTask:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "WorkspaceTask":
+    def from_dict(cls, data: dict) -> WorkspaceTask:
         """Rehydrate from either the current nested layout or the
         pre-convergence flat coding-worker checkpoint layout (compat shim).
 
@@ -128,16 +130,22 @@ _WT_FIELDS = frozenset(WorkspaceTask.__dataclass_fields__)
 
 WORKSPACE_TASK_PROFILES: dict[str, TaskProfile] = {
     "code:write": TaskProfile(
-        name="code", entry_action="code:write", args_model=object,
-        gate=Gate.START, capabilities=frozenset({"repo:write"}),
+        name="code",
+        entry_action="code:write",
+        args_model=object,
+        gate=Gate.START,
+        capabilities=frozenset({"repo:write"}),
     ),
     "investigate:read": TaskProfile(
-        name="investigate", entry_action="investigate:read", args_model=object,
-        gate=Gate.NONE, capabilities=frozenset({"repo:read"}),
+        name="investigate",
+        entry_action="investigate:read",
+        args_model=object,
+        gate=Gate.NONE,
+        capabilities=frozenset({"repo:read"}),
     ),
 }
 
 
-def profile_for(permission: str) -> "TaskProfile | None":
+def profile_for(permission: str) -> TaskProfile | None:
     """Look up a profile by permission string."""
     return WORKSPACE_TASK_PROFILES.get(permission)

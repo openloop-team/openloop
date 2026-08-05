@@ -73,7 +73,9 @@ class RepoInvestigator:
             self._gateway = ModelGateway()
         return self._gateway
 
-    async def investigate(self, workspace: Path, question: str, repo: str) -> tuple[EvidenceBundle, ModelResponse]:
+    async def investigate(
+        self, workspace: Path, question: str, repo: str
+    ) -> tuple[EvidenceBundle, ModelResponse]:
         context = self._repo_context(workspace)
         messages = [
             {
@@ -87,9 +89,7 @@ class RepoInvestigator:
             },
             {
                 "role": "user",
-                "content": (
-                    f"Question:\n{question}\n\nRepository {repo}:\n{context}"
-                ),
+                "content": (f"Question:\n{question}\n\nRepository {repo}:\n{context}"),
             },
         ]
         resp = await self._completer().complete(self.model, messages)

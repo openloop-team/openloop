@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 from uuid import UUID
@@ -20,7 +19,6 @@ from openloop.broker.models import (
     validate_uuid,
 )
 from openloop.broker_rpc.keys import VerificationKeySet
-
 
 RECEIPT_FORMAT_VERSION = 1
 RECEIPT_AUDIENCE = "openloop:checkpoint-receipt"
@@ -189,9 +187,7 @@ class CheckpointReceiptVerifier:
             raise CheckpointReceiptProblem()
         return value
 
-    def verify(
-        self, token: SignedCheckpointReceipt
-    ) -> VerifiedCheckpointReceipt:
+    def verify(self, token: SignedCheckpointReceipt) -> VerifiedCheckpointReceipt:
         if not isinstance(token, SignedCheckpointReceipt):
             raise TypeError("token must be SignedCheckpointReceipt")
         try:
@@ -241,9 +237,7 @@ class CheckpointReceiptVerifier:
                 store_version=claims["store_version"],
                 envelope_version=claims["envelope_version"],
                 key_version=claims["key_version"],
-                durable_write_sequence=self._integer(
-                    claims["durable_write_sequence"]
-                ),
+                durable_write_sequence=self._integer(claims["durable_write_sequence"]),
             )
         except CheckpointReceiptProblem:
             raise

@@ -13,7 +13,7 @@ from openloop.approvals.store import (
     ApprovalStore,
     InMemoryApprovalStore,
 )
-from openloop.tools.aliases import ACTION_ALIASES, _canonical_action
+from openloop.tools.aliases import _canonical_action
 from openloop.tools.base import (
     Invocation,
     Tool,
@@ -62,7 +62,7 @@ class ToolGateway:
         self,
         tools: list[Tool] | None = None,
         approvals: ApprovalStore | None = None,
-        engine: "WorkflowEngine | None" = None,
+        engine: WorkflowEngine | None = None,
     ) -> None:
         self._tools: dict[str, Tool] = {}
         for tool in tools or []:
@@ -74,7 +74,7 @@ class ToolGateway:
         # Optional Phase B warm-workspace pool (set during app wiring). Held here
         # so the app can reach it to wire its durable sink + lifecycle without a
         # separate registry; the orchestrator uses it directly.
-        self.warm_pool: "WarmWorkspacePool | None" = None
+        self.warm_pool: WarmWorkspacePool | None = None
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
@@ -162,8 +162,15 @@ class ToolGateway:
             # so policy and display stay in canonical space either way.
             legacy_tool_name, legacy_permission = split_action(requested_action)
             legacy_tool = self._tools.get(legacy_tool_name)
-            if legacy_tool is not None and legacy_permission in legacy_tool.supported_permissions():
-                tool_name, permission, tool = legacy_tool_name, legacy_permission, legacy_tool
+            if (
+                legacy_tool is not None
+                and legacy_permission in legacy_tool.supported_permissions()
+            ):
+                tool_name, permission, tool = (
+                    legacy_tool_name,
+                    legacy_permission,
+                    legacy_tool,
+                )
 
         if tool is None or permission not in tool.supported_permissions():
             return Invocation(
@@ -381,6 +388,22 @@ class ToolGateway:
             return inv
 
         tool, permission = self._resolve_stored_tool(claimed.tool, claimed.permission)
+        if tool is None:
+            # kind is "unknown" here: _classify reports that precisely when this
+            # lookup misses, which happens when the connector was disabled by
+            # config or renamed out from under a durable row. Reaching execute
+            # with no tool would raise AttributeError on the None.
+            logger.warning(
+                "approval %s names tool %r, which is not registered on this "
+                "gateway; reporting instead of executing",
+                request_id,
+                claimed.tool,
+            )
+            return Invocation(
+                status="forbidden",
+                message=f"tool {claimed.tool!r} is not registered",
+                decided_by=claimed.decided_by,
+            )
         result = await tool.execute(
             permission, _args_for_execute(tool, claimed, permission)
         )
@@ -405,9 +428,7 @@ class ToolGateway:
         healed = 0
         cursor: tuple | None = None
         while True:
-            batch = await self.approvals.decided_unreconciled(
-                limit=200, after=cursor
-            )
+            batch = await self.approvals.decided_unreconciled(limit=200, after=cursor)
             if not batch:
                 return healed
             cursor = (batch[-1].created_at, batch[-1].id)
@@ -577,18 +598,24 @@ class ToolGateway:
         The event payload's approver is always the row's ``decided_by``.
         """
         tool, _ = self._resolve_stored_tool(request.tool, request.permission)
+        engine = self.engine
+        # `workflow` is an optional connector attribute, not part of the Tool
+        # protocol, so it is read the way _approve_effect_unavailable reads it.
+        workflow = getattr(tool, "workflow", None)
+        # All three are what that gate checks, and the docstring above requires
+        # every caller to run it first. Asserting states the contract in the
+        # place that depends on it; without the gate these were AttributeErrors.
+        assert tool is not None and engine is not None and workflow is not None
         instance_id = request.workflow_instance_id or _instance_id(request)
-        await self.engine.start(
-            tool.workflow, instance_id, _workflow_initial_state(request)
-        )
-        instance = await self.engine.send_event(
+        await engine.start(workflow, instance_id, _workflow_initial_state(request))
+        instance = await engine.send_event(
             instance_id,
             "await_approval",
             {"approver": request.decided_by, "approval_id": request.id},
             drive=False,
         )
         if instance is not None and instance.status not in WORKFLOW_TERMINAL:
-            self.engine.drive_background(instance_id)
+            engine.drive_background(instance_id)
         await self._mark_reconciled_safe(request.id)
         return instance
 
@@ -614,7 +641,16 @@ class ToolGateway:
                 return False
             # A None return means already terminal or never created — nothing
             # can revive a denied row, so the effect is ensured either way.
-            await self.engine.cancel(instance_id, "approval denied")
+            #
+            # instance_id is None only on a legacy row: invoke() stamps
+            # workflow_backed and workflow_instance_id together, and
+            # _instance_id() never yields an empty one. A row naming no
+            # instance is the "never created" case above, so it retires here.
+            # Deferring instead would be permanent — the column never becomes
+            # non-null, so every later sweep would re-read a row it can never
+            # retire.
+            if instance_id is not None:
+                await self.engine.cancel(instance_id, "approval denied")
             await self._mark_reconciled_safe(request.id)
             return True
         if kind == "direct":
@@ -707,7 +743,8 @@ def _workflow_invocation(instance) -> Invocation:
         return Invocation(
             status="executed",
             result=ToolResult(
-                ok=True, summary=result.get("summary", "workflow completed"),
+                ok=True,
+                summary=result.get("summary", "workflow completed"),
                 data=result,
             ),
         )
@@ -737,7 +774,9 @@ def _workflow_invocation(instance) -> Invocation:
 
 def _summarize(action: str, args: dict) -> str:
     if action == "github.issues:write":
-        return f"create issue in {args.get('repo', '?')}: {args.get('title', '')}".strip()
+        return (
+            f"create issue in {args.get('repo', '?')}: {args.get('title', '')}".strip()
+        )
     if action == "github.pulls:write":
         return (
             f"open PR in {args.get('repo', '?')} "

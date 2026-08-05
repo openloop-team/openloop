@@ -4,7 +4,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).parents[2]
 COMPOSE_FILES = tuple(sorted(ROOT.glob("docker-compose*.yml")))
 SOCKET = "/var/run/docker.sock"
@@ -39,9 +38,7 @@ def test_only_permission_adapter_receives_raw_docker_socket() -> None:
             if SOCKET in _targets(service):
                 socket_owners.append((path.name, service_name))
 
-    assert socket_owners == [
-        ("docker-compose.broker.yml", "docker-socket-adapter")
-    ]
+    assert socket_owners == [("docker-compose.broker.yml", "docker-socket-adapter")]
 
 
 def test_runtime_services_never_receive_docker_socket() -> None:

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
-import logging
 from uuid import UUID
 
 from openloop.broker.errors import (
@@ -65,7 +65,6 @@ from .secrets import (
     RuntimeSecretProblem,
 )
 
-
 log = logging.getLogger("openloop.broker")
 
 
@@ -92,19 +91,13 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
         if not isinstance(secret_authority, RuntimeSecretAuthority):
             raise TypeError("secret_authority must be RuntimeSecretAuthority")
         if not isinstance(durable_state_adapter, LocalDurableStateAdapter):
-            raise TypeError(
-                "durable_state_adapter must be LocalDurableStateAdapter"
-            )
+            raise TypeError("durable_state_adapter must be LocalDurableStateAdapter")
         if not isinstance(receipt_verifier, CheckpointReceiptVerifier):
             raise TypeError("receipt_verifier must be CheckpointReceiptVerifier")
         if not callable(clock):
             raise TypeError("clock must be callable")
         maximum = runtime_driver.maximum_lifetime_seconds
-        if (
-            isinstance(maximum, bool)
-            or not isinstance(maximum, int)
-            or maximum <= 0
-        ):
+        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
             raise ValueError("runtime maximum lifetime is invalid")
         if policy.execution_lease_seconds > maximum:
             raise ValueError("policy lease exceeds runtime maximum lifetime")
@@ -126,12 +119,9 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
         if (
             snapshot.profile != self._policy.profile
             or snapshot.runtime_driver != self._policy.runtime_driver
-            or snapshot.durable_state_driver
-            != self._policy.durable_state_driver
+            or snapshot.durable_state_driver != self._policy.durable_state_driver
         ):
-            raise SegmentCoordinatorProblem(
-                SegmentCoordinatorCode.STATE_CONFLICT
-            )
+            raise SegmentCoordinatorProblem(SegmentCoordinatorCode.STATE_CONFLICT)
 
     @staticmethod
     def _problem(
@@ -214,7 +204,10 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
         operation_id: UUID,
     ) -> SegmentCoordinatorProblem:
         try:
-            code = SegmentCoordinatorCode(generation.failure_reason_code)
+            # StrEnum's constructor is typed str, where the old (str, Enum) base
+            # accepted anything. An unset failure_reason_code lands in the same
+            # ValueError fallback it always did.
+            code = SegmentCoordinatorCode(generation.failure_reason_code or "")
         except (TypeError, ValueError):
             code = SegmentCoordinatorCode.INTERNAL
         return SegmentCoordinatorProblem(code, operation_id=operation_id)
@@ -245,9 +238,7 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
                 or generation.runtime_ref is not None
                 or generation.capability_digest is not None
             ):
-                raise SegmentCoordinatorProblem(
-                    SegmentCoordinatorCode.STATE_CONFLICT
-                )
+                raise SegmentCoordinatorProblem(SegmentCoordinatorCode.STATE_CONFLICT)
         elif generation.state is GenerationState.RUNNING:
             if (
                 snapshot.state is not JobState.ACTIVE
@@ -257,9 +248,7 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
                 or generation.runtime_ref is None
                 or generation.capability_digest is None
             ):
-                raise SegmentCoordinatorProblem(
-                    SegmentCoordinatorCode.STATE_CONFLICT
-                )
+                raise SegmentCoordinatorProblem(SegmentCoordinatorCode.STATE_CONFLICT)
         else:
             raise SegmentCoordinatorProblem(SegmentCoordinatorCode.STATE_CONFLICT)
 
@@ -285,9 +274,7 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
         if not self._secrets.verify_durable(secrets, generation.durable_digest):
             raise RuntimeSecretProblem()
         if generation.capability_digest is not None and not (
-            self._secrets.verify_capability(
-                secrets, generation.capability_digest
-            )
+            self._secrets.verify_capability(secrets, generation.capability_digest)
         ):
             raise RuntimeSecretProblem()
         return (
@@ -434,9 +421,7 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
 
         ticket: OperationTicket | None = None
         try:
-            before = await self._ledger.inspect_job_for_recovery(
-                owner, payload.job_id
-            )
+            before = await self._ledger.inspect_job_for_recovery(owner, payload.job_id)
             self._fixed_policy(before)
             durable_ref, durable_version, durable_digest = (
                 self._candidate_durable_metadata(owner, before)
@@ -466,9 +451,7 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
             generation = self._base_generation(owner, ticket, snapshot)
             authoritative_state_loaded = True
             if generation.state is GenerationState.ABANDONED:
-                raise self._abandoned_problem(
-                    generation, ticket.operation_id
-                )
+                raise self._abandoned_problem(generation, ticket.operation_id)
             if generation.state not in {
                 GenerationState.STARTING,
                 GenerationState.RUNNING,
@@ -488,6 +471,17 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
             if self._now() >= generation.execution_lease_deadline:
                 raise RuntimeExpired("generation execution deadline elapsed")
             spec, secrets = self._derive_spec(owner, snapshot, generation)
+            if (
+                generation.durable_key_version is None
+                or generation.durable_digest is None
+            ):
+                # Both are Optional across a generation's life — unset before
+                # any durable state exists — but a generation being started
+                # here has them, and describe() cannot locate state without.
+                raise SegmentCoordinatorProblem(
+                    SegmentCoordinatorCode.STATE_CONFLICT,
+                    operation_id=ticket.operation_id,
+                )
             descriptor = self._durable.describe(
                 snapshot.job_id,
                 generation.durable_key_version,
@@ -676,8 +670,7 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
                 not in {GenerationState.RELEASING, GenerationState.RELEASED}
                 or generation.receipt != verified
                 or generation.release_target is not payload.target
-                or generation.release_terminal_outcome
-                is not payload.terminal_outcome
+                or generation.release_terminal_outcome is not payload.terminal_outcome
             ):
                 raise SegmentCoordinatorProblem(
                     SegmentCoordinatorCode.STATE_CONFLICT,
@@ -803,9 +796,7 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
                 snapshot.pending_operation_id is not None
                 or generation.pending_operation_id is not None
             ):
-                raise SegmentCoordinatorProblem(
-                    SegmentCoordinatorCode.STATE_CONFLICT
-                )
+                raise SegmentCoordinatorProblem(SegmentCoordinatorCode.STATE_CONFLICT)
         elif (
             snapshot.pending_operation_id is None
             or generation.pending_operation_id != snapshot.pending_operation_id
@@ -824,9 +815,7 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
                 deadline=generation.execution_lease_deadline,
             )
             if generation.runtime_ref != identity.opaque_handle:
-                raise SegmentCoordinatorProblem(
-                    SegmentCoordinatorCode.STATE_CONFLICT
-                )
+                raise SegmentCoordinatorProblem(SegmentCoordinatorCode.STATE_CONFLICT)
             released = await self._runtime.release(identity)
             if (
                 not isinstance(released, ReleaseObservation)

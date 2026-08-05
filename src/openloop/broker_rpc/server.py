@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
-from dataclasses import dataclass
 import errno
 import math
 import os
-from pathlib import Path
 import socket
 import stat
 import struct
 import time
+from collections.abc import Awaitable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TypeVar
 
 from .application import BrokerRpcApplication
@@ -21,7 +21,6 @@ from .errors import RpcErrorCode, RpcFailure, RpcProtocolProblem
 from .limits import BrokerRpcLimits, InFlightLimiter, TokenBucketLimiter
 from .models import RPC_VERSION, RpcRequest, RpcResponse
 from .peer import PeerCredentialProblem, PeerCredentialProvider
-
 
 _T = TypeVar("_T")
 MAX_UNIX_SOCKET_PATH_BYTES = 100
@@ -60,9 +59,7 @@ def take_over_stale_socket(
     try:
         timeout = float(connect_timeout)
     except (OverflowError, TypeError, ValueError) as error:
-        raise ValueError(
-            "connect_timeout must be a positive finite number"
-        ) from error
+        raise ValueError("connect_timeout must be a positive finite number") from error
     if (
         isinstance(connect_timeout, bool)
         or not isinstance(connect_timeout, (int, float))
@@ -135,18 +132,18 @@ class UnixSocketPolicy:
             raise ValueError("socket path is invalid or too long")
         if isinstance(self.mode, bool) or not isinstance(self.mode, int):
             raise TypeError("socket mode must be an integer")
-        if (
-            self.mode & ~0o770
-            or self.mode & 0o007
-            or self.mode & 0o600 != 0o600
-        ):
+        if self.mode & ~0o770 or self.mode & 0o007 or self.mode & 0o600 != 0o600:
             raise ValueError("socket mode must be owner-rw and deny world access")
         if self.gid is not None and (
-            isinstance(self.gid, bool)
-            or not isinstance(self.gid, int)
-            or self.gid < 0
+            isinstance(self.gid, bool) or not isinstance(self.gid, int) or self.gid < 0
         ):
             raise ValueError("socket gid must be a nonnegative integer")
+
+
+# Shared default, built once at import. BrokerRpcLimits is a frozen dataclass,
+# so there is nothing to mutate between servers; naming it keeps the call out of
+# the signature's default, where it would be evaluated at definition time.
+_DEFAULT_LIMITS = BrokerRpcLimits()
 
 
 class BrokerRpcServer:
@@ -156,7 +153,7 @@ class BrokerRpcServer:
         application: BrokerRpcApplication,
         socket_policy: UnixSocketPolicy,
         peer_provider: PeerCredentialProvider,
-        limits: BrokerRpcLimits = BrokerRpcLimits(),
+        limits: BrokerRpcLimits = _DEFAULT_LIMITS,
         monotonic_clock=time.monotonic,
     ) -> None:
         if not isinstance(application, BrokerRpcApplication):
@@ -342,9 +339,7 @@ class BrokerRpcServer:
             deadline,
         )
 
-    async def _finish_application(
-        self, task: asyncio.Task[RpcResponse]
-    ) -> None:
+    async def _finish_application(self, task: asyncio.Task[RpcResponse]) -> None:
         try:
             await task
         except Exception:
@@ -420,9 +415,7 @@ class BrokerRpcServer:
             server.close()
             await server.wait_closed()
         tasks = tuple(
-            self._connection_tasks
-            | self._background_tasks
-            | self._application_tasks
+            self._connection_tasks | self._background_tasks | self._application_tasks
         )
         if tasks:
             done, pending = await asyncio.wait(
@@ -437,7 +430,7 @@ class BrokerRpcServer:
         self._unlink_owned_socket()
         self._socket_identity = None
 
-    async def __aenter__(self) -> "BrokerRpcServer":
+    async def __aenter__(self) -> BrokerRpcServer:
         await self.start()
         return self
 

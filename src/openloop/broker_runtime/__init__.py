@@ -15,7 +15,6 @@ from .contract import (
     RuntimeResourceState,
     RuntimeUnavailable,
 )
-from .memory import InMemoryRuntimeDriver
 from .docker import (
     CommandExecution,
     CommandRunner,
@@ -24,6 +23,7 @@ from .docker import (
     HealthChecker,
 )
 from .docker_policy import DockerRuntimeConfig
+from .memory import InMemoryRuntimeDriver
 
 __all__ = [
     "EnsuredGeneration",

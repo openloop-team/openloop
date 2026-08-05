@@ -10,7 +10,8 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
@@ -68,7 +69,6 @@ from .filesystem import (
     release_generation_filesystem,
 )
 
-
 _OUTPUT_LIMIT = 256 * 1024
 _DOCKER_OBJECT_ID = re.compile(r"[0-9a-f]{64}\Z")
 _TOKEN_VALUE = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
@@ -109,8 +109,7 @@ class ExpirySweepObservation:
     def __post_init__(self) -> None:
         for collection in (self.released, self.failed):
             if not isinstance(collection, tuple) or any(
-                not isinstance(value, GenerationRuntimeIdentity)
-                for value in collection
+                not isinstance(value, GenerationRuntimeIdentity) for value in collection
             ):
                 raise TypeError(
                     "sweep identities must be tuples of generation identities"
@@ -358,7 +357,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
             raise TypeError("config must be a DockerRuntimeConfig")
         self.config = config
         self._runner = runner or _default_command_runner
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._health_checker = health_checker or self._default_health_check
         self._workspace_materializer = workspace_materializer
         self._socket_hardener = socket_hardener or (
@@ -386,9 +385,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
             mode=policy.compiled_relay.endpoint.mode,
         )
 
-    def describe_endpoint(
-        self, spec: OpenHandsGenerationSpec
-    ) -> RelayClientEndpoint:
+    def describe_endpoint(self, spec: OpenHandsGenerationSpec) -> RelayClientEndpoint:
         if not isinstance(spec, OpenHandsGenerationSpec):
             raise TypeError("spec must be an OpenHandsGenerationSpec")
         try:
@@ -407,12 +404,10 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
             raise RuntimeUnavailable("runtime clock failed") from exc
         if not isinstance(value, datetime) or value.tzinfo is None:
             raise RuntimeUnavailable("runtime clock did not return timezone-aware time")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @asynccontextmanager
-    async def _locked(
-        self, identity: GenerationRuntimeIdentity
-    ) -> AsyncIterator[None]:
+    async def _locked(self, identity: GenerationRuntimeIdentity) -> AsyncIterator[None]:
         key = f"{identity.job_id}:{identity.generation}"
         entry = self._resource_locks.setdefault(key, _LockEntry(asyncio.Lock()))
         entry.users += 1
@@ -661,10 +656,11 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
         if host.get("CapAdd") not in (None, []):
             raise RuntimeIdentityConflict(f"{role} capability policy does not match")
         security = host.get("SecurityOpt")
-        normalized_security = {
-            str(value).removesuffix(":true")
-            for value in security
-        } if isinstance(security, list) else set()
+        normalized_security = (
+            {str(value).removesuffix(":true") for value in security}
+            if isinstance(security, list)
+            else set()
+        )
         if normalized_security != {"no-new-privileges"}:
             raise RuntimeIdentityConflict(f"{role} security policy does not match")
         restart = host.get("RestartPolicy")
@@ -793,9 +789,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
         except RuntimeDriverError:
             raise
         except Exception as exc:
-            raise RuntimeUnavailable(
-                "generation filesystem inspection failed"
-            ) from exc
+            raise RuntimeUnavailable("generation filesystem inspection failed") from exc
         expired = self._now() >= identity.deadline
         structurally_healthy = (
             agent.state is RuntimeResourceState.RUNNING
@@ -976,9 +970,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
                     raise RuntimeHealthFailure(
                         "generation health checker failed"
                     ) from exc
-                observation = await self._observation(
-                    identity, spec=spec, healthy=True
-                )
+                observation = await self._observation(identity, spec=spec, healthy=True)
                 if not observation.complete:
                     raise RuntimeHealthFailure(
                         "generation was incomplete after its health gate"
@@ -1000,9 +992,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
                             )
                 raise
 
-    async def quiesce(
-        self, spec: OpenHandsGenerationSpec
-    ) -> QuiescedGeneration:
+    async def quiesce(self, spec: OpenHandsGenerationSpec) -> QuiescedGeneration:
         if not isinstance(spec, OpenHandsGenerationSpec):
             raise TypeError("spec must be an OpenHandsGenerationSpec")
         identity = spec.identity
@@ -1052,9 +1042,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
                 raise RuntimeHealthFailure(
                     "checkpoint relay health checker failed"
                 ) from exc
-            observation = await self._observation(
-                identity, spec=spec, healthy=True
-            )
+            observation = await self._observation(identity, spec=spec, healthy=True)
             if not observation.complete:
                 raise RuntimeHealthFailure(
                     "generation was incomplete after checkpoint transition"
@@ -1096,9 +1084,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
                     f"Docker {role} stop failed: {_safe_output(execution, ())}"
                 )
         execution = await self._invoke(
-            DockerCommand(
-                (self.config.docker, "rm", object_id), timeout_seconds=60.0
-            )
+            DockerCommand((self.config.docker, "rm", object_id), timeout_seconds=60.0)
         )
         if execution.returncode != 0 and not _is_not_found(execution):
             raise RuntimeUnavailable(
@@ -1136,29 +1122,25 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
         except RuntimeDriverError:
             raise
         except Exception as exc:
-            raise RuntimeUnavailable(
-                "generation filesystem release failed"
-            ) from exc
+            raise RuntimeUnavailable("generation filesystem release failed") from exc
         if self._workspace_materializer is not None:
             try:
-                await asyncio.to_thread(
-                    self._workspace_materializer.discard, identity
-                )
+                await asyncio.to_thread(self._workspace_materializer.discard, identity)
             except Exception as exc:
                 raise RuntimeUnavailable(
                     "generation workspace seed cleanup failed"
                 ) from exc
         return ReleaseObservation(identity=identity, released=True)
 
-    async def release(
-        self, identity: GenerationRuntimeIdentity
-    ) -> ReleaseObservation:
+    async def release(self, identity: GenerationRuntimeIdentity) -> ReleaseObservation:
         if not isinstance(identity, GenerationRuntimeIdentity):
             raise TypeError("identity must be a GenerationRuntimeIdentity")
         async with self._locked(identity):
             return await self._release_unlocked(identity)
 
     async def _listed_names(self, kind: str) -> tuple[str, ...]:
+        # The two branches build argv vectors of different lengths.
+        argv: tuple[str, ...]
         if kind == "container":
             argv = (
                 self.config.docker,
@@ -1215,7 +1197,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
                 operation_id=UUID(labels["openloop.runtime.operation"]),
                 job_id=UUID(labels["openloop.runtime.job"]),
                 generation=int(labels["openloop.runtime.generation"]),
-                deadline=datetime.fromtimestamp(deadline_epoch, timezone.utc),
+                deadline=datetime.fromtimestamp(deadline_epoch, UTC),
             )
             runtime_actual = {
                 name: value

@@ -109,9 +109,7 @@ class PostgresUsageStore(BorrowedPostgresStore):
             )
         return status.endswith("1")
 
-    async def monthly_total(
-        self, scope_key: str, now: datetime | None = None
-    ) -> float:
+    async def monthly_total(self, scope_key: str, now: datetime | None = None) -> float:
         pool = self._require_pool()
         async with pool.acquire() as conn:
             # date_trunc keeps "current month" defined by the database clock.

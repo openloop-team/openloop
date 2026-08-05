@@ -1,6 +1,6 @@
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -39,7 +39,6 @@ from openloop.broker_runtime.contract import RuntimeDriver
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 
 from .broker_repository_contract import MutableClock, SequenceIds
-
 
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 
@@ -121,9 +120,7 @@ def broker_rpc_test_fixture(
     repository = InMemoryBrokerRepository(clock=clock)
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=5000))
     capability = JobCapabilityAuthority(
-        CapabilityRootRing(
-            {"cap-v1": bytes(range(32))}, current_version="cap-v1"
-        )
+        CapabilityRootRing({"cap-v1": bytes(range(32))}, current_version="cap-v1")
     )
     audit = InMemoryRpcAuditSink(clock=lambda: NOW)
     receipt_private_key = Ed25519PrivateKey.generate()

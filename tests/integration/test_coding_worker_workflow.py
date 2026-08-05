@@ -10,6 +10,7 @@ from pathlib import Path
 from openloop.agents import load_agent
 from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
 from openloop.tasks import WorkspaceTask
+from openloop.testing import FakeGitHub, FakeWorkerOrchestrator
 from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import (
     STEPS,
@@ -17,6 +18,7 @@ from openloop.tools.coding_worker import (
     WorkerOutcome,
     WorkerState,
 )
+from openloop.tools.github import GitHubConnector
 from openloop.tools.openhands_artifacts import (
     WorkspaceArtifact,
     WorkspaceArtifactIdentity,
@@ -26,7 +28,6 @@ from openloop.tools.openhands_resume import (
     WorkerPaused,
     WorkspaceArtifactRef,
 )
-from openloop.tools.github import GitHubConnector
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from openloop.workflows.coding_worker import (
     WORKFLOW_NAME,
@@ -34,7 +35,6 @@ from openloop.workflows.coding_worker import (
     build_coding_worker_workflow,
 )
 from openloop.workflows.store import WorkflowInstance, _now
-from openloop.testing import FakeGitHub, FakeWorkerOrchestrator
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
@@ -76,7 +76,8 @@ def _setup(runner=None, github=None):
 async def test_invoke_parks_workflow_at_approval():
     gw, engine, store, runner, github = _setup()
     inv = await gw.invoke(
-        _agent(), "coding_worker.pr:write",
+        _agent(),
+        "coding_worker.pr:write",
         {"repo": "acme/x", "instruction": "add retries"},
     )
     assert inv.status == "pending_approval"
@@ -94,7 +95,8 @@ async def test_invoke_parks_workflow_at_approval():
 async def test_approval_event_drives_worker_and_opens_pr():
     gw, engine, store, runner, github = _setup()
     pending = await gw.invoke(
-        _agent(), "coding_worker.pr:write",
+        _agent(),
+        "coding_worker.pr:write",
         {"repo": "acme/x", "instruction": "add retries"},
     )
     job_id = pending.approval.args["job_id"]
@@ -121,7 +123,9 @@ async def test_resolve_recovers_when_workflow_was_never_started():
     # ensure-start the workflow, then drive it — not get stuck.
     gw, engine, store, runner, github = _setup()
     pending = await gw.invoke(
-        _agent(), "coding_worker.pr:write", {"repo": "acme/x", "instruction": "x"},
+        _agent(),
+        "coding_worker.pr:write",
+        {"repo": "acme/x", "instruction": "x"},
     )
     job_id = pending.approval.args["job_id"]
     store._by_id.pop(job_id)  # simulate the lost workflow start
@@ -143,7 +147,9 @@ async def test_result_includes_full_spend_telemetry():
     )
     gw, engine, store, runner, github = _setup(runner=costing)
     pending = await gw.invoke(
-        _agent(), "coding_worker.pr:write", {"repo": "acme/x", "instruction": "x"},
+        _agent(),
+        "coding_worker.pr:write",
+        {"repo": "acme/x", "instruction": "x"},
     )
     resolved = await gw.resolve(pending.approval.id, "@maciag.artur", approve=True)
 
@@ -158,7 +164,9 @@ async def test_result_includes_full_spend_telemetry():
 async def test_denied_approval_cancels_workflow():
     gw, engine, store, runner, github = _setup()
     pending = await gw.invoke(
-        _agent(), "coding_worker.pr:write", {"repo": "acme/x", "instruction": "x"},
+        _agent(),
+        "coding_worker.pr:write",
+        {"repo": "acme/x", "instruction": "x"},
     )
     job_id = pending.approval.args["job_id"]
 
@@ -177,7 +185,9 @@ async def test_open_pr_failure_marks_workflow_failed():
 
     gw, engine, store, runner, github = _setup(github=FlakyGitHub())
     pending = await gw.invoke(
-        _agent(), "coding_worker.pr:write", {"repo": "acme/x", "instruction": "x"},
+        _agent(),
+        "coding_worker.pr:write",
+        {"repo": "acme/x", "instruction": "x"},
     )
     job_id = pending.approval.args["job_id"]
 
@@ -199,7 +209,9 @@ async def test_resume_after_crash_between_approval_and_pr():
     # re-drives the instance (left "running") and finishes the PR.
     gw, engine, store, runner, github = _setup()
     pending = await gw.invoke(
-        _agent(), "coding_worker.pr:write", {"repo": "acme/x", "instruction": "x"},
+        _agent(),
+        "coding_worker.pr:write",
+        {"repo": "acme/x", "instruction": "x"},
     )
     job_id = pending.approval.args["job_id"]
 
@@ -209,10 +221,17 @@ async def test_resume_after_crash_between_approval_and_pr():
     await store.claim_event(job_id, "await_approval", {})
     inst = await store.claim_drive(job_id, lease_seconds=30)
     inst.completed_steps = ["await_approval", "run_worker"]
-    inst.state.update({
-        "branch": f"openloop/job-{job_id}", "title": "t", "body": "b",
-        "repo": "acme/x", "instruction": "x", "base": "main", "job_id": job_id,
-    })
+    inst.state.update(
+        {
+            "branch": f"openloop/job-{job_id}",
+            "title": "t",
+            "body": "b",
+            "repo": "acme/x",
+            "instruction": "x",
+            "base": "main",
+            "job_id": job_id,
+        }
+    )
     await store.fenced_write(inst, inst.drive_gen)
     store._by_id[job_id].leased_until = _now() - timedelta(seconds=1)
 
@@ -427,7 +446,9 @@ async def test_old_flat_layout_parked_instance_rehydrates_wakes_and_resumes():
         master_key_id="key-v1",
         slack_requester_id="maciag.artur",
     )
-    identity = WorkspaceArtifactIdentity(job_id, "conversation-1", "segment-1", "paused")
+    identity = WorkspaceArtifactIdentity(
+        job_id, "conversation-1", "segment-1", "paused"
+    )
     artifact = WorkspaceArtifactRef(
         WorkspaceArtifact(
             identity=identity,
@@ -441,7 +462,12 @@ async def test_old_flat_layout_parked_instance_rehydrates_wakes_and_resumes():
         "a" * 40,
     )
     paused = WorkerPaused(
-        "conversation-1", "segment-1", "decision-1", "Run terminal", "c" * 64, artifact,
+        "conversation-1",
+        "segment-1",
+        "decision-1",
+        "Run terminal",
+        "c" * 64,
+        artifact,
     )
     resume.transition_to(
         "parking",

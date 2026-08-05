@@ -47,6 +47,9 @@ async def check_budget(agent: Agent, usage: UsageStore) -> BudgetDecision:
         return BudgetDecision(
             allowed=False, reason=f"monthly budget reached ({detail})"
         )
-    logger.warning("agent %s over monthly budget (%s) — warn mode, proceeding",
-                   agent.metadata.name, detail)
+    logger.warning(
+        "agent %s over monthly budget (%s) — warn mode, proceeding",
+        agent.metadata.name,
+        detail,
+    )
     return BudgetDecision(allowed=True)

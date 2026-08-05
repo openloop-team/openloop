@@ -17,13 +17,12 @@ from openloop.broker.models import (
     OperationStatus,
     OperationTicket,
     ReleaseTarget,
-    TerminalOutcome,
 )
 from openloop.broker.postgres import (
+    _SCAN_RECOVERY_CANDIDATES,
     BROKER_MIGRATION_LOCK_ID,
     Migration,
     PostgresBrokerRepository,
-    _SCAN_RECOVERY_CANDIDATES,
     _decode_result,
     _decode_ticket,
     _encode_result,
@@ -241,9 +240,7 @@ async def test_setup_skips_exact_applied_migrations(monkeypatch):
         ),
     ],
 )
-async def test_setup_rejects_future_version_or_applied_drift(
-    monkeypatch, row, problem
-):
+async def test_setup_rejects_future_version_or_applied_drift(monkeypatch, row, problem):
     migration = Migration.from_bytes(1, "initial", b"SELECT 1;\n")
     if row["version"] == 1 and row["name"] == "renamed":
         row = {**row, "checksum": migration.checksum}
@@ -289,7 +286,7 @@ def test_initial_migration_is_packaged_and_contains_required_constraints():
         "broker_operations",
         "broker_audit",
     ):
-        assert f"CREATE TABLE" in sql and table in sql
+        assert "CREATE TABLE" in sql and table in sql
     for fragment in (
         "PRIMARY KEY (job_id, generation)",
         "REFERENCES broker_jobs",

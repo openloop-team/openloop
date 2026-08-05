@@ -6,9 +6,7 @@ from tests.support.settings import IsolatedSettings as Settings
 
 
 def test_default_is_host_sandbox() -> None:
-    assert isinstance(
-        builders.build_worker_sandbox(Settings()), HostSandbox
-    )
+    assert isinstance(builders.build_worker_sandbox(Settings()), HostSandbox)
 
 
 def test_builtin_worker_rejects_docker_marker(caplog) -> None:
