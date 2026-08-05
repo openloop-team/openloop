@@ -143,9 +143,7 @@ class BrokerLedger:
         authorization = None
         if minimum_isolation is not None:
             assert authorization_factory is not None
-            authorization = authorization_factory(
-                owner, job_id, minimum_isolation
-            )
+            authorization = authorization_factory(owner, job_id, minimum_isolation)
             if not isinstance(authorization, JobAuthorizationMetadata):
                 raise TypeError(
                     "authorization_factory must return JobAuthorizationMetadata"
@@ -440,9 +438,7 @@ class BrokerLedger:
             raise TypeError("limit must be an integer")
         if not 1 <= limit <= 1000:
             raise ValueError("limit must be between 1 and 1000")
-        result = await self._repository.scan_recovery_candidates(
-            after_job_id, limit
-        )
+        result = await self._repository.scan_recovery_candidates(after_job_id, limit)
         if not isinstance(result, tuple) or any(
             not isinstance(item, RecoveryCandidate) for item in result
         ):

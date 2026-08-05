@@ -92,9 +92,7 @@ def run_phase5_checkpoint_park_resume_finalize_real_docker():
             capture_output=True,
             text=True,
         )
-        assert (
-            created_adapter_volume.returncode == 0
-        ), created_adapter_volume.stderr
+        assert created_adapter_volume.returncode == 0, created_adapter_volume.stderr
         initialized_volume = subprocess.run(
             [
                 "docker",
@@ -150,15 +148,9 @@ def run_phase5_checkpoint_park_resume_finalize_real_docker():
                     f"dst={_ADAPTER_CONFIG_PATH},readonly"
                 ),
                 "--mount",
-                (
-                    f"type=volume,src={adapter_volume},"
-                    f"dst={_ADAPTER_DATA_PATH}"
-                ),
+                (f"type=volume,src={adapter_volume},dst={_ADAPTER_DATA_PATH}"),
                 "--tmpfs",
-                (
-                    f"{_ADAPTER_HEALTH_PATH}:"
-                    "rw,nosuid,nodev,noexec,size=64k,mode=0700"
-                ),
+                (f"{_ADAPTER_HEALTH_PATH}:rw,nosuid,nodev,noexec,size=64k,mode=0700"),
                 DEFAULT_HAPROXY_RELAY_IMAGE,
             ],
             check=False,
@@ -248,17 +240,11 @@ def run_phase5_checkpoint_park_resume_finalize_real_docker():
                 "--mount",
                 f"type=volume,src={volume},dst={shared}",
                 "--mount",
-                (
-                    f"type=volume,src={adapter_volume},"
-                    f"dst={_ADAPTER_DATA_PATH},readonly"
-                ),
+                (f"type=volume,src={adapter_volume},dst={_ADAPTER_DATA_PATH},readonly"),
                 "--env",
                 "PYTHONPATH=/workspace/openloop/src:/workspace/openloop",
                 "--env",
-                (
-                    "DOCKER_HOST="
-                    f"unix://{_ADAPTER_DATA_PATH}/docker.sock"
-                ),
+                (f"DOCKER_HOST=unix://{_ADAPTER_DATA_PATH}/docker.sock"),
                 "--env",
                 f"OPENLOOP_CANARY_MODEL_PORT={fake.server_port}",
                 "--env",
@@ -268,7 +254,7 @@ def run_phase5_checkpoint_park_resume_finalize_real_docker():
             ]
             topology = os.environ.get("OPENLOOP_CANARY_BROKER_MODE")
             if topology:
-                command[command.index(_CANARY_IMAGE):command.index(_CANARY_IMAGE)] = [
+                command[command.index(_CANARY_IMAGE) : command.index(_CANARY_IMAGE)] = [
                     "--env",
                     f"OPENLOOP_CANARY_BROKER_MODE={topology}",
                 ]
@@ -299,12 +285,8 @@ def run_phase5_checkpoint_park_resume_finalize_real_docker():
         assert payload["statuses"][-1] == "terminal"
         assert fake.agent_calls == 2
     finally:
-        subprocess.run(
-            ["docker", "stop", controller], check=False, capture_output=True
-        )
-        subprocess.run(
-            ["docker", "stop", adapter], check=False, capture_output=True
-        )
+        subprocess.run(["docker", "stop", controller], check=False, capture_output=True)
+        subprocess.run(["docker", "stop", adapter], check=False, capture_output=True)
         subprocess.run(
             ["docker", "network", "rm", network],
             check=False,

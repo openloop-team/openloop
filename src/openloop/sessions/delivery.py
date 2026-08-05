@@ -108,8 +108,12 @@ class SurfaceDelivery(Protocol):
     ) -> None: ...
 
     async def post_final(
-        self, target: SurfaceTarget, result: Deliverable | str, *,
-        key: str | None = None, recover: bool = False,
+        self,
+        target: SurfaceTarget,
+        result: Deliverable | str,
+        *,
+        key: str | None = None,
+        recover: bool = False,
     ) -> str:
         """Render and post the final answer; return its provider id.
 
@@ -120,7 +124,11 @@ class SurfaceDelivery(Protocol):
         ...
 
     async def post_error(
-        self, target: SurfaceTarget, text: str, *, key: str | None = None,
+        self,
+        target: SurfaceTarget,
+        text: str,
+        *,
+        key: str | None = None,
         recover: bool = False,
     ) -> str:
         """Post an error/interrupted notice; return its provider id.
@@ -190,12 +198,14 @@ class SlackSurfaceDelivery:
             else:
                 resp = await self.client.conversations_history(
                     channel=target.channel,
-                    include_all_metadata=True, limit=_LOOKUP_LIMIT,
+                    include_all_metadata=True,
+                    limit=_LOOKUP_LIMIT,
                 )
         except Exception:  # noqa: BLE001 — best-effort dedup; fall back to posting
             logger.warning(
                 "delivery idempotency lookup failed for key %s; posting fresh",
-                key, exc_info=True,
+                key,
+                exc_info=True,
             )
             return None
         for msg in resp.get("messages", []) or []:
@@ -289,8 +299,12 @@ class SlackSurfaceDelivery:
         )
 
     async def _post_artifact(
-        self, target: SurfaceTarget, artifact: Artifact, *,
-        key: str | None, recover: bool,
+        self,
+        target: SurfaceTarget,
+        artifact: Artifact,
+        *,
+        key: str | None,
+        recover: bool,
     ) -> str:
         """Upload the content as a hosted snippet, then post the keyed summary.
 
@@ -328,7 +342,8 @@ class SlackSurfaceDelivery:
         except Exception:  # noqa: BLE001 — the answer must land even if hosting fails
             logger.warning(
                 "snippet upload failed for %s; posting content inline",
-                artifact.filename, exc_info=True,
+                artifact.filename,
+                exc_info=True,
             )
         if uploaded_ok:
             # The share already rendered the file; this keyed caption is just
@@ -420,9 +435,7 @@ class SlackSurfaceDelivery:
             return await self._post_prose(
                 target, deliverable.text, key=key, recover=recover
             )
-        return await self._post_artifact(
-            target, deliverable, key=key, recover=recover
-        )
+        return await self._post_artifact(target, deliverable, key=key, recover=recover)
 
     async def post_error(
         self,

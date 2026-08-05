@@ -94,9 +94,7 @@ def _render_haproxy_config(endpoint: RelayClientEndpoint) -> str:
     events_search_path = _acl_path(endpoint, "/events/search")
     run_path = _acl_path(endpoint, "/run")
     confirmation_policy_path = _acl_path(endpoint, "/confirmation_policy")
-    confirmation_response_path = _acl_path(
-        endpoint, "/events/respond_to_confirmation"
-    )
+    confirmation_response_path = _acl_path(endpoint, "/events/respond_to_confirmation")
     websocket_path = f"/sockets/events/{endpoint.conversation_id}"
 
     common_acls = f"""\

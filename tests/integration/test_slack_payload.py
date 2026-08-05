@@ -25,8 +25,12 @@ AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 # A realistic Slack interactive payload for an Approve button click.
 BLOCK_ACTIONS = {
     "type": "block_actions",
-    "user": {"id": "U07ABC123", "username": "maciag.artur", "name": "maciag.artur",
-             "team_id": "T01"},
+    "user": {
+        "id": "U07ABC123",
+        "username": "maciag.artur",
+        "name": "maciag.artur",
+        "team_id": "T01",
+    },
     "api_app_id": "A01",
     "container": {"type": "message", "message_ts": "1700000000.000100"},
     "trigger_id": "123.456.abc",
@@ -105,7 +109,8 @@ async def test_id_only_user_is_rejected_as_non_approver():
     body = _payload(approval_id, id="U07ABC123")  # no username/name
 
     approver = _approver_handle(body["user"])
-    msg = await resolve_from_action(gw, body["actions"][0]["value"], approver,
-                                    approve=True)
+    msg = await resolve_from_action(
+        gw, body["actions"][0]["value"], approver, approve=True
+    )
     assert msg.startswith("⛔")  # @U07ABC123 is not in the approver list
     assert github.created == []

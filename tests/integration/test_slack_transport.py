@@ -31,8 +31,10 @@ def test_build_slack_app_socket_mode_without_signing_secret():
 
 def test_build_slack_app_http_mode_with_signing_secret():
     app = build_slack_app(
-        _runtime(), InMemorySurfaceSessionStore(),
-        bot_token="xoxb-test", signing_secret="shhh",
+        _runtime(),
+        InMemorySurfaceSessionStore(),
+        bot_token="xoxb-test",
+        signing_secret="shhh",
     )
     assert isinstance(app, AsyncApp)
 

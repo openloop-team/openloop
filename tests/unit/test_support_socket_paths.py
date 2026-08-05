@@ -18,9 +18,7 @@ from tests.support.socket_paths import (
 )
 
 
-def test_selector_resolves_synthetic_symlink_and_real_directory(
-    monkeypatch, tmp_path
-):
+def test_selector_resolves_synthetic_symlink_and_real_directory(monkeypatch, tmp_path):
     real = tmp_path / "private-tmp"
     real.mkdir()
     alias = tmp_path / "tmp"
@@ -30,12 +28,14 @@ def test_selector_resolves_synthetic_symlink_and_real_directory(
     # realpath behavior; budget behavior has its own test below.
     monkeypatch.setattr(socket_paths, "MAX_UNIX_SOCKET_PATH_BYTES", 4096)
 
-    assert select_short_socket_parent(
-        candidates=(alias,), required_suffix=suffix
-    ) == real.resolve()
-    assert select_short_socket_parent(
-        candidates=(real,), required_suffix=suffix
-    ) == real.resolve()
+    assert (
+        select_short_socket_parent(candidates=(alias,), required_suffix=suffix)
+        == real.resolve()
+    )
+    assert (
+        select_short_socket_parent(candidates=(real,), required_suffix=suffix)
+        == real.resolve()
+    )
 
 
 def test_explicit_environment_override_is_resolved(monkeypatch, tmp_path):

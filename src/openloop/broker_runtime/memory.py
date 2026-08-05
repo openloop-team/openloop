@@ -63,9 +63,7 @@ class InMemoryRuntimeDriver(RuntimeDriver):
             mode=mode,
         ).endpoint
 
-    def describe_endpoint(
-        self, spec: OpenHandsGenerationSpec
-    ) -> RelayClientEndpoint:
+    def describe_endpoint(self, spec: OpenHandsGenerationSpec) -> RelayClientEndpoint:
         return self._endpoint(spec, RelayMode.RUNNING)
 
     def _expired(self, identity: GenerationRuntimeIdentity) -> bool:
@@ -99,9 +97,7 @@ class InMemoryRuntimeDriver(RuntimeDriver):
             observation=observation,
         )
 
-    async def quiesce(
-        self, spec: OpenHandsGenerationSpec
-    ) -> QuiescedGeneration:
+    async def quiesce(self, spec: OpenHandsGenerationSpec) -> QuiescedGeneration:
         if not isinstance(spec, OpenHandsGenerationSpec):
             raise TypeError("spec must be an OpenHandsGenerationSpec")
         identity = spec.identity
@@ -128,17 +124,11 @@ class InMemoryRuntimeDriver(RuntimeDriver):
         if not isinstance(identity, GenerationRuntimeIdentity):
             raise TypeError("identity must be a GenerationRuntimeIdentity")
         present = identity in self._specs
-        state = (
-            RuntimeResourceState.RUNNING
-            if present
-            else RuntimeResourceState.ABSENT
-        )
+        state = RuntimeResourceState.RUNNING if present else RuntimeResourceState.ABSENT
         return GenerationObservation(
             identity=identity,
             network=(
-                RuntimeResourceState.CREATED
-                if present
-                else RuntimeResourceState.ABSENT
+                RuntimeResourceState.CREATED if present else RuntimeResourceState.ABSENT
             ),
             agent=state,
             relay=state,
@@ -148,9 +138,7 @@ class InMemoryRuntimeDriver(RuntimeDriver):
             expired=self._expired(identity),
         )
 
-    async def release(
-        self, identity: GenerationRuntimeIdentity
-    ) -> ReleaseObservation:
+    async def release(self, identity: GenerationRuntimeIdentity) -> ReleaseObservation:
         if not isinstance(identity, GenerationRuntimeIdentity):
             raise TypeError("identity must be a GenerationRuntimeIdentity")
         self._specs.pop(identity, None)

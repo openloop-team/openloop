@@ -69,9 +69,7 @@ class IsolatedCoprocessBrokerSettings(
     """A ``CoprocessBrokerSettings`` variant using constructor inputs only."""
 
 
-def build_test_settings(
-    profile: str = "memory", **overrides: Any
-) -> IsolatedSettings:
+def build_test_settings(profile: str = "memory", **overrides: Any) -> IsolatedSettings:
     """Build a validated test configuration from a named safe profile."""
     try:
         values = dict(_PROFILES[profile])

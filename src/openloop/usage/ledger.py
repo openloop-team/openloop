@@ -88,9 +88,7 @@ class WorkerSpendLedger:
             agent.metadata.id: agent for agent in self.agents.values()
         }
 
-    def _agent_for(
-        self, agent_name: str | None, agent_id: str | None = None
-    ) -> Agent:
+    def _agent_for(self, agent_name: str | None, agent_id: str | None = None) -> Agent:
         if agent_id is not None:
             agent = self._agents_by_id.get(agent_id)
             if agent is None:
@@ -126,10 +124,7 @@ class WorkerSpendLedger:
         return self._agent_for(agent_name, agent_id).spec.budget.per_task_usd
 
     def _missing_cap_reason(self, agent: Agent) -> str | None:
-        if (
-            self.require_per_task_cap
-            and agent.spec.budget.per_task_usd is None
-        ):
+        if self.require_per_task_cap and agent.spec.budget.per_task_usd is None:
             return (
                 f"agent {agent.metadata.name} has no per-task spend cap, "
                 "required by this worker backend"
@@ -267,8 +262,7 @@ class WorkerSpendLedger:
                 "budget — failing closed (no push, no PR)"
             )
         logger.debug(
-            "worker job %s segment spend recorded: $%.4f (cumulative $%.4f) "
-            "against %s",
+            "worker job %s segment spend recorded: $%.4f (cumulative $%.4f) against %s",
             job_id,
             record_cost,
             cap_cost,

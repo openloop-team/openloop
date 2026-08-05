@@ -81,9 +81,8 @@ class WorkspaceArtifactManifest:
 
     def __post_init__(self) -> None:
         validate_state_identifier(self.format, field="artifact format")
-        if (
-            len(self.base_commit) not in (40, 64)
-            or any(c not in "0123456789abcdef" for c in self.base_commit)
+        if len(self.base_commit) not in (40, 64) or any(
+            c not in "0123456789abcdef" for c in self.base_commit
         ):
             raise WorkspaceArtifactError(
                 "artifact base_commit must be a lowercase Git object ID"
@@ -134,9 +133,8 @@ class WorkspaceArtifact:
             or "\\" in self.key
         ):
             raise WorkspaceArtifactError("invalid artifact descriptor key")
-        if (
-            len(self.ciphertext_sha256) != 64
-            or any(c not in "0123456789abcdef" for c in self.ciphertext_sha256)
+        if len(self.ciphertext_sha256) != 64 or any(
+            c not in "0123456789abcdef" for c in self.ciphertext_sha256
         ):
             raise WorkspaceArtifactError("invalid artifact ciphertext SHA-256")
         if self.ciphertext_bytes <= 0 or self.envelope_version <= 0:
@@ -357,9 +355,7 @@ class WorkspaceArtifactStore:
                 scratch_stream.write(decryptor.finalize())
                 scratch_stream.flush()
 
-            manifest = self._verify_plaintext_payload(
-                scratch_stream, expected_identity
-            )
+            manifest = self._verify_plaintext_payload(scratch_stream, expected_identity)
             return VerifiedWorkspaceArtifact(manifest, scratch_stream, scratch_path)
         except InvalidTag as exc:
             if scratch_stream is not None:
@@ -446,7 +442,9 @@ class WorkspaceArtifactStore:
                 if not chunk:
                     break
                 if not isinstance(chunk, bytes):
-                    raise WorkspaceArtifactError("artifact plaintext stream must be binary")
+                    raise WorkspaceArtifactError(
+                        "artifact plaintext stream must be binary"
+                    )
                 digest.update(chunk)
                 stream.write(chunk)
             stream.flush()
@@ -574,7 +572,9 @@ class WorkspaceArtifactStore:
             raise WorkspaceArtifactVerificationError("missing encrypted manifest")
         manifest_length = struct.unpack(">I", length_bytes)[0]
         if not 0 < manifest_length <= _MAX_MANIFEST_BYTES:
-            raise WorkspaceArtifactVerificationError("invalid encrypted manifest length")
+            raise WorkspaceArtifactVerificationError(
+                "invalid encrypted manifest length"
+            )
         encoded = stream.read(manifest_length)
         if len(encoded) != manifest_length:
             raise WorkspaceArtifactVerificationError("truncated encrypted manifest")

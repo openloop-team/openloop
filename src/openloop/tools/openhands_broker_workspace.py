@@ -176,7 +176,10 @@ class BrokerWorkspaceAdapter:
             )
             if created.ticket.job_id is None or created.ticket.conversation_id is None:
                 raise BrokerWorkspaceError("broker create returned incomplete identity")
-            if broker_job_id is not None and str(created.ticket.job_id) != broker_job_id:
+            if (
+                broker_job_id is not None
+                and str(created.ticket.job_id) != broker_job_id
+            ):
                 raise BrokerWorkspaceError("persisted broker job identity mismatch")
             state = _JobState(
                 broker_job_id=created.ticket.job_id,
@@ -186,9 +189,8 @@ class BrokerWorkspaceAdapter:
             )
             self._jobs[job_id] = state
         elif (
-            (broker_job_id is not None and str(state.broker_job_id) != broker_job_id)
-            or state.current_generation != current_generation
-        ):
+            broker_job_id is not None and str(state.broker_job_id) != broker_job_id
+        ) or state.current_generation != current_generation:
             raise BrokerWorkspaceError("broker job cursor mismatch")
         assert state.conversation_id is not None
         return BrokerGenerationIdentity(
@@ -379,9 +381,7 @@ class BrokerWorkspaceAdapter:
     def _running(self, job_id: str) -> _JobState:
         state = self._jobs.get(job_id)
         if state is None or state.running_generation is None:
-            raise BrokerWorkspaceError(
-                f"no running broker segment for job {job_id!r}"
-            )
+            raise BrokerWorkspaceError(f"no running broker segment for job {job_id!r}")
         return state
 
     def quiesce(self, job_id: str, barrier_id: str) -> None:

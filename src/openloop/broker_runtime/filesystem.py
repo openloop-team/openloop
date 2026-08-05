@@ -403,9 +403,7 @@ def relay_artifact_mode(
             "relay artifact path is not a safe directory"
         ) from exc
     try:
-        _check_directory_descriptor(
-            descriptor, name="relay artifacts", uid=uid
-        )
+        _check_directory_descriptor(descriptor, name="relay artifacts", uid=uid)
         if _entries(descriptor, label="relay artifacts") != _EXPECTED_ARTIFACT_ENTRIES:
             raise RuntimeIdentityConflict(
                 "relay artifact directory entries do not match"
@@ -436,9 +434,7 @@ def relay_artifact_mode(
         os.close(descriptor)
 
 
-def cleanup_checkpoint_transition_artifact(
-    paths: GenerationPaths, *, uid: int
-) -> None:
+def cleanup_checkpoint_transition_artifact(paths: GenerationPaths, *, uid: int) -> None:
     """Recover a broker-owned interrupted config write without trusting it."""
     try:
         descriptor = os.open(paths.artifacts, _directory_flags())
@@ -447,13 +443,9 @@ def cleanup_checkpoint_transition_artifact(
             "relay artifact path is not a safe directory"
         ) from exc
     try:
-        _check_directory_descriptor(
-            descriptor, name="relay artifacts", uid=uid
-        )
+        _check_directory_descriptor(descriptor, name="relay artifacts", uid=uid)
         entries = _entries(descriptor, label="relay artifacts")
-        allowed = _EXPECTED_ARTIFACT_ENTRIES | {
-            _CHECKPOINT_TRANSITION_ARTIFACT
-        }
+        allowed = _EXPECTED_ARTIFACT_ENTRIES | {_CHECKPOINT_TRANSITION_ARTIFACT}
         if not entries.issubset(allowed):
             raise RuntimeIdentityConflict(
                 "relay artifact directory entries do not match"
@@ -511,9 +503,7 @@ def install_checkpoint_relay_config(
     temporary = _CHECKPOINT_TRANSITION_ARTIFACT
     opened: int | None = None
     try:
-        _check_directory_descriptor(
-            descriptor, name="relay artifacts", uid=uid
-        )
+        _check_directory_descriptor(descriptor, name="relay artifacts", uid=uid)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         try:
@@ -548,7 +538,10 @@ def install_checkpoint_relay_config(
         raise
     finally:
         os.close(descriptor)
-    if relay_artifact_mode(paths, running, checkpoint, uid=uid) is not RelayMode.CHECKPOINT:
+    if (
+        relay_artifact_mode(paths, running, checkpoint, uid=uid)
+        is not RelayMode.CHECKPOINT
+    ):
         raise RuntimeIdentityConflict("relay checkpoint policy was not installed")
 
 

@@ -37,9 +37,7 @@ def _module_name(path: Path) -> str:
 
 
 def _first_party_import_graph() -> dict[str, set[str]]:
-    modules = {
-        _module_name(path): path for path in sorted(OPENLOOP_ROOT.rglob("*.py"))
-    }
+    modules = {_module_name(path): path for path in sorted(OPENLOOP_ROOT.rglob("*.py"))}
     graph: dict[str, set[str]] = {}
     for module, path in modules.items():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -115,9 +113,9 @@ def test_broker_runtime_cannot_transitively_import_legacy_docker_adapter():
 
 def test_relay_facade_does_not_import_legacy_docker_adapter():
     graph = _first_party_import_graph()
-    assert "openloop.tools.openhands_docker" not in graph[
-        "openloop.tools.openhands_relay"
-    ]
+    assert (
+        "openloop.tools.openhands_docker" not in graph["openloop.tools.openhands_relay"]
+    )
 
 
 def test_config_imports_openhands_default_from_neutral_profile():
@@ -204,9 +202,7 @@ def test_privileged_broker_runtime_is_confined_to_reviewed_composition_seams():
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imports.append(node.module)
     assert not any(
-        name.startswith(
-            ("openloop.broker_control", "openloop.broker_runtime")
-        )
+        name.startswith(("openloop.broker_control", "openloop.broker_runtime"))
         for name in imports
     )
 
@@ -227,9 +223,7 @@ def test_coding_workers_have_no_broker_start_or_runtime_wiring():
 
 def test_broker_rpc_dispatch_can_reach_only_reviewed_ledger_reads_and_create():
     application = BROKER_RPC_ROOT / "application.py"
-    tree = ast.parse(
-        application.read_text(encoding="utf-8"), filename=str(application)
-    )
+    tree = ast.parse(application.read_text(encoding="utf-8"), filename=str(application))
     ledger_calls = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
@@ -251,9 +245,7 @@ def test_broker_rpc_dispatch_can_reach_only_reviewed_ledger_reads_and_create():
 
 def test_broker_rpc_dispatch_uses_only_the_narrow_coordinator_port():
     application = BROKER_RPC_ROOT / "application.py"
-    tree = ast.parse(
-        application.read_text(encoding="utf-8"), filename=str(application)
-    )
+    tree = ast.parse(application.read_text(encoding="utf-8"), filename=str(application))
     coordinator_calls = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):

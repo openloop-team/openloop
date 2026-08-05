@@ -60,7 +60,9 @@ def _missing() -> str | None:
     if os.environ.get("E2E_LIVE") != "1":
         return "set E2E_LIVE=1 to run the live Slack smoke"
     for var in (
-        "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "E2E_SLACK_USER_TOKEN",
+        "SLACK_BOT_TOKEN",
+        "SLACK_APP_TOKEN",
+        "E2E_SLACK_USER_TOKEN",
         "E2E_SLACK_CHANNEL",
     ):
         if not os.environ.get(var):
@@ -156,7 +158,9 @@ async def test_live_slack_mention_round_trip():
 
     @slack_app.use
     async def _record(body, next):  # type: ignore[no-untyped-def]
-        received.append((body or {}).get("event", {}).get("type") or (body or {}).get("type", "?"))
+        received.append(
+            (body or {}).get("event", {}).get("type") or (body or {}).get("type", "?")
+        )
         await next()
 
     @slack_app.error

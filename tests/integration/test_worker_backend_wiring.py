@@ -33,7 +33,7 @@ AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
 def _settings(**kwargs):
     return Settings(
-                coding_worker_enabled=True,
+        coding_worker_enabled=True,
         github_token="t",
         **kwargs,
     )
@@ -114,7 +114,9 @@ def test_openhands_docker_requires_external_broker(monkeypatch, tmp_path, caplog
     assert "external broker" in caplog.text
 
 
-def test_openhands_docker_rejects_coprocess_broker_handle(monkeypatch, tmp_path, caplog):
+def test_openhands_docker_rejects_coprocess_broker_handle(
+    monkeypatch, tmp_path, caplog
+):
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
     with caplog.at_level("ERROR"):
         gateway = _gateway(
@@ -149,7 +151,9 @@ def test_openhands_docker_without_external_broker_fails_before_state_setup(
     assert "external broker" in caplog.text
 
 
-def test_rejected_docker_topology_does_not_log_state_secret(monkeypatch, caplog, tmp_path):
+def test_rejected_docker_topology_does_not_log_state_secret(
+    monkeypatch, caplog, tmp_path
+):
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
     invalid_secret = "not-valid-base64!!"
     with caplog.at_level("ERROR"):
@@ -306,9 +310,7 @@ def test_openhands_probe_failure_fails_closed(monkeypatch, caplog):
     assert "CODING WORKER DISABLED" in caplog.text
 
 
-def test_openhands_relay_probe_failure_disables_only_coding_worker(
-    monkeypatch, caplog
-):
+def test_openhands_relay_probe_failure_disables_only_coding_worker(monkeypatch, caplog):
     def boom(self):
         raise OpenHandsUnavailable(
             "native OpenHands relay compatibility check failed: SDK seam changed"
@@ -333,9 +335,7 @@ def test_openhands_with_sandbox_typo_fails_closed(monkeypatch, caplog):
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
     with caplog.at_level("ERROR"):
         gateway = _gateway(
-            _settings(
-                coding_worker_backend="openhands", coding_worker_sandbox="dokcer"
-            )
+            _settings(coding_worker_backend="openhands", coding_worker_sandbox="dokcer")
         )
     assert "workspace_task" not in gateway._tools
     assert "unknown CODING_WORKER_SANDBOX" in caplog.text
@@ -418,7 +418,9 @@ def test_workspace_task_tool_registered_for_code_profile(monkeypatch, tmp_path):
     assert "code:write" in gateway._tools["workspace_task"].supported_permissions()
 
 
-async def test_legacy_action_string_still_invokes_the_code_profile(monkeypatch, tmp_path):
+async def test_legacy_action_string_still_invokes_the_code_profile(
+    monkeypatch, tmp_path
+):
     # A durable approval row written pre-migration (or an agent whose YAML
     # hasn't been re-pointed yet) names the legacy action string. The alias
     # (Task 4) must still route it to the migrated workspace_task connector
@@ -426,15 +428,20 @@ async def test_legacy_action_string_still_invokes_the_code_profile(monkeypatch, 
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
     gateway = _gateway(_settings(coding_worker_backend="builtin"))
     agent = load_agent(AGENT_YAML)
-    inv = await gateway.invoke(agent, "coding_worker.pr:write",
-                               args={"repo": "a/b", "instruction": "x"},
-                               requested_by="tester")
+    inv = await gateway.invoke(
+        agent,
+        "coding_worker.pr:write",
+        args={"repo": "a/b", "instruction": "x"},
+        requested_by="tester",
+    )
     # Aliased to workspace_task.code:write → parks for approval (start gate), not "no tool".
     assert inv.status in {"pending_approval", "started", "approved"}
     assert inv.message is None or "no registered tool" not in inv.message
 
 
-async def test_legacy_yaml_agent_write_action_is_still_approval_gated(monkeypatch, tmp_path):
+async def test_legacy_yaml_agent_write_action_is_still_approval_gated(
+    monkeypatch, tmp_path
+):
     # Security invariant: the alias must not let a legacy-YAML agent's write
     # action slip past the approve-before-work gate. Load the LEGACY fixture
     # tests/unit/data/agent.yaml (not the migrated AGENT_YAML above) BECAUSE
@@ -459,7 +466,9 @@ async def test_legacy_yaml_agent_write_action_is_still_approval_gated(monkeypatc
     # sides symmetrically, exactly like `policy.is_allowed` does for the
     # allowlist.
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
-    legacy_agent = load_agent(Path(__file__).parents[1] / "unit" / "data" / "agent.yaml")
+    legacy_agent = load_agent(
+        Path(__file__).parents[1] / "unit" / "data" / "agent.yaml"
+    )
 
     for requested_action in ("coding_worker.pr:write", "workspace_task.code:write"):
         gateway = _gateway(

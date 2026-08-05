@@ -79,10 +79,15 @@ def _runner(model_gateway, *, tools=None, delivery=None, threads=None):
         memory=InMemoryStore(),
         engine=engine,
     )
-    return SessionRunner(runtime, sessions, delivery, threads=threads), sessions, delivery
+    return (
+        SessionRunner(runtime, sessions, delivery, threads=threads),
+        sessions,
+        delivery,
+    )
 
 
 # --- session store -------------------------------------------------------
+
 
 async def test_store_upsert_get_and_event_lookup():
     store = InMemorySurfaceSessionStore()
@@ -112,6 +117,7 @@ async def test_store_upsert_preserves_created_at_bumps_updated_at():
 
 # --- runner: happy path --------------------------------------------------
 
+
 async def test_mention_to_progress_then_final():
     runner, sessions, delivery = _runner(
         ScriptedGateway([ModelResponse(text="here you go", model="m")])
@@ -135,22 +141,22 @@ async def test_mention_to_progress_then_final():
 async def test_threaded_turn_stamps_warm_context_key():
     # Phase B: a threaded turn carries its thread's warm-context key so a
     # workflow-backed tool can reuse the thread's warm checkout.
-    runner, _, _ = _runner(
-        ScriptedGateway([ModelResponse(text="ok", model="m")])
-    )
+    runner, _, _ = _runner(ScriptedGateway([ModelResponse(text="ok", model="m")]))
     task = _task()
     await runner.run(task, _target())
     assert task.thread_key == thread_scope_key(_target())
 
 
 async def test_top_level_turn_has_no_warm_context_key():
-    runner, _, _ = _runner(
-        ScriptedGateway([ModelResponse(text="ok", model="m")])
-    )
+    runner, _, _ = _runner(ScriptedGateway([ModelResponse(text="ok", model="m")]))
     task = _task()
     top_level = SurfaceTarget(
-        surface="slack", workspace="acme", agent="dev-platform",
-        channel="C1", thread=None, event_id="top1",
+        surface="slack",
+        workspace="acme",
+        agent="dev-platform",
+        channel="C1",
+        thread=None,
+        event_id="top1",
     )
     await runner.run(task, top_level)
     assert task.thread_key is None
@@ -172,15 +178,19 @@ async def test_duplicate_event_is_deduped():
 
 # --- runner: waiting for approval ---------------------------------------
 
+
 async def test_pending_approval_parks_session_waiting():
     github = FakeGitHub()
     tools = ToolGateway(tools=[GitHubConnector(github)])
     runner, sessions, delivery = _runner(
-        ScriptedGateway([
-            tool_call_response(
-                "m", [("c1", "github_issues_write", {"repo": "acme/x", "title": "T"})]
-            ),
-        ]),
+        ScriptedGateway(
+            [
+                tool_call_response(
+                    "m",
+                    [("c1", "github_issues_write", {"repo": "acme/x", "title": "T"})],
+                ),
+            ]
+        ),
         tools=tools,
     )
 
@@ -206,14 +216,17 @@ def _waiting_runner(*, delivery=None):
     github = FakeGitHub()
     tools = ToolGateway(tools=[GitHubConnector(github)])
     runner, sessions, delivery = _runner(
-        ScriptedGateway([
-            tool_call_response(
-                "m", [("c1", "github_issues_write", {"repo": "acme/x", "title": "T"})]
-            ),
-            # M0b: after the write is approved, the model is re-run with the result
-            # folded in and produces the fresh, user-facing answer.
-            ModelResponse(text="Opened issue #1 ✅", model="m"),
-        ]),
+        ScriptedGateway(
+            [
+                tool_call_response(
+                    "m",
+                    [("c1", "github_issues_write", {"repo": "acme/x", "title": "T"})],
+                ),
+                # M0b: after the write is approved, the model is re-run with the result
+                # folded in and produces the fresh, user-facing answer.
+                ModelResponse(text="Opened issue #1 ✅", model="m"),
+            ]
+        ),
         tools=tools,
         delivery=delivery,
     )
@@ -221,6 +234,7 @@ def _waiting_runner(*, delivery=None):
 
 
 # --- runner: approval continuation (Slice 4) ----------------------------
+
 
 async def test_approve_continues_session_and_posts_outcome_in_thread():
     runner, sessions, delivery, github = _waiting_runner()
@@ -250,7 +264,9 @@ async def test_approval_reruns_model_with_tool_result_folded_in():
     runner, sessions, delivery, github = _waiting_runner()
     session = await runner.run(_task("open an issue"), _target())
 
-    await runner.resolve_approval(session.approval_ids[0], "@maciag.artur", approve=True)
+    await runner.resolve_approval(
+        session.approval_ids[0], "@maciag.artur", approve=True
+    )
 
     calls = runner.runtime.gateway.calls
     assert len(calls) == 2  # initial turn + continuation
@@ -319,15 +335,22 @@ async def test_workflow_approval_waits_for_background_terminal_result():
     delivery = FakeSurfaceDelivery()
     runtime = Runtime(
         agent,
-        gateway=ScriptedGateway([
-            tool_call_response(
-                "m",
-                [("c1", "coding_worker_pr_write",
-                  {"repo": "acme/x", "instruction": "add retries"})],
-            ),
-            # M0b continuation: after the PR workflow finishes, the model is re-run.
-            ModelResponse(text="Opened draft PR #1 🚀", model="m"),
-        ]),
+        gateway=ScriptedGateway(
+            [
+                tool_call_response(
+                    "m",
+                    [
+                        (
+                            "c1",
+                            "coding_worker_pr_write",
+                            {"repo": "acme/x", "instruction": "add retries"},
+                        )
+                    ],
+                ),
+                # M0b continuation: after the PR workflow finishes, the model is re-run.
+                ModelResponse(text="Opened draft PR #1 🚀", model="m"),
+            ]
+        ),
         tools=tools,
         usage=InMemoryUsageStore(),
         memory=InMemoryStore(),
@@ -339,9 +362,7 @@ async def test_workflow_approval_waits_for_background_terminal_result():
     request = await tools.approvals.get(approval_id)
     job_id = request.args["job_id"]
 
-    message = await runner.resolve_approval(
-        approval_id, "@maciag.artur", approve=True
-    )
+    message = await runner.resolve_approval(approval_id, "@maciag.artur", approve=True)
 
     assert message.startswith("✅ Approved by @maciag.artur")
     await asyncio.wait_for(runner_impl.started.wait(), timeout=1)
@@ -390,7 +411,9 @@ async def test_resolve_openhands_decision_reads_worker_state_from_nested_layout(
 
     job_id = "job-openhands-1"
     branch = f"openloop/job-{job_id}"
-    identity = WorkspaceArtifactIdentity(job_id, "conversation-1", "segment-1", "paused")
+    identity = WorkspaceArtifactIdentity(
+        job_id, "conversation-1", "segment-1", "paused"
+    )
     artifact = WorkspaceArtifactRef(
         WorkspaceArtifact(
             identity=identity,
@@ -447,7 +470,11 @@ async def test_resolve_openhands_decision_reads_worker_state_from_nested_layout(
     await engine.store.create(instance)
 
     result = await runner.resolve_openhands_decision(
-        job_id, "decision-1", kind="accept", actor_id="maciag.artur", event_id="Ev1",
+        job_id,
+        "decision-1",
+        kind="accept",
+        actor_id="maciag.artur",
+        event_id="Ev1",
     )
 
     assert result == "✅ Decision recorded; resuming work."
@@ -482,7 +509,9 @@ async def test_resolve_openhands_decision_still_rejects_wrong_actor_in_nested_la
     )
 
     job_id = "job-openhands-2"
-    identity = WorkspaceArtifactIdentity(job_id, "conversation-1", "segment-1", "paused")
+    identity = WorkspaceArtifactIdentity(
+        job_id, "conversation-1", "segment-1", "paused"
+    )
     artifact = WorkspaceArtifactRef(
         WorkspaceArtifact(
             identity=identity,
@@ -539,7 +568,11 @@ async def test_resolve_openhands_decision_still_rejects_wrong_actor_in_nested_la
     await engine.store.create(instance)
 
     result = await runner.resolve_openhands_decision(
-        job_id, "decision-1", kind="accept", actor_id="intruder", event_id="Ev1",
+        job_id,
+        "decision-1",
+        kind="accept",
+        actor_id="intruder",
+        event_id="Ev1",
     )
 
     assert result == "⛔ Only the user who approved this task may decide."
@@ -560,14 +593,23 @@ async def test_workflow_progress_is_surfaced_as_transient_status():
     delivery = FakeSurfaceDelivery()
     runtime = Runtime(
         agent,
-        gateway=ScriptedGateway([
-            tool_call_response(
-                "m",
-                [("c1", "coding_worker_pr_write",
-                  {"repo": "acme/x", "instruction": "add retries"})],
-            ),
-            ModelResponse(text="Opened draft PR #1 🚀", model="m"),  # M0b continuation
-        ]),
+        gateway=ScriptedGateway(
+            [
+                tool_call_response(
+                    "m",
+                    [
+                        (
+                            "c1",
+                            "coding_worker_pr_write",
+                            {"repo": "acme/x", "instruction": "add retries"},
+                        )
+                    ],
+                ),
+                ModelResponse(
+                    text="Opened draft PR #1 🚀", model="m"
+                ),  # M0b continuation
+            ]
+        ),
         tools=tools,
         usage=InMemoryUsageStore(),
         memory=InMemoryStore(),
@@ -602,11 +644,18 @@ async def test_progress_status_is_reasserted_after_refresh_interval():
     # so a long single-phase run doesn't go blank. Bursts within the window still
     # collapse to one call.
     runner, sessions, delivery = _runner(ScriptedGateway([]))
-    await sessions.upsert(SurfaceSession(
-        id="s1", target=_target("ev1"), status="waiting", approval_ids=["a1"],
-    ))
+    await sessions.upsert(
+        SurfaceSession(
+            id="s1",
+            target=_target("ev1"),
+            status="waiting",
+            approval_ids=["a1"],
+        )
+    )
     inst = WorkflowInstance(
-        id="i1", workflow="w", status="running",
+        id="i1",
+        workflow="w",
+        status="running",
         state={"progress": "is working on the changes…", "approval_id": "a1"},
     )
 
@@ -617,7 +666,8 @@ async def test_progress_status_is_reasserted_after_refresh_interval():
     # Backdate the last-sent stamp past the refresh window → re-asserted.
     phrase, _ = runner._progress_seen["s1"]
     runner._progress_seen["s1"] = (
-        phrase, time.monotonic() - PROGRESS_REFRESH_SECONDS - 1
+        phrase,
+        time.monotonic() - PROGRESS_REFRESH_SECONDS - 1,
     )
     await runner._on_workflow_progress(inst)
     assert [s["text"] for s in delivery.statuses] == [
@@ -631,7 +681,9 @@ async def test_progress_callback_bails_on_terminal_instance():
     # in-place-mutated instance goes terminal must not emit a stale status.
     runner, _, delivery = _runner(ScriptedGateway([]))
     terminal = WorkflowInstance(
-        id="i1", workflow="w", status="completed",
+        id="i1",
+        workflow="w",
+        status="completed",
         state={"progress": "is pushing the branch…", "approval_id": "a1"},
     )
 
@@ -678,13 +730,19 @@ async def test_failed_outcome_delivery_is_repaired_on_second_click():
 
 # --- runner: startup reconciler (Slice 6) --------------------------------
 
+
 async def test_reconcile_redelivers_terminal_without_final():
     runner, sessions, delivery = _runner(ScriptedGateway([]))
-    await sessions.upsert(SurfaceSession(
-        id="s1", target=_target("ev1"), status="completed",
-        workflow_instance_id="s1", progress_message_id="p0",
-        result_summary="the answer",
-    ))
+    await sessions.upsert(
+        SurfaceSession(
+            id="s1",
+            target=_target("ev1"),
+            status="completed",
+            workflow_instance_id="s1",
+            progress_message_id="p0",
+            result_summary="the answer",
+        )
+    )
 
     repaired = await runner.reconcile()
 
@@ -697,19 +755,32 @@ async def test_reconcile_redelivers_terminal_without_final():
 async def test_reconcile_recovers_crashed_turn_from_completed_workflow():
     runner, sessions, delivery = _runner(ScriptedGateway([]))
     # The workflow finished but the session crashed before delivering it.
-    await runner.runtime.engine.store.create(WorkflowInstance(
-        id="s2", workflow=runner.runtime.workflow_name, status="completed",
-        state={
-            "final_text": "recovered answer",
-            "accounted": {"model": "m", "prompt_tokens": 0,
-                          "completion_tokens": 0, "cost_usd": 0.0},
-            "approval_ids": [],
-        },
-    ))
-    await sessions.upsert(SurfaceSession(
-        id="s2", target=_target("ev2"), status="running",
-        workflow_instance_id="s2", progress_message_id="p0",
-    ))
+    await runner.runtime.engine.store.create(
+        WorkflowInstance(
+            id="s2",
+            workflow=runner.runtime.workflow_name,
+            status="completed",
+            state={
+                "final_text": "recovered answer",
+                "accounted": {
+                    "model": "m",
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cost_usd": 0.0,
+                },
+                "approval_ids": [],
+            },
+        )
+    )
+    await sessions.upsert(
+        SurfaceSession(
+            id="s2",
+            target=_target("ev2"),
+            status="running",
+            workflow_instance_id="s2",
+            progress_message_id="p0",
+        )
+    )
 
     await runner.reconcile()
 
@@ -733,9 +804,7 @@ async def test_reconcile_delivers_approved_workflow_waiting_session():
         {"repo": "acme/x", "instruction": "x"},
     )
     request = pending.approval
-    await tools.approvals.claim_decision(
-        request.id, "@maciag.artur", approve=True
-    )
+    await tools.approvals.claim_decision(request.id, "@maciag.artur", approve=True)
     job_id = request.args["job_id"]
     # Complete the parked workflow the way a real drive would: consume the
     # approval event, claim the drive, and land a fenced terminal write.
@@ -756,13 +825,15 @@ async def test_reconcile_delivers_approved_workflow_waiting_session():
         engine=engine,
     )
     runner = SessionRunner(runtime, sessions, delivery)
-    await sessions.upsert(SurfaceSession(
-        id="s-approved",
-        target=_target("ev-approved"),
-        status="waiting",
-        approval_ids=[request.id],
-        progress_message_id="p0",
-    ))
+    await sessions.upsert(
+        SurfaceSession(
+            id="s-approved",
+            target=_target("ev-approved"),
+            status="waiting",
+            approval_ids=[request.id],
+            progress_message_id="p0",
+        )
+    )
 
     repaired = await runner.reconcile()
 
@@ -801,13 +872,15 @@ async def test_reconcile_delivers_crash_denial_to_waiting_session():
         engine=engine,
     )
     runner = SessionRunner(runtime, sessions, delivery)
-    await sessions.upsert(SurfaceSession(
-        id="s-denied",
-        target=_target("ev-denied"),
-        status="waiting",
-        approval_ids=[request.id],
-        progress_message_id="p0",
-    ))
+    await sessions.upsert(
+        SurfaceSession(
+            id="s-denied",
+            target=_target("ev-denied"),
+            status="waiting",
+            approval_ids=[request.id],
+            progress_message_id="p0",
+        )
+    )
 
     repaired = await runner.reconcile()
 
@@ -849,13 +922,15 @@ async def test_losing_deny_click_final_names_winner_not_clicker():
         engine=WorkflowEngine(InMemoryWorkflowStore()),
     )
     runner = SessionRunner(runtime, sessions, delivery)
-    await sessions.upsert(SurfaceSession(
-        id="s-lose",
-        target=_target("ev-lose"),
-        status="waiting",
-        approval_ids=[request.id],
-        progress_message_id="p0",
-    ))
+    await sessions.upsert(
+        SurfaceSession(
+            id="s-lose",
+            target=_target("ev-lose"),
+            status="waiting",
+            approval_ids=[request.id],
+            progress_message_id="p0",
+        )
+    )
 
     # A second approver clicks deny and loses; the reported final names the
     # canonical decider.
@@ -880,8 +955,11 @@ async def test_approved_nonterminal_keeps_session_then_winner_delivers():
     )
     await sessions.upsert(session)
 
-    loser = Invocation(status="approved", decided_by="@winner",
-                       message="approval appr-1 already approved by @winner")
+    loser = Invocation(
+        status="approved",
+        decided_by="@winner",
+        message="approval appr-1 already approved by @winner",
+    )
     await runner._continue_session(
         session, loser, "@loser", "informational", approval_id=None
     )
@@ -895,9 +973,7 @@ async def test_approved_nonterminal_keeps_session_then_winner_delivers():
         result=ToolResult(ok=True, summary="created issue #1", data={}),
         decided_by="@winner",
     )
-    await runner._continue_session(
-        session, winner, "@winner", "done", approval_id=None
-    )
+    await runner._continue_session(session, winner, "@winner", "done", approval_id=None)
     final = await sessions.get("s-appr")
     assert final.status == "completed"
     assert delivery.finals[-1]["text"] == "created issue #1"
@@ -905,14 +981,23 @@ async def test_approved_nonterminal_keeps_session_then_winner_delivers():
 
 async def test_reconcile_posts_interrupted_notice_for_abandoned_turn():
     runner, sessions, delivery = _runner(ScriptedGateway([]))
-    await runner.runtime.engine.store.create(WorkflowInstance(
-        id="s3", workflow=runner.runtime.workflow_name, status="abandoned",
-        state={"task": {}},
-    ))
-    await sessions.upsert(SurfaceSession(
-        id="s3", target=_target("ev3"), status="running",
-        workflow_instance_id="s3", progress_message_id="p0",
-    ))
+    await runner.runtime.engine.store.create(
+        WorkflowInstance(
+            id="s3",
+            workflow=runner.runtime.workflow_name,
+            status="abandoned",
+            state={"task": {}},
+        )
+    )
+    await sessions.upsert(
+        SurfaceSession(
+            id="s3",
+            target=_target("ev3"),
+            status="running",
+            workflow_instance_id="s3",
+            progress_message_id="p0",
+        )
+    )
 
     await runner.reconcile()
 
@@ -924,14 +1009,24 @@ async def test_reconcile_leaves_non_terminal_workflow_for_later():
     # The engine's own resume didn't (or couldn't) drive this to terminal — the
     # reconciler must not deliver a half-finished turn or abandon it; leave it.
     runner, sessions, delivery = _runner(ScriptedGateway([]))
-    await runner.runtime.engine.store.create(WorkflowInstance(
-        id="s5", workflow=runner.runtime.workflow_name, status="running",
-        completed_steps=["prepare"], state={"task": {}},
-    ))
-    await sessions.upsert(SurfaceSession(
-        id="s5", target=_target("ev5"), status="running",
-        workflow_instance_id="s5", progress_message_id="p0",
-    ))
+    await runner.runtime.engine.store.create(
+        WorkflowInstance(
+            id="s5",
+            workflow=runner.runtime.workflow_name,
+            status="running",
+            completed_steps=["prepare"],
+            state={"task": {}},
+        )
+    )
+    await sessions.upsert(
+        SurfaceSession(
+            id="s5",
+            target=_target("ev5"),
+            status="running",
+            workflow_instance_id="s5",
+            progress_message_id="p0",
+        )
+    )
 
     repaired = await runner.reconcile()
 
@@ -943,10 +1038,14 @@ async def test_reconcile_leaves_non_terminal_workflow_for_later():
 async def test_reconcile_with_no_recoverable_workflow_posts_interrupted():
     runner, sessions, delivery = _runner(ScriptedGateway([]))
     # A session whose workflow instance was lost (e.g. in-memory engine restart).
-    await sessions.upsert(SurfaceSession(
-        id="s4", target=_target("ev4"), status="running",
-        workflow_instance_id="missing",
-    ))
+    await sessions.upsert(
+        SurfaceSession(
+            id="s4",
+            target=_target("ev4"),
+            status="running",
+            workflow_instance_id="missing",
+        )
+    )
 
     await runner.reconcile()
 
@@ -956,14 +1055,24 @@ async def test_reconcile_with_no_recoverable_workflow_posts_interrupted():
 
 async def test_reconcile_leaves_waiting_and_delivered_sessions_alone():
     runner, sessions, delivery = _runner(ScriptedGateway([]))
-    await sessions.upsert(SurfaceSession(
-        id="w", target=_target("evw"), status="waiting",
-        workflow_instance_id="w", approval_ids=["a1"],
-    ))
-    await sessions.upsert(SurfaceSession(
-        id="d", target=_target("evd"), status="completed",
-        workflow_instance_id="d", final_message_id="final-0",
-    ))
+    await sessions.upsert(
+        SurfaceSession(
+            id="w",
+            target=_target("evw"),
+            status="waiting",
+            workflow_instance_id="w",
+            approval_ids=["a1"],
+        )
+    )
+    await sessions.upsert(
+        SurfaceSession(
+            id="d",
+            target=_target("evd"),
+            status="completed",
+            workflow_instance_id="d",
+            final_message_id="final-0",
+        )
+    )
 
     repaired = await runner.reconcile()
 
@@ -990,16 +1099,22 @@ async def test_reconcile_repairs_waiting_session_without_approval_card_id():
 
 # --- runner: crash-before-delivery repaired on retry ---------------------
 
+
 async def test_retry_redelivers_terminal_session_without_final():
     # A session that reached `completed` but crashed before posting its final
     # answer (final_message_id is None). A retry of the same event re-delivers it
     # exactly once instead of returning a stuck, answerless session.
     runner, sessions, delivery = _runner(ScriptedGateway([]))
-    await sessions.upsert(SurfaceSession(
-        id="s-crash", target=_target("ev-crash"), status="completed",
-        workflow_instance_id="s-crash", progress_message_id="progress-0",
-        result_summary="the answer",
-    ))
+    await sessions.upsert(
+        SurfaceSession(
+            id="s-crash",
+            target=_target("ev-crash"),
+            status="completed",
+            workflow_instance_id="s-crash",
+            progress_message_id="progress-0",
+            result_summary="the answer",
+        )
+    )
 
     session = await runner.run(_task(), _target("ev-crash"))
 
@@ -1039,6 +1154,7 @@ async def test_final_delivery_is_idempotent_across_lost_id_window():
 
 # --- runner: interrupted / error ----------------------------------------
 
+
 async def test_interrupted_turn_marks_abandoned_and_posts_error():
     # A model exception is caught by the workflow engine (step -> failed), so
     # handle() returns the interrupted `model="error"` response rather than
@@ -1058,6 +1174,7 @@ async def test_interrupted_turn_marks_abandoned_and_posts_error():
 
 
 # --- runner: conversation-history threading ------------------------------
+
 
 def _completed(id_, *, request, answer, at, thread="100.1", delivered=True):
     """A completed session in `thread`, with an explicit created_at for ordering.
@@ -1107,18 +1224,24 @@ async def test_followup_turn_threads_prior_exchange_into_history():
     assert ("user", "first question") in pairs
     assert ("assistant", "first answer") in pairs
     # History is replayed before the current question, in order.
-    assert pairs.index(("user", "first question")) < pairs.index(("assistant", "first answer"))
-    assert pairs.index(("assistant", "first answer")) < pairs.index(("user", "second question"))
+    assert pairs.index(("user", "first question")) < pairs.index(
+        ("assistant", "first answer")
+    )
+    assert pairs.index(("assistant", "first answer")) < pairs.index(
+        ("user", "second question")
+    )
 
 
 async def test_thread_store_records_fragment_and_feeds_followup():
     # Phase A slice 2: with a ThreadRecordStore wired, a delivered turn commits a
     # transcript fragment, and the next turn in the thread replays it as history.
     threads = InMemoryThreadRecordStore()
-    gateway = ScriptedGateway([
-        ModelResponse(text="first answer", model="m"),
-        ModelResponse(text="second answer", model="m"),
-    ])
+    gateway = ScriptedGateway(
+        [
+            ModelResponse(text="first answer", model="m"),
+            ModelResponse(text="second answer", model="m"),
+        ]
+    )
     runner, _, _ = _runner(gateway, threads=threads)
 
     await runner.run(_task("first question"), _target("ev1"))
@@ -1135,17 +1258,21 @@ async def test_thread_store_records_fragment_and_feeds_followup():
     pairs = [(m["role"], m.get("content")) for m in gateway.calls[1]["messages"]]
     assert ("user", "first question") in pairs
     assert ("assistant", "first answer") in pairs
-    assert pairs.index(("assistant", "first answer")) < pairs.index(("user", "second question"))
+    assert pairs.index(("assistant", "first answer")) < pairs.index(
+        ("user", "second question")
+    )
 
 
 async def test_run_threaded_serializes_concurrent_replies():
     # Phase C slice 2: two replies to the same thread arrive together; they must
     # run one at a time, in order, and the second must see the first's answer.
     threads = InMemoryThreadRecordStore()
-    gateway = ScriptedGateway([
-        ModelResponse(text="a1", model="m"),
-        ModelResponse(text="a2", model="m"),
-    ])
+    gateway = ScriptedGateway(
+        [
+            ModelResponse(text="a1", model="m"),
+            ModelResponse(text="a2", model="m"),
+        ]
+    )
     runner, _, delivery = _runner(gateway, threads=threads)
 
     await asyncio.gather(
@@ -1192,7 +1319,9 @@ async def test_apply_thread_history_reads_thread_store_over_sessions():
     )
 
     task = _task("now")
-    await runner._apply_thread_history(task, SurfaceSession(id="cur", target=_target("ev-cur")))
+    await runner._apply_thread_history(
+        task, SurfaceSession(id="cur", target=_target("ev-cur"))
+    )
 
     assert {"role": "user", "content": "seeded q"} in task.history
     assert {"role": "assistant", "content": "seeded a"} in task.history
@@ -1201,12 +1330,14 @@ async def test_apply_thread_history_reads_thread_store_over_sessions():
 async def test_apply_thread_history_falls_back_to_sessions_without_thread_store():
     # No thread store → the old per-session thread_history path still works.
     runner, sessions, _ = _runner(ScriptedGateway([]))  # threads=None
-    await sessions.upsert(_completed(
-        "a", request="q1", answer="a1", at=datetime(2026, 6, 28, tzinfo=UTC)
-    ))
+    await sessions.upsert(
+        _completed("a", request="q1", answer="a1", at=datetime(2026, 6, 28, tzinfo=UTC))
+    )
 
     task = _task("now")
-    await runner._apply_thread_history(task, SurfaceSession(id="cur", target=_target("ev-cur")))
+    await runner._apply_thread_history(
+        task, SurfaceSession(id="cur", target=_target("ev-cur"))
+    )
 
     assert {"role": "user", "content": "q1"} in task.history
     assert {"role": "assistant", "content": "a1"} in task.history
@@ -1232,7 +1363,9 @@ async def test_history_skips_non_completed_and_orders_oldest_first():
     )
 
     task = _task("now")
-    await runner._apply_thread_history(task, SurfaceSession(id="cur", target=_target("ev-cur")))
+    await runner._apply_thread_history(
+        task, SurfaceSession(id="cur", target=_target("ev-cur"))
+    )
 
     assert task.history == [
         {"role": "user", "content": "q1"},
@@ -1252,7 +1385,9 @@ async def test_history_is_scoped_to_the_thread():
     await sessions.upsert(_completed("mine", request="q", answer="a", at=base))
 
     task = _task("now")
-    await runner._apply_thread_history(task, SurfaceSession(id="cur", target=_target("ev-cur")))
+    await runner._apply_thread_history(
+        task, SurfaceSession(id="cur", target=_target("ev-cur"))
+    )
 
     assert task.history == [
         {"role": "user", "content": "q"},
@@ -1267,8 +1402,12 @@ async def test_history_left_untouched_without_thread_or_when_preset():
 
     # No thread on the target → nothing to replay.
     no_thread = SurfaceTarget(
-        surface="slack", workspace="acme", agent="dev-platform", channel="C1",
-        thread=None, event_id="z",
+        surface="slack",
+        workspace="acme",
+        agent="dev-platform",
+        channel="C1",
+        thread=None,
+        event_id="z",
     )
     task = _task("x")
     await runner._apply_thread_history(task, SurfaceSession(id="c1", target=no_thread))
@@ -1277,7 +1416,9 @@ async def test_history_left_untouched_without_thread_or_when_preset():
     # A caller that already supplied history is never clobbered.
     preset = _task("x")
     preset.history = [{"role": "user", "content": "preset"}]
-    await runner._apply_thread_history(preset, SurfaceSession(id="c2", target=_target("ev-c2")))
+    await runner._apply_thread_history(
+        preset, SurfaceSession(id="c2", target=_target("ev-c2"))
+    )
     assert preset.history == [{"role": "user", "content": "preset"}]
 
 
@@ -1290,8 +1431,11 @@ async def test_history_excludes_completed_but_undelivered_turn():
     await store.upsert(_completed("d", request="q1", answer="a1", at=base))
     await store.upsert(
         _completed(
-            "nd", request="q2", answer="a2",
-            at=base + timedelta(minutes=1), delivered=False,
+            "nd",
+            request="q2",
+            answer="a2",
+            at=base + timedelta(minutes=1),
+            delivered=False,
         )
     )
 
@@ -1310,20 +1454,30 @@ async def test_history_limit_counts_only_delivered_turns():
     # undelivered completed turn, and one still waiting on approval.
     await store.upsert(
         SurfaceSession(
-            id="f", target=_target("ev-f"), status="failed",
-            request_text="qf", error="boom", created_at=base + timedelta(minutes=1),
+            id="f",
+            target=_target("ev-f"),
+            status="failed",
+            request_text="qf",
+            error="boom",
+            created_at=base + timedelta(minutes=1),
         )
     )
     await store.upsert(
         _completed(
-            "u", request="qu", answer="au",
-            at=base + timedelta(minutes=2), delivered=False,
+            "u",
+            request="qu",
+            answer="au",
+            at=base + timedelta(minutes=2),
+            delivered=False,
         )
     )
     await store.upsert(
         SurfaceSession(
-            id="w", target=_target("ev-w"), status="waiting",
-            request_text="qw", created_at=base + timedelta(minutes=3),
+            id="w",
+            target=_target("ev-w"),
+            status="waiting",
+            request_text="qw",
+            created_at=base + timedelta(minutes=3),
         )
     )
 
@@ -1334,6 +1488,7 @@ async def test_history_limit_counts_only_delivered_turns():
 
 
 # --- runner: typed task outcomes (Stage 1 Phase 2) -----------------------
+
 
 async def test_evidence_bundle_outcome_delivers_as_artifact():
     # A workflow terminal result carrying an evidence-bundle outcome is
@@ -1349,6 +1504,7 @@ async def test_evidence_bundle_outcome_delivers_as_artifact():
     }
     d = _deliverable_from_outcome_data(data)
     from openloop.deliverable import Artifact
+
     assert isinstance(d, Artifact)
     assert "src/p.py:42" in d.content
 
@@ -1398,7 +1554,8 @@ async def test_evidence_bundle_outcome_delivers_end_to_end_without_model_rerun()
 
         def describe(self, permission: str) -> ActionSpec:
             return ActionSpec(
-                description="investigate", parameters={"type": "object", "properties": {}}
+                description="investigate",
+                parameters={"type": "object", "properties": {}},
             )
 
         async def execute(self, permission: str, args: dict):  # pragma: no cover
@@ -1410,32 +1567,42 @@ async def test_evidence_bundle_outcome_delivers_end_to_end_without_model_rerun()
 
     agent = Agent(
         metadata=AgentMetadata(
-            name="dev-platform", workspace="acme",
+            name="dev-platform",
+            workspace="acme",
             id="45006d4ce5c64d2c96ed1fe3277d7347",
         ),
         spec=AgentSpec(
             model_policy=ModelPolicy(default="anthropic/claude-sonnet-4-6"),
-            tools=[AgentToolSpec(name="investigate", type="native", permissions=["read"])],
+            tools=[
+                AgentToolSpec(name="investigate", type="native", permissions=["read"])
+            ],
             approvals=ApprovalsSpec(
-                require_for=["investigate.read"], approvers=["@maciag.artur"],
+                require_for=["investigate.read"],
+                approvers=["@maciag.artur"],
             ),
         ),
     )
 
-    gateway = ScriptedGateway([
-        tool_call_response(
-            "m", [("c1", "investigate_read", {"query": "find call sites"})]
-        ),
-        # If the runner ever re-ran the model for this outcome, THIS is what
-        # would be delivered — its absence from delivery.finals is the proof
-        # the direct-deliver branch (not M0b) handled it.
-        ModelResponse(text="MODEL RE-RUN — should never be delivered", model="m"),
-    ])
+    gateway = ScriptedGateway(
+        [
+            tool_call_response(
+                "m", [("c1", "investigate_read", {"query": "find call sites"})]
+            ),
+            # If the runner ever re-ran the model for this outcome, THIS is what
+            # would be delivered — its absence from delivery.finals is the proof
+            # the direct-deliver branch (not M0b) handled it.
+            ModelResponse(text="MODEL RE-RUN — should never be delivered", model="m"),
+        ]
+    )
     sessions = InMemorySurfaceSessionStore()
     delivery = FakeSurfaceDelivery()
     runtime = Runtime(
-        agent, gateway=gateway, tools=tools, usage=InMemoryUsageStore(),
-        memory=InMemoryStore(), engine=engine,
+        agent,
+        gateway=gateway,
+        tools=tools,
+        usage=InMemoryUsageStore(),
+        memory=InMemoryStore(),
+        engine=engine,
     )
     runner = SessionRunner(runtime, sessions, delivery)
 
@@ -1501,12 +1668,21 @@ async def test_malformed_outcome_falls_back_to_prose_path_without_raising():
     for malformed_data in malformed_cases:
         tools = ToolGateway(tools=[_MalformedOutcomeTool(malformed_data)])
         runner, sessions, delivery = _runner(
-            ScriptedGateway([
-                tool_call_response(
-                    "m", [("c1", "github_issues_write", {"repo": "acme/x", "title": "T"})]
-                ),
-                ModelResponse(text="fresh model reply", model="m"),
-            ]),
+            ScriptedGateway(
+                [
+                    tool_call_response(
+                        "m",
+                        [
+                            (
+                                "c1",
+                                "github_issues_write",
+                                {"repo": "acme/x", "title": "T"},
+                            )
+                        ],
+                    ),
+                    ModelResponse(text="fresh model reply", model="m"),
+                ]
+            ),
             tools=tools,
         )
         session = await runner.run(_task("open an issue"), _target())

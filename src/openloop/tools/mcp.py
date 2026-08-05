@@ -80,8 +80,7 @@ class HttpMCPClient:
             from mcp.client.streamable_http import streamablehttp_client  # noqa: F401
         except ImportError as exc:  # pragma: no cover - depends on extra
             raise RuntimeError(
-                "MCP support needs the 'mcp' extra: pip install "
-                "'openloop[mcp]'"
+                "MCP support needs the 'mcp' extra: pip install 'openloop[mcp]'"
             ) from exc
         return ClientSession, streamablehttp_client
 
@@ -101,7 +100,9 @@ class HttpMCPClient:
                     for t in result.tools
                 ]
 
-    async def call_tool(self, name: str, args: dict) -> str:  # pragma: no cover - needs server
+    async def call_tool(
+        self, name: str, args: dict
+    ) -> str:  # pragma: no cover - needs server
         ClientSession, streamablehttp_client = self._require_sdk()
         headers = await self._headers()
         async with streamablehttp_client(self.url, headers=headers) as (read, write, _):

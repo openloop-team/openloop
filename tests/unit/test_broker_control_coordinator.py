@@ -213,9 +213,7 @@ async def _fixture(
 
 
 async def test_start_replay_and_inspection_reconstruct_identical_access(tmp_path):
-    coordinator, ledger, _, runtime, durable, _, _, job_id = await _fixture(
-        tmp_path
-    )
+    coordinator, ledger, _, runtime, durable, _, _, job_id = await _fixture(tmp_path)
     payload = StartSegmentPayload(job_id, 0, "start-control-segment")
 
     first = await coordinator.start_segment(OWNER, payload)
@@ -245,9 +243,7 @@ async def test_checkpoint_release_and_finalize_lifecycle_is_replay_safe(tmp_path
         job_id, 1, "quiesce-lifecycle-first", "barrier-first"
     )
 
-    first_quiesce = await coordinator.quiesce_segment(
-        OWNER, first_quiesce_payload
-    )
+    first_quiesce = await coordinator.quiesce_segment(OWNER, first_quiesce_payload)
     first_quiesce_replay = await coordinator.quiesce_segment(
         OWNER, first_quiesce_payload
     )
@@ -273,9 +269,7 @@ async def test_checkpoint_release_and_finalize_lifecycle_is_replay_safe(tmp_path
         first_receipt,
         ReleaseTarget.PARKED,
     )
-    first_release = await coordinator.release_segment(
-        OWNER, first_release_payload
-    )
+    first_release = await coordinator.release_segment(OWNER, first_release_payload)
     first_release_replay = await coordinator.release_segment(
         OWNER, first_release_payload
     )
@@ -289,9 +283,7 @@ async def test_checkpoint_release_and_finalize_lifecycle_is_replay_safe(tmp_path
     )
     await coordinator.quiesce_segment(
         OWNER,
-        QuiesceSegmentPayload(
-            job_id, 2, "quiesce-lifecycle-second", "barrier-second"
-        ),
+        QuiesceSegmentPayload(job_id, 2, "quiesce-lifecycle-second", "barrier-second"),
     )
     second_receipt = _signed_receipt(
         job_id=job_id,
@@ -332,9 +324,7 @@ async def test_release_rejects_invalid_signature_before_ledger_transition(tmp_pa
     )
     await coordinator.quiesce_segment(
         OWNER,
-        QuiesceSegmentPayload(
-            job_id, 1, "quiesce-invalid-receipt", "barrier-invalid"
-        ),
+        QuiesceSegmentPayload(job_id, 1, "quiesce-invalid-receipt", "barrier-invalid"),
     )
     attacker = CheckpointReceiptIssuer(
         private_key=Ed25519PrivateKey.generate(),
@@ -446,9 +436,7 @@ async def test_same_key_replay_uses_persisted_version_after_root_rotation(
 
 
 async def test_inspection_is_read_only_and_returns_none_for_missing_runtime(tmp_path):
-    coordinator, ledger, _, runtime, durable, _, _, job_id = await _fixture(
-        tmp_path
-    )
+    coordinator, ledger, _, runtime, durable, _, _, job_id = await _fixture(tmp_path)
     await coordinator.start_segment(
         OWNER, StartSegmentPayload(job_id, 0, "start-inspect-read-only")
     )
@@ -555,9 +543,7 @@ async def test_failed_authoritative_reread_abandons_without_runtime_effects(
     assert problem.value.code is SegmentCoordinatorCode.INTERNAL
     assert runtime.ensure_calls == 0
     assert runtime.release_calls == 0
-    recovery = await BrokerLedger(repository).inspect_job_for_recovery(
-        OWNER, job_id
-    )
+    recovery = await BrokerLedger(repository).inspect_job_for_recovery(OWNER, job_id)
     assert recovery.state is JobState.CREATED
     assert recovery.generation_record.state is GenerationState.ABANDONED
 

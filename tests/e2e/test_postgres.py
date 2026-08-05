@@ -90,19 +90,32 @@ async def test_usage_attribution_envelope_round_trip(stores):
     scope = f"ws:e2e:agent:{run_id}"
     big_generation = 9_000_000_000  # > 2**31 - 1
 
-    assert await usage.record(UsageRecord(
-        scope_key=scope, workspace="e2e", agent="dev-platform",
-        model="claude-sonnet-5", cost_usd=0.1,
-        idempotency_key=f"e2e-env-{run_id}",
-        job_id=f"job{run_id}",
-        broker_job_id="11111111-2222-3333-4444-555555555555",
-        broker_generation=big_generation,
-        approval_id=f"apr-{run_id}", approver="alice",
-        session_id=f"sess-{run_id}"))
-    assert await usage.record(UsageRecord(
-        scope_key=scope, workspace="e2e", agent="dev-platform",
-        model="gpt-4o-mini", cost_usd=0.001,
-        idempotency_key=f"e2e-legacy-{run_id}"))
+    assert await usage.record(
+        UsageRecord(
+            scope_key=scope,
+            workspace="e2e",
+            agent="dev-platform",
+            model="claude-sonnet-5",
+            cost_usd=0.1,
+            idempotency_key=f"e2e-env-{run_id}",
+            job_id=f"job{run_id}",
+            broker_job_id="11111111-2222-3333-4444-555555555555",
+            broker_generation=big_generation,
+            approval_id=f"apr-{run_id}",
+            approver="alice",
+            session_id=f"sess-{run_id}",
+        )
+    )
+    assert await usage.record(
+        UsageRecord(
+            scope_key=scope,
+            workspace="e2e",
+            agent="dev-platform",
+            model="gpt-4o-mini",
+            cost_usd=0.001,
+            idempotency_key=f"e2e-legacy-{run_id}",
+        )
+    )
 
     rows = {r.idempotency_key: r for r in await usage.recent(limit=500)}
     env = rows[f"e2e-env-{run_id}"]
@@ -115,8 +128,12 @@ async def test_usage_attribution_envelope_round_trip(stores):
 
     legacy = rows[f"e2e-legacy-{run_id}"]
     for value in (
-        legacy.job_id, legacy.broker_job_id, legacy.broker_generation,
-        legacy.approval_id, legacy.approver, legacy.session_id,
+        legacy.job_id,
+        legacy.broker_job_id,
+        legacy.broker_generation,
+        legacy.approval_id,
+        legacy.approver,
+        legacy.session_id,
     ):
         assert value is None
 
@@ -131,19 +148,35 @@ async def test_happy_path_end_to_end(stores):
     # Seed a prior decision into channel memory (real pgvector insert).
     embedder = FakeEmbedder()
     seed_vec = (await embedder.embed(["Use Redis Streams for ingestion v1."]))[0]
-    await memory.remember(MemoryRecord(
-        scope_key=scope, text="Use Redis Streams for ingestion v1.",
-        embedding=seed_vec))
+    await memory.remember(
+        MemoryRecord(
+            scope_key=scope,
+            text="Use Redis Streams for ingestion v1.",
+            embedding=seed_vec,
+        )
+    )
 
     github = FakeGitHub()
     tools = ToolGateway(tools=[GitHubConnector(github)], approvals=approvals)
 
     # The model recalls context, then asks to open a GitHub issue (write action).
-    gateway = ScriptedGateway([
-        tool_call_response("m", [("c1", "github_issues_write",
-                                  {"repo": "acme/ingestion",
-                                   "title": "Track: Redis Streams for v1"})]),
-    ])
+    gateway = ScriptedGateway(
+        [
+            tool_call_response(
+                "m",
+                [
+                    (
+                        "c1",
+                        "github_issues_write",
+                        {
+                            "repo": "acme/ingestion",
+                            "title": "Track: Redis Streams for v1",
+                        },
+                    )
+                ],
+            ),
+        ]
+    )
     runtime = Runtime(
         agent,
         gateway=gateway,
@@ -155,9 +188,14 @@ async def test_happy_path_end_to_end(stores):
     )
 
     # --- the turn: write action is held for approval ---
-    result = await runtime.handle(Task(
-        text="open an issue to track the ingestion decision",
-        surface="slack", channel=channel, user="U_requester"))
+    result = await runtime.handle(
+        Task(
+            text="open an issue to track the ingestion decision",
+            surface="slack",
+            channel=channel,
+            user="U_requester",
+        )
+    )
 
     assert result.model == "approval-gate"
     assert len(result.approval_ids) == 1
@@ -165,8 +203,8 @@ async def test_happy_path_end_to_end(stores):
 
     # Recall worked against pgvector: the seeded memory reached the model.
     system_text = " ".join(
-        m["content"] for m in gateway.calls[0]["messages"]
-        if m["role"] == "system")
+        m["content"] for m in gateway.calls[0]["messages"] if m["role"] == "system"
+    )
     assert "Redis Streams" in system_text
 
     # The approval is persisted as pending in Postgres.
@@ -337,19 +375,25 @@ async def test_surface_session_roundtrip_across_real_postgres(postgres_pool):
     store = PostgresSurfaceSessionStore()
     await store.setup(postgres_pool)
     try:
-        await store.upsert(SurfaceSession(
-            id=session_id,
-            target=SurfaceTarget(
-                surface="slack", workspace="acme", agent="dev-platform",
-                channel="C1", thread="100.1", event_id=event_id,
-            ),
-            status="waiting",
-            workflow_instance_id=session_id,
-            progress_message_id="ts-1",
-            approval_ids=[approval_id],
-            request_text="please do the thing",
-            result_artifact_ref="artifact://job-1/report.md",
-        ))
+        await store.upsert(
+            SurfaceSession(
+                id=session_id,
+                target=SurfaceTarget(
+                    surface="slack",
+                    workspace="acme",
+                    agent="dev-platform",
+                    channel="C1",
+                    thread="100.1",
+                    event_id=event_id,
+                ),
+                status="waiting",
+                workflow_instance_id=session_id,
+                progress_message_id="ts-1",
+                approval_ids=[approval_id],
+                request_text="please do the thing",
+                result_artifact_ref="artifact://job-1/report.md",
+            )
+        )
 
         # A fresh store (a restart) reads it back by all three keys.
         store2 = PostgresSurfaceSessionStore()
@@ -367,17 +411,21 @@ async def test_surface_session_roundtrip_across_real_postgres(postgres_pool):
             assert await store2.get_by_approval("nope") is None
             # The (scope-aware) thread lookup finds the session for this bot...
             in_thread = SurfaceTarget(
-                surface="slack", workspace="acme", agent="dev-platform",
-                channel="C1", thread="100.1",
+                surface="slack",
+                workspace="acme",
+                agent="dev-platform",
+                channel="C1",
+                thread="100.1",
             )
             assert (await store2.get_by_thread(in_thread)).id == session_id
-            assert await store2.get_by_thread(
-                replace(in_thread, thread="other")
-            ) is None
+            assert (
+                await store2.get_by_thread(replace(in_thread, thread="other")) is None
+            )
             # ...but not a different agent sharing the same channel/thread.
-            assert await store2.get_by_thread(
-                replace(in_thread, agent="other-agent")
-            ) is None
+            assert (
+                await store2.get_by_thread(replace(in_thread, agent="other-agent"))
+                is None
+            )
         finally:
             await store2.close()
     finally:
@@ -404,8 +452,12 @@ async def test_thread_history_across_real_postgres(postgres_pool):
 
     def _target(tid, *, agent="dev-platform", thr=thread):
         return SurfaceTarget(
-            surface="slack", workspace="acme", agent=agent,
-            channel="C1", thread=thr, event_id=f"ev-{tid}",
+            surface="slack",
+            workspace="acme",
+            agent=agent,
+            channel="C1",
+            thread=thr,
+            event_id=f"ev-{tid}",
         )
 
     store = PostgresSurfaceSessionStore()
@@ -414,30 +466,56 @@ async def test_thread_history_across_real_postgres(postgres_pool):
         # Two delivered turns + one still-running, plus an undelivered completed
         # turn (answer never reached the user) and a same-thread session for a
         # *different* agent — both must be excluded from history.
-        await store.upsert(SurfaceSession(
-            id=ids[0], target=_target(ids[0]), status="completed",
-            request_text="q1", result_summary="a1", final_message_id="ts-0",
-        ))
-        await store.upsert(SurfaceSession(
-            id=ids[1], target=_target(ids[1]), status="completed",
-            request_text="q2", result_summary="a2", final_message_id="ts-1",
-        ))
-        await store.upsert(SurfaceSession(
-            id=ids[2], target=_target(ids[2]), status="running",
-            request_text="q3",
-        ))
+        await store.upsert(
+            SurfaceSession(
+                id=ids[0],
+                target=_target(ids[0]),
+                status="completed",
+                request_text="q1",
+                result_summary="a1",
+                final_message_id="ts-0",
+            )
+        )
+        await store.upsert(
+            SurfaceSession(
+                id=ids[1],
+                target=_target(ids[1]),
+                status="completed",
+                request_text="q2",
+                result_summary="a2",
+                final_message_id="ts-1",
+            )
+        )
+        await store.upsert(
+            SurfaceSession(
+                id=ids[2],
+                target=_target(ids[2]),
+                status="running",
+                request_text="q3",
+            )
+        )
         undelivered_id = f"sess-{uuid.uuid4().hex[:8]}"
-        await store.upsert(SurfaceSession(
-            id=undelivered_id, target=_target(undelivered_id), status="completed",
-            request_text="never-seen", result_summary="undelivered",
-            final_message_id=None,
-        ))
+        await store.upsert(
+            SurfaceSession(
+                id=undelivered_id,
+                target=_target(undelivered_id),
+                status="completed",
+                request_text="never-seen",
+                result_summary="undelivered",
+                final_message_id=None,
+            )
+        )
         other_agent_id = f"sess-{uuid.uuid4().hex[:8]}"
-        await store.upsert(SurfaceSession(
-            id=other_agent_id, target=_target(other_agent_id, agent="other"),
-            status="completed", request_text="nope", result_summary="leak",
-            final_message_id="ts-x",
-        ))
+        await store.upsert(
+            SurfaceSession(
+                id=other_agent_id,
+                target=_target(other_agent_id, agent="other"),
+                status="completed",
+                request_text="nope",
+                result_summary="leak",
+                final_message_id="ts-x",
+            )
+        )
 
         store2 = PostgresSurfaceSessionStore()
         await store2.setup(postgres_pool)
@@ -450,7 +528,8 @@ async def test_thread_history_across_real_postgres(postgres_pool):
             )
             assert [s.id for s in prior] == [ids[0], ids[1]]
             assert [(s.request_text, s.result_summary) for s in prior] == [
-                ("q1", "a1"), ("q2", "a2"),
+                ("q1", "a1"),
+                ("q2", "a2"),
             ]
             # A different thread sees nothing of this one.
             assert await store2.thread_history(_target("x", thr="elsewhere")) == []
@@ -552,22 +631,39 @@ async def test_session_reconcile_across_real_postgres(postgres_pool):
     await workflows.setup(postgres_pool)
     try:
         # The turn's workflow completed, but the session crashed before delivery.
-        await workflows.create(WorkflowInstance(
-            id=sid, workflow=workflow_name, status="completed",
-            state={
-                "final_text": "recovered across restart",
-                "accounted": {"model": "m", "prompt_tokens": 1,
-                              "completion_tokens": 1, "cost_usd": 0.0},
-                "approval_ids": [],
-            },
-        ))
-        await sessions.upsert(SurfaceSession(
-            id=sid,
-            target=SurfaceTarget(surface="slack", workspace="acme",
-                                 agent=agent.metadata.name, channel="C1",
-                                 thread="100.1", event_id=f"ev-{sid}"),
-            status="running", workflow_instance_id=sid, progress_message_id="p0",
-        ))
+        await workflows.create(
+            WorkflowInstance(
+                id=sid,
+                workflow=workflow_name,
+                status="completed",
+                state={
+                    "final_text": "recovered across restart",
+                    "accounted": {
+                        "model": "m",
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "cost_usd": 0.0,
+                    },
+                    "approval_ids": [],
+                },
+            )
+        )
+        await sessions.upsert(
+            SurfaceSession(
+                id=sid,
+                target=SurfaceTarget(
+                    surface="slack",
+                    workspace="acme",
+                    agent=agent.metadata.name,
+                    channel="C1",
+                    thread="100.1",
+                    event_id=f"ev-{sid}",
+                ),
+                status="running",
+                workflow_instance_id=sid,
+                progress_message_id="p0",
+            )
+        )
 
         # Fresh stores + runner (a restart) reconcile and deliver the answer.
         sessions2 = PostgresSurfaceSessionStore()
@@ -615,8 +711,12 @@ async def test_thread_record_transcript_across_real_postgres(postgres_pool):
 
     thread = f"thr-{uuid.uuid4().hex[:8]}"
     scope = SurfaceTarget(
-        surface="slack", workspace="acme", agent="dev-platform",
-        channel="C1", thread=thread, event_id="ignored",
+        surface="slack",
+        workspace="acme",
+        agent="dev-platform",
+        channel="C1",
+        thread=thread,
+        event_id="ignored",
     )
 
     store = PostgresThreadRecordStore()
@@ -641,9 +741,13 @@ async def test_thread_record_transcript_across_real_postgres(postgres_pool):
             out = await store2.replayable_transcript(scope)
             assert [(f.request, f.answer) for f in out] == [("q1", "a1"), ("q2", "a2")]
             # Limit keeps the most recent, still oldest-first; exclude drops a turn.
-            assert [f.turn_id for f in await store2.replayable_transcript(scope, limit=1)] == ["t2"]
-            assert [f.turn_id for f in await store2.replayable_transcript(
-                scope, exclude_turn_id="t2")] == ["t1"]
+            assert [
+                f.turn_id for f in await store2.replayable_transcript(scope, limit=1)
+            ] == ["t2"]
+            assert [
+                f.turn_id
+                for f in await store2.replayable_transcript(scope, exclude_turn_id="t2")
+            ] == ["t1"]
         finally:
             await store2.close()
     finally:
@@ -652,9 +756,11 @@ async def test_thread_record_transcript_across_real_postgres(postgres_pool):
             key = "\x1f".join(("slack", "acme", "dev-platform", "C1", thread))
             async with pool.acquire() as conn:
                 await conn.execute(
-                    "DELETE FROM surface_thread_transcript WHERE scope_key = $1", key)
+                    "DELETE FROM surface_thread_transcript WHERE scope_key = $1", key
+                )
                 await conn.execute(
-                    "DELETE FROM surface_threads WHERE scope_key = $1", key)
+                    "DELETE FROM surface_threads WHERE scope_key = $1", key
+                )
         except Exception:
             pass
         await store.close()
@@ -669,8 +775,12 @@ async def test_thread_context_ref_across_real_postgres(postgres_pool):
 
     thread = f"thr-{uuid.uuid4().hex[:8]}"
     scope = SurfaceTarget(
-        surface="slack", workspace="acme", agent="dev-platform",
-        channel="C1", thread=thread, event_id="ignored",
+        surface="slack",
+        workspace="acme",
+        agent="dev-platform",
+        channel="C1",
+        thread=thread,
+        event_id="ignored",
     )
     key = thread_scope_key(scope)
 
@@ -696,7 +806,8 @@ async def test_thread_context_ref_across_real_postgres(postgres_pool):
             pool = store._require_pool()
             async with pool.acquire() as conn:
                 await conn.execute(
-                    "DELETE FROM surface_threads WHERE scope_key = $1", key)
+                    "DELETE FROM surface_threads WHERE scope_key = $1", key
+                )
         except Exception:
             pass
         await store.close()
@@ -711,8 +822,12 @@ async def test_thread_inbox_and_claim_across_real_postgres(postgres_pool):
 
     thread = f"thr-{uuid.uuid4().hex[:8]}"
     scope = SurfaceTarget(
-        surface="slack", workspace="acme", agent="dev-platform",
-        channel="C1", thread=thread, event_id="ignored",
+        surface="slack",
+        workspace="acme",
+        agent="dev-platform",
+        channel="C1",
+        thread=thread,
+        event_id="ignored",
     )
     key = "\x1f".join(("slack", "acme", "dev-platform", "C1", thread))
 
@@ -755,9 +870,11 @@ async def test_thread_inbox_and_claim_across_real_postgres(postgres_pool):
             pool = store._require_pool()
             async with pool.acquire() as conn:
                 await conn.execute(
-                    "DELETE FROM surface_thread_inbox WHERE scope_key = $1", key)
+                    "DELETE FROM surface_thread_inbox WHERE scope_key = $1", key
+                )
                 await conn.execute(
-                    "DELETE FROM surface_threads WHERE scope_key = $1", key)
+                    "DELETE FROM surface_threads WHERE scope_key = $1", key
+                )
         except Exception:
             pass
         await store.close()
@@ -777,14 +894,22 @@ async def test_workflow_drive_arbitration_sql_semantics(postgres_pool):
         pool = store._require_pool()
 
         # create: inserts once, conflict loses without overwriting.
-        assert await store.create(WorkflowInstance(
-            id=instance_id, workflow="t", status="running",
-            state={"progress": "real"},
-        ))
-        assert not await store.create(WorkflowInstance(
-            id=instance_id, workflow="t", status="running",
-            state={"progress": "clobber"},
-        ))
+        assert await store.create(
+            WorkflowInstance(
+                id=instance_id,
+                workflow="t",
+                status="running",
+                state={"progress": "real"},
+            )
+        )
+        assert not await store.create(
+            WorkflowInstance(
+                id=instance_id,
+                workflow="t",
+                status="running",
+                state={"progress": "clobber"},
+            )
+        )
         assert (await store.get(instance_id)).state == {"progress": "real"}
 
         # claim_drive: wins unleased, loses to a live lease, wins expired.
@@ -1185,9 +1310,7 @@ async def test_approval_decide_once_migration_idempotent_on_populated_table(
             await conn.execute(
                 "ALTER TABLE approvals DROP COLUMN IF EXISTS workflow_instance_id"
             )
-            await conn.execute(
-                "ALTER TABLE approvals DROP COLUMN IF EXISTS effect_at"
-            )
+            await conn.execute("ALTER TABLE approvals DROP COLUMN IF EXISTS effect_at")
             await conn.execute(
                 "INSERT INTO approvals "
                 "(id, agent, action, tool, permission, status, decided_by) "

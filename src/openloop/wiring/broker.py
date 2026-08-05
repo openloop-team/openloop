@@ -243,9 +243,7 @@ def _decode_roots(
                 f"broker {name} root {version!r} is not valid base64"
             ) from exc
         if len(raw) != 32:
-            raise ValueError(
-                f"broker {name} root {version!r} must decode to 32 bytes"
-            )
+            raise ValueError(f"broker {name} root {version!r} must decode to 32 bytes")
         decoded[version] = raw
     _reject_reused_roots(decoded)
     return decoded
@@ -438,9 +436,7 @@ async def build_broker_service(
         )
     receipt_publics: dict[str, Ed25519PublicKey] | None = None
     if receipt_verifier is None:
-        receipt_publics = _decode_public_keys(
-            "receipt", config.receipt_public_keys
-        )
+        receipt_publics = _decode_public_keys("receipt", config.receipt_public_keys)
         receipt_verifier = CheckpointReceiptVerifier(
             public_keys=VerificationKeySet(receipt_publics),
             issuer=_RECEIPT_ISSUER,
@@ -449,9 +445,7 @@ async def build_broker_service(
         # The broker holds capability/runtime roots; neither may reproduce an
         # identity/receipt public it trusts the app to sign with (decision 11).
         if receipt_publics is None:
-            receipt_publics = _decode_public_keys(
-                "receipt", config.receipt_public_keys
-            )
+            receipt_publics = _decode_public_keys("receipt", config.receipt_public_keys)
         _reject_cross_boundary_reuse(
             {"capability": capability_roots, "runtime": runtime_roots},
             receipt_publics,
@@ -724,12 +718,8 @@ async def build_broker(
             coprocess_settings=coprocess_settings,
         )
         if coprocess_settings is None:
-            raise ValueError(
-                "coprocess broker mode requires CoprocessBrokerSettings"
-            )
-        service_config = BrokerServiceConfig.from_coprocess_settings(
-            coprocess_settings
-        )
+            raise ValueError("coprocess broker mode requires CoprocessBrokerSettings")
+        service_config = BrokerServiceConfig.from_coprocess_settings(coprocess_settings)
         # The full within-process reuse check across all three root rings — the
         # single-process invariant the split otherwise scatters. build_broker_service
         # re-decodes capability/runtime for authority construction; this decode
@@ -759,9 +749,7 @@ async def build_broker(
         # The service verifies receipts with PUBLIC keys only; derive them here
         # from the shared roots and inject the verifier (decision-2 receipt split).
         receipt_keys = {
-            version: _derive_receipt_key(
-                root, client_config.receipt_domain, version
-            )
+            version: _derive_receipt_key(root, client_config.receipt_domain, version)
             for version, root in receipt_roots.items()
         }
         receipt_verifier = CheckpointReceiptVerifier(

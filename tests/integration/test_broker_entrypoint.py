@@ -68,9 +68,7 @@ def _settings(root: Path, **overrides) -> Settings:
         .public_bytes_raw()
     )
     receipt_public = (
-        _derive_receipt_key(
-            _RECEIPT_ROOT, "broker-receipt", "receipt-key-v1"
-        )
+        _derive_receipt_key(_RECEIPT_ROOT, "broker-receipt", "receipt-key-v1")
         .public_key()
         .public_bytes_raw()
     )
@@ -119,9 +117,7 @@ def _client_settings(settings: Settings, **overrides) -> RuntimeSettings:
         broker_mode="external",
         broker_control_socket_dir=settings.broker_control_socket_dir,
         broker_ingress_root=settings.broker_ingress_root,
-        broker_checkpoint_receipt_root=(
-            settings.broker_checkpoint_receipt_root
-        ),
+        broker_checkpoint_receipt_root=(settings.broker_checkpoint_receipt_root),
         broker_shared_data_gid=settings.broker_shared_data_gid,
         broker_identity_private_key=SecretStr(
             base64.b64encode(_IDENTITY_SEED).decode()
@@ -191,9 +187,7 @@ async def test_startup_error_report_prevents_bind(broker_dir):
     settings = _settings(broker_dir)
     code = await run_broker(
         settings,
-        _reconciler_factory=lambda **_kwargs: _FixedReconciler(
-            _empty_report(error=1)
-        ),
+        _reconciler_factory=lambda **_kwargs: _FixedReconciler(_empty_report(error=1)),
     )
     assert code == 1
     assert not (Path(settings.broker_control_socket_dir) / "control.sock").exists()
@@ -276,9 +270,7 @@ async def test_signal_handlers_remain_installed_through_service_teardown(
 
     code = await broker_entrypoint.run_broker(
         settings,
-        _reconciler_factory=lambda **_kwargs: _FixedReconciler(
-            _empty_report()
-        ),
+        _reconciler_factory=lambda **_kwargs: _FixedReconciler(_empty_report()),
         _shutdown_event=shutdown,
     )
 
@@ -305,9 +297,7 @@ def _subprocess_env(settings: Settings) -> dict[str, str]:
             "BROKER_STATE_ROOT": settings.broker_state_root,
             "BROKER_RUNTIME_ROOT": settings.broker_runtime_root,
             "BROKER_INGRESS_ROOT": settings.broker_ingress_root,
-            "BROKER_CHECKPOINT_RECEIPT_ROOT": (
-                settings.broker_checkpoint_receipt_root
-            ),
+            "BROKER_CHECKPOINT_RECEIPT_ROOT": (settings.broker_checkpoint_receipt_root),
             "BROKER_SHARED_DATA_GID": str(settings.broker_shared_data_gid),
             "BROKER_EXPECTED_APP_UID": str(settings.broker_expected_app_uid),
             "BROKER_CAPABILITY_ROOTS": json.dumps(
@@ -340,9 +330,7 @@ def _wait_until_healthy(settings: Settings, process: subprocess.Popen) -> None:
     while time.monotonic() < deadline:
         if process.poll() is not None:
             _out, error = process.communicate()
-            pytest.fail(
-                f"broker exited {process.returncode} before healthy:\n{error}"
-            )
+            pytest.fail(f"broker exited {process.returncode} before healthy:\n{error}")
         if healthcheck(BrokerServiceConfig.from_broker_settings(settings)) == 0:
             return
         time.sleep(0.05)
@@ -433,9 +421,7 @@ async def test_two_process_client_seam_lock_and_signal_shutdown(broker_dir):
         assert "startup recovery pass" not in second_error
 
         first.send_signal(signal.SIGINT)
-        first_out, first_error = await asyncio.to_thread(
-            first.communicate, timeout=5
-        )
+        first_out, first_error = await asyncio.to_thread(first.communicate, timeout=5)
         assert first.returncode == 0, first_out + first_error
 
         unhealthy = await asyncio.to_thread(
@@ -490,9 +476,7 @@ def test_entrypoint_refuses_cross_boundary_root_reuse(broker_dir):
     )
     assert refused.returncode == 1
     assert "reuse across the process boundary" in refused.stderr
-    assert (
-        healthcheck(BrokerServiceConfig.from_broker_settings(settings)) == 1
-    )
+    assert healthcheck(BrokerServiceConfig.from_broker_settings(settings)) == 1
 
 
 @pytest.mark.postgres

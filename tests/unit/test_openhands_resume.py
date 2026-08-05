@@ -30,9 +30,7 @@ FINGERPRINT = "b" * 64
 
 
 def _artifact(kind="paused", segment="segment-1") -> WorkspaceArtifactRef:
-    identity = WorkspaceArtifactIdentity(
-        "job-1", "conversation-1", segment, kind
-    )
+    identity = WorkspaceArtifactIdentity("job-1", "conversation-1", segment, kind)
     return WorkspaceArtifactRef(
         artifact=WorkspaceArtifact(
             identity=identity,

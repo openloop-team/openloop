@@ -59,9 +59,7 @@ def take_over_stale_socket(
     try:
         timeout = float(connect_timeout)
     except (OverflowError, TypeError, ValueError) as error:
-        raise ValueError(
-            "connect_timeout must be a positive finite number"
-        ) from error
+        raise ValueError("connect_timeout must be a positive finite number") from error
     if (
         isinstance(connect_timeout, bool)
         or not isinstance(connect_timeout, (int, float))
@@ -134,16 +132,10 @@ class UnixSocketPolicy:
             raise ValueError("socket path is invalid or too long")
         if isinstance(self.mode, bool) or not isinstance(self.mode, int):
             raise TypeError("socket mode must be an integer")
-        if (
-            self.mode & ~0o770
-            or self.mode & 0o007
-            or self.mode & 0o600 != 0o600
-        ):
+        if self.mode & ~0o770 or self.mode & 0o007 or self.mode & 0o600 != 0o600:
             raise ValueError("socket mode must be owner-rw and deny world access")
         if self.gid is not None and (
-            isinstance(self.gid, bool)
-            or not isinstance(self.gid, int)
-            or self.gid < 0
+            isinstance(self.gid, bool) or not isinstance(self.gid, int) or self.gid < 0
         ):
             raise ValueError("socket gid must be a nonnegative integer")
 
@@ -341,9 +333,7 @@ class BrokerRpcServer:
             deadline,
         )
 
-    async def _finish_application(
-        self, task: asyncio.Task[RpcResponse]
-    ) -> None:
+    async def _finish_application(self, task: asyncio.Task[RpcResponse]) -> None:
         try:
             await task
         except Exception:
@@ -419,9 +409,7 @@ class BrokerRpcServer:
             server.close()
             await server.wait_closed()
         tasks = tuple(
-            self._connection_tasks
-            | self._background_tasks
-            | self._application_tasks
+            self._connection_tasks | self._background_tasks | self._application_tasks
         )
         if tasks:
             done, pending = await asyncio.wait(

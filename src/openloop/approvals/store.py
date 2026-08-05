@@ -54,9 +54,7 @@ class ApprovalRequest:
     # decision reconciler's sweep.
     effect_at: datetime | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    created_at: datetime = field(
-        default_factory=lambda: datetime.now(UTC)
-    )
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 @runtime_checkable

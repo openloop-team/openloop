@@ -269,9 +269,11 @@ _EXTERNAL_RECEIPT_ROOT = bytes([4]) * 32
 def _external_settings(tmp_path, sock_dir, **overrides):
     identity_private = Ed25519PrivateKey.from_private_bytes(_EXTERNAL_SEED)
     identity_pub = identity_private.public_key().public_bytes_raw()
-    receipt_pub = _derive_receipt_key(
-        _EXTERNAL_RECEIPT_ROOT, "broker-receipt", "receipt-key-v1"
-    ).public_key().public_bytes_raw()
+    receipt_pub = (
+        _derive_receipt_key(_EXTERNAL_RECEIPT_ROOT, "broker-receipt", "receipt-key-v1")
+        .public_key()
+        .public_bytes_raw()
+    )
     ingress_root = tmp_path / "ingress"
     receipts_root = tmp_path / "receipts"
     for path in (ingress_root, receipts_root):

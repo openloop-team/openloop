@@ -104,9 +104,7 @@ def test_policy_derives_names_paths_and_fixed_running_relay(tmp_path):
     assert policy.names.network == f"{stem}-net"
     assert policy.names.agent == f"{stem}-agent"
     assert policy.names.relay == f"{stem}-relay"
-    assert policy.paths.root == (
-        Path("/tmp/olrt").resolve() / str(JOB_ID) / "7"
-    )
+    assert policy.paths.root == (Path("/tmp/olrt").resolve() / str(JOB_ID) / "7")
     assert policy.paths.state == (
         Path("/tmp/olst").resolve() / str(JOB_ID) / "agent-server"
     )
@@ -129,9 +127,7 @@ def test_policy_can_compile_only_the_fixed_checkpoint_relay_variant(tmp_path):
 def test_policy_refuses_host_socket_over_uds_budget(tmp_path):
     long_root = tmp_path / ("x" * 80)
     with pytest.raises(RuntimeUnavailable, match="UDS budget"):
-        DockerGenerationPolicy.build(
-            _config(tmp_path, runtime_root=long_root), _spec()
-        )
+        DockerGenerationPolicy.build(_config(tmp_path, runtime_root=long_root), _spec())
 
 
 def test_network_command_carries_complete_immutable_identity(tmp_path):
@@ -172,9 +168,9 @@ def test_agent_command_is_fixed_hardened_secret_free_and_self_expiring(tmp_path)
     assert "no-new-privileges" in argv
     assert "--network-alias" in argv
     assert argv[argv.index("--network-alias") + 1] == "agent"
-    assert runtime_server_image(
-        policy.config.agent_image, policy.config.platform
-    ) in argv
+    assert (
+        runtime_server_image(policy.config.agent_image, policy.config.platform) in argv
+    )
     assert dict(command.environment) == {
         "OH_SESSION_API_KEYS_0": SESSION_KEY,
         "OH_SECRET_KEY": CONVERSATION_SECRET,
@@ -220,7 +216,9 @@ def test_start_refuses_foreign_name(tmp_path):
     policy = _policy(tmp_path)
     object_id = "a" * 64
     assert policy.start(policy.names.agent, object_id).argv == (
-        "docker", "start", object_id
+        "docker",
+        "start",
+        object_id,
     )
     with pytest.raises(ValueError, match="foreign"):
         policy.start("someone-elses-container", object_id)

@@ -40,10 +40,13 @@ async def _pending(gateway):
 async def test_runtime_surfaces_approval_ids():
     agent = _agent()
     tools = ToolGateway(tools=[GitHubConnector(FakeGitHub())])
-    gateway = ScriptedGateway([
-        tool_call_response("m", [("c1", "github_issues_write",
-                                  {"repo": "acme/x", "title": "T"})]),
-    ])
+    gateway = ScriptedGateway(
+        [
+            tool_call_response(
+                "m", [("c1", "github_issues_write", {"repo": "acme/x", "title": "T"})]
+            ),
+        ]
+    )
     runtime = Runtime(
         agent, gateway=gateway, tools=tools, engine=in_memory_workflow_engine()
     )
@@ -74,9 +77,7 @@ def test_openhands_decision_blocks_are_explicit_and_opaque():
         OPENHANDS_ACCEPT_ACTION,
         OPENHANDS_REJECT_ACTION,
     }
-    assert all(
-        button["value"] == "job-1|decision-1" for button in actions["elements"]
-    )
+    assert all(button["value"] == "job-1|decision-1" for button in actions["elements"])
 
 
 async def test_resolve_approve_executes():

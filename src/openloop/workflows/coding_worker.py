@@ -127,12 +127,9 @@ def build_workspace_task_workflow(
         def _persist() -> None:
             s.update(task.to_dict())
 
-        event_requester = (
-            ((s.get("events") or {}).get(APPROVAL_EVENT) or {})
-            .get("approver", "")
-            .lstrip("@")
-            or None
-        )
+        event_requester = ((s.get("events") or {}).get(APPROVAL_EVENT) or {}).get(
+            "approver", ""
+        ).lstrip("@") or None
         if task.requester_id is None:
             task.requester_id = event_requester
 
@@ -252,8 +249,7 @@ def build_workspace_task_workflow(
             "prompt_tokens": s.get("prompt_tokens", 0),
             "completion_tokens": s.get("completion_tokens", 0),
             "summary": (
-                f"opened draft PR #{pull.get('number')} in {repo} "
-                f"(job {task.task_id})"
+                f"opened draft PR #{pull.get('number')} in {repo} (job {task.task_id})"
             ),
         }
         cleanup = getattr(orchestrator, "cleanup_attempt", None)

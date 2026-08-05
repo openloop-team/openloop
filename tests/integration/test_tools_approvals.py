@@ -50,7 +50,8 @@ async def test_write_action_is_held_for_approval():
     agent = _agent()
     gw = _gateway()
     inv = await gw.invoke(
-        agent, "github.issues:write",
+        agent,
+        "github.issues:write",
         {"repo": "acme/x", "title": "Track decision"},
         requested_by="U1",
     )

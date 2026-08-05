@@ -232,9 +232,7 @@ class InMemoryThreadRecordStore:
         self._active.clear()
         return held
 
-    async def set_context_ref(
-        self, scope_key: str, context_ref: str | None
-    ) -> None:
+    async def set_context_ref(self, scope_key: str, context_ref: str | None) -> None:
         if context_ref is None:
             self._context_ref.pop(scope_key, None)
         else:
@@ -281,8 +279,7 @@ class PostgresThreadRecordStore(BorrowedPostgresStore):
             )
             # Migration for the Phase B warm-context handle.
             await conn.execute(
-                "ALTER TABLE surface_threads "
-                "ADD COLUMN IF NOT EXISTS context_ref TEXT"
+                "ALTER TABLE surface_threads ADD COLUMN IF NOT EXISTS context_ref TEXT"
             )
             await conn.execute(
                 """
@@ -355,8 +352,12 @@ class PostgresThreadRecordStore(BorrowedPostgresStore):
                     VALUES ($1, $2, $3, $4, $5, $6)
                     ON CONFLICT (scope_key) DO NOTHING
                     """,
-                    key, scope.surface, scope.workspace, scope.agent,
-                    scope.channel, scope.thread,
+                    key,
+                    scope.surface,
+                    scope.workspace,
+                    scope.agent,
+                    scope.channel,
+                    scope.thread,
                 )
                 # Idempotent on (scope, turn): the first delivered write wins, so a
                 # redelivery/reconcile of the same turn never double-appends.
@@ -367,7 +368,10 @@ class PostgresThreadRecordStore(BorrowedPostgresStore):
                     VALUES ($1, $2, $3, $4)
                     ON CONFLICT (scope_key, turn_id) DO NOTHING
                     """,
-                    key, fragment.turn_id, fragment.request, fragment.answer,
+                    key,
+                    fragment.turn_id,
+                    fragment.request,
+                    fragment.answer,
                 )
 
     async def replayable_transcript(
@@ -421,8 +425,12 @@ class PostgresThreadRecordStore(BorrowedPostgresStore):
                     VALUES ($1, $2, $3, $4, $5, $6)
                     ON CONFLICT (scope_key) DO NOTHING
                     """,
-                    key, scope.surface, scope.workspace, scope.agent,
-                    scope.channel, scope.thread,
+                    key,
+                    scope.surface,
+                    scope.workspace,
+                    scope.agent,
+                    scope.channel,
+                    scope.thread,
                 )
                 # Dedup on (scope, event_id) while the event is still pending.
                 row = await conn.fetchrow(
@@ -432,7 +440,9 @@ class PostgresThreadRecordStore(BorrowedPostgresStore):
                     ON CONFLICT (scope_key, event_id) DO NOTHING
                     RETURNING id
                     """,
-                    key, event_id, json.dumps(payload),
+                    key,
+                    event_id,
+                    json.dumps(payload),
                 )
         return row is not None
 
@@ -505,9 +515,7 @@ class PostgresThreadRecordStore(BorrowedPostgresStore):
         except (ValueError, IndexError):
             return 0
 
-    async def set_context_ref(
-        self, scope_key: str, context_ref: str | None
-    ) -> None:
+    async def set_context_ref(self, scope_key: str, context_ref: str | None) -> None:
         """Persist (or clear) the thread's warm-context handle.
 
         Keyed by the raw ``scope_key`` because the caller is the warm-workspace

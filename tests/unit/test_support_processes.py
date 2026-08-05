@@ -96,9 +96,7 @@ def test_cleanup_timeout_kills_then_drains_and_is_idempotent():
 
 
 def test_multi_process_cleanup_attempts_all_and_raises_exception_group():
-    first = _FakeProcess(
-        terminate_error=PermissionError("first cleanup failed")
-    )
+    first = _FakeProcess(terminate_error=PermissionError("first cleanup failed"))
     second = _FakeProcess(error=RuntimeError("second cleanup failed"))
 
     with pytest.raises(ExceptionGroup) as captured:

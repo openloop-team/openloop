@@ -112,10 +112,13 @@ class BrokerClientConfig:
                 "broker_control_socket_dir",
                 coprocess_settings.broker_control_socket_dir,
             )
-            ingress_root = _required_path(
-                "broker_runtime_root",
-                coprocess_settings.broker_runtime_root,
-            ) / ".workspace-ingress"
+            ingress_root = (
+                _required_path(
+                    "broker_runtime_root",
+                    coprocess_settings.broker_runtime_root,
+                )
+                / ".workspace-ingress"
+            )
             checkpoint_receipt_root = None
             shared_data_gid = coprocess_settings.broker_shared_data_gid
             if (
@@ -209,9 +212,7 @@ class BrokerServiceConfig:
             if value is None
         ]
         if missing:
-            raise ValueError(
-                f"external broker requires {', '.join(missing)} to be set"
-            )
+            raise ValueError(f"external broker requires {', '.join(missing)} to be set")
 
         return cls(
             mode="external",
@@ -225,9 +226,7 @@ class BrokerServiceConfig:
             checkpoint_receipt_root=checkpoint_receipt_root,
             shared_data_gid=settings.broker_shared_data_gid,
             expected_app_uid=settings.broker_expected_app_uid,
-            capability_roots=MappingProxyType(
-                dict(settings.broker_capability_roots)
-            ),
+            capability_roots=MappingProxyType(dict(settings.broker_capability_roots)),
             capability_current_version=settings.broker_capability_current_version,
             runtime_roots=MappingProxyType(dict(settings.broker_runtime_roots)),
             runtime_current_version=settings.broker_runtime_current_version,
@@ -241,9 +240,7 @@ class BrokerServiceConfig:
             identity_issuer=settings.broker_identity_issuer,
             identity_audience=settings.broker_identity_audience,
             execution_lease_seconds=settings.broker_execution_lease_seconds,
-            generation_deadline_seconds=(
-                settings.broker_generation_deadline_seconds
-            ),
+            generation_deadline_seconds=(settings.broker_generation_deadline_seconds),
         )
 
     @classmethod
@@ -271,9 +268,7 @@ class BrokerServiceConfig:
             checkpoint_receipt_root=None,
             shared_data_gid=settings.broker_shared_data_gid,
             expected_app_uid=None,
-            capability_roots=MappingProxyType(
-                dict(settings.broker_capability_roots)
-            ),
+            capability_roots=MappingProxyType(dict(settings.broker_capability_roots)),
             capability_current_version=settings.broker_capability_current_version,
             runtime_roots=MappingProxyType(dict(settings.broker_runtime_roots)),
             runtime_current_version=settings.broker_runtime_current_version,
@@ -283,9 +278,7 @@ class BrokerServiceConfig:
             identity_issuer=settings.broker_identity_issuer,
             identity_audience=settings.broker_identity_audience,
             execution_lease_seconds=settings.broker_execution_lease_seconds,
-            generation_deadline_seconds=(
-                settings.broker_generation_deadline_seconds
-            ),
+            generation_deadline_seconds=(settings.broker_generation_deadline_seconds),
         )
 
     @property

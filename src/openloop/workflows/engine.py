@@ -141,9 +141,7 @@ class WorkflowEngine:
         self._progress_callbacks: list[
             Callable[[WorkflowInstance], Awaitable[None]]
         ] = []
-        self._park_callbacks: list[
-            Callable[[WorkflowInstance], Awaitable[None]]
-        ] = []
+        self._park_callbacks: list[Callable[[WorkflowInstance], Awaitable[None]]] = []
         # Strong refs to in-flight progress notifications, keyed by instance so a
         # terminal transition can drain just that instance's stragglers (not other
         # workers') before delivering the final answer. Each self-removes on done.
@@ -244,7 +242,9 @@ class WorkflowEngine:
             return await self.store.get(instance_id)
         return await task
 
-    async def cancel(self, instance_id: str, reason: str = "") -> WorkflowInstance | None:
+    async def cancel(
+        self, instance_id: str, reason: str = ""
+    ) -> WorkflowInstance | None:
         """Cancel a parked/running instance (e.g. its approval was denied).
 
         Atomic across replicas: the winning cancel bumps ``drive_gen``, so a
@@ -379,7 +379,9 @@ class WorkflowEngine:
                 instance.status = "failed"
                 instance.error = str(exc)
                 await self._write_owned(instance, gen, release=True)
-                logger.exception("workflow %s failed at step %s", instance.id, step.name)
+                logger.exception(
+                    "workflow %s failed at step %s", instance.id, step.name
+                )
                 await self._notify_terminal(instance)
                 return instance
             instance.completed_steps.append(step.name)
@@ -407,9 +409,7 @@ class WorkflowEngine:
             instance.drive_gen = gen + 1
             instance.leased_until = None
 
-    async def _checkpoint_owned(
-        self, instance: WorkflowInstance, *, gen: int
-    ) -> None:
+    async def _checkpoint_owned(self, instance: WorkflowInstance, *, gen: int) -> None:
         """Mid-step checkpoint: fenced state write plus the progress signal."""
         await self._write_owned(instance, gen)
         if instance.status == "running":
@@ -527,9 +527,7 @@ class WorkflowEngine:
         try:
             await callback(instance)
         except Exception:
-            logger.exception(
-                "workflow progress callback failed for %s", instance.id
-            )
+            logger.exception("workflow progress callback failed for %s", instance.id)
 
 
 def _has_pending_non_resumable_step(

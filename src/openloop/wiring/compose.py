@@ -113,9 +113,7 @@ async def _settle_store(
         if mode == "postgres":
             log.exception("postgres %s setup failed", label)
             raise
-        log.exception(
-            "postgres %s setup failed — using process-local fallback", label
-        )
+        log.exception("postgres %s setup failed — using process-local fallback", label)
         return fallback()
 
     stack.push_async_callback(_close_safely, candidate)
@@ -152,9 +150,7 @@ async def compose(
                 "max_size": settings.postgres_pool_max_size,
             }
             if settings.postgres_password is not None:
-                pool_kwargs["password"] = (
-                    settings.postgres_password.get_secret_value()
-                )
+                pool_kwargs["password"] = settings.postgres_password.get_secret_value()
             try:
                 pool = await pool_factory(
                     settings.database_url,
@@ -243,7 +239,9 @@ async def compose(
         threads = await _settle_store(
             stack,
             _override_or(
-                selected, "threads", lambda: builders.build_thread_record_store(settings)
+                selected,
+                "threads",
+                lambda: builders.build_thread_record_store(settings),
             ),
             InMemoryThreadRecordStore,
             pool=pool,

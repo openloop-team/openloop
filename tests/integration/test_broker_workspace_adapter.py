@@ -360,9 +360,7 @@ class _LifecycleConversation:
         )
         usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5)
         metrics = SimpleNamespace(accumulated_cost=0.1, accumulated_token_usage=usage)
-        self.conversation_stats = SimpleNamespace(
-            get_combined_metrics=lambda: metrics
-        )
+        self.conversation_stats = SimpleNamespace(get_combined_metrics=lambda: metrics)
         self.prompt = None
 
     def send_message(self, prompt):

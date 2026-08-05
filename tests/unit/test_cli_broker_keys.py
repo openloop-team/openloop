@@ -30,7 +30,9 @@ def _b64(raw: bytes) -> str:
 
 
 def _public_of(seed: bytes) -> str:
-    return _b64(Ed25519PrivateKey.from_private_bytes(seed).public_key().public_bytes_raw())
+    return _b64(
+        Ed25519PrivateKey.from_private_bytes(seed).public_key().public_bytes_raw()
+    )
 
 
 def _expected_receipt_public(root: bytes, domain: str, version: str) -> str:
@@ -136,9 +138,7 @@ def test_refuses_when_the_receipt_roots_are_unset(app_material, capsys):
     assert captured.out == ""
 
 
-def test_refuses_malformed_app_side_material_without_a_traceback(
-    app_material, capsys
-):
+def test_refuses_malformed_app_side_material_without_a_traceback(app_material, capsys):
     app_material.setenv("BROKER_IDENTITY_PRIVATE_KEY", _b64(b"\x11" * 31))
 
     assert main(["broker", "keys"]) == 1

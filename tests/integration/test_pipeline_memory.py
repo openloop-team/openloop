@@ -31,8 +31,11 @@ async def test_recalled_memory_is_injected_into_context():
         engine=in_memory_workflow_engine(),
     )
     await runtime.handle(
-        Task(text="what did we pick for ingestion?", surface="slack",
-             channel="#dev-platform")
+        Task(
+            text="what did we pick for ingestion?",
+            surface="slack",
+            channel="#dev-platform",
+        )
     )
 
     system_text = " ".join(
@@ -53,8 +56,12 @@ async def test_handle_remembers_the_task():
     )
 
     await runtime.handle(
-        Task(text="capture this decision", surface="slack",
-             channel="#dev-platform", user="U1")
+        Task(
+            text="capture this decision",
+            surface="slack",
+            channel="#dev-platform",
+            user="U1",
+        )
     )
 
     scope = scope_key_for(agent, "#dev-platform")

@@ -80,7 +80,7 @@ def test_outcome_type_not_welded_to_profile():
 
 def _settings(**kwargs):
     return Settings(
-                coding_worker_enabled=True,
+        coding_worker_enabled=True,
         github_token="t",
         **kwargs,
     )
@@ -137,8 +137,11 @@ async def test_investigation_produces_evidence_and_no_pr(monkeypatch):
                 findings="- parse.py:2 returns None",
             ),
             ModelResponse(
-                text="", model=self.model, cost_usd=0.01,
-                prompt_tokens=42, completion_tokens=9,
+                text="",
+                model=self.model,
+                cost_usd=0.01,
+                prompt_tokens=42,
+                completion_tokens=9,
             ),
         )
 

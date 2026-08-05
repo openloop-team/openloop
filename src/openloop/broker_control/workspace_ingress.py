@@ -114,10 +114,7 @@ def _temporary_generation(name: str) -> int | None:
         not separator
         or not suffix
         or not suffix.isascii()
-        or any(
-            not (character.isalnum() or character == "_")
-            for character in suffix
-        )
+        or any(not (character.isalnum() or character == "_") for character in suffix)
     ):
         return None
     try:
@@ -139,10 +136,7 @@ def _temporary_stage_identity(name: str) -> tuple[UUID, int] | None:
         or not generation_separator
         or not suffix
         or not suffix.isascii()
-        or any(
-            not (character.isalnum() or character == "_")
-            for character in suffix
-        )
+        or any(not (character.isalnum() or character == "_") for character in suffix)
     ):
         return None
     try:
@@ -172,9 +166,7 @@ def _check_directory_descriptor(
     try:
         info = os.fstat(descriptor)
     except OSError as exc:
-        raise WorkspaceIngressProblem(
-            f"{label} directory cannot be inspected"
-        ) from exc
+        raise WorkspaceIngressProblem(f"{label} directory cannot be inspected") from exc
     if (
         not stat.S_ISDIR(info.st_mode)
         or info.st_uid != uid
@@ -200,9 +192,7 @@ def _open_validated_directory(
         else:
             descriptor = os.open(path, _DIR_OPEN_FLAGS, dir_fd=dir_fd)
     except OSError as exc:
-        raise WorkspaceIngressProblem(
-            f"{label} path is not a safe directory"
-        ) from exc
+        raise WorkspaceIngressProblem(f"{label} path is not a safe directory") from exc
     try:
         _check_directory_descriptor(
             descriptor, label=label, uid=uid, gid=gid, mode=mode
@@ -423,10 +413,14 @@ def _remove_tree_at(
         raise WorkspaceIngressProblem(
             "workspace ingress cleanup target cannot be inspected"
         ) from exc
-    if expected_identity is not None and (
-        before.st_dev,
-        before.st_ino,
-    ) != expected_identity:
+    if (
+        expected_identity is not None
+        and (
+            before.st_dev,
+            before.st_ino,
+        )
+        != expected_identity
+    ):
         os.close(descriptor)
         raise WorkspaceIngressProblem(
             "workspace ingress cleanup target changed before removal"
@@ -470,9 +464,9 @@ def _remove_tree_at(
         os.close(descriptor)
     try:
         current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        if (
-            not stat.S_ISDIR(current.st_mode)
-            or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)
+        if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (
+            before.st_dev,
+            before.st_ino,
         ):
             raise WorkspaceIngressProblem(
                 "workspace ingress cleanup target changed during removal"
@@ -526,10 +520,14 @@ def _remove_owned_tree_at(
         raise WorkspaceIngressProblem(
             "workspace ingress temp cleanup target cannot be inspected"
         ) from exc
-    if expected_identity is not None and (
-        before.st_dev,
-        before.st_ino,
-    ) != expected_identity:
+    if (
+        expected_identity is not None
+        and (
+            before.st_dev,
+            before.st_ino,
+        )
+        != expected_identity
+    ):
         os.close(descriptor)
         raise WorkspaceIngressProblem(
             "workspace ingress temp cleanup target changed before removal"
@@ -592,9 +590,7 @@ def _remove_owned_tree_at(
     except FileNotFoundError:
         if missing_ok:
             return False
-        raise WorkspaceIngressProblem(
-            "workspace ingress temp cleanup target vanished"
-        )
+        raise WorkspaceIngressProblem("workspace ingress temp cleanup target vanished")
     except OSError as exc:
         raise WorkspaceIngressProblem(
             "workspace ingress temp cleanup cannot remove a directory"
@@ -617,9 +613,9 @@ def _remove_empty_open_directory(
         ) from exc
     try:
         current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        if (
-            not stat.S_ISDIR(current.st_mode)
-            or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)
+        if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (
+            before.st_dev,
+            before.st_ino,
         ):
             raise WorkspaceIngressProblem(
                 "workspace ingress directory changed before removal"
@@ -836,8 +832,10 @@ def _copy_snapshot(
                     os.close(target_fd)
 
     try:
-        root_src_fd = os.dup(source) if isinstance(source, int) else os.open(
-            source, _DIR_OPEN_FLAGS
+        root_src_fd = (
+            os.dup(source)
+            if isinstance(source, int)
+            else os.open(source, _DIR_OPEN_FLAGS)
         )
     except OSError as exc:
         raise WorkspaceIngressProblem(
@@ -846,9 +844,7 @@ def _copy_snapshot(
     try:
         root_info = os.fstat(root_src_fd)
         if not stat.S_ISDIR(root_info.st_mode):
-            raise WorkspaceIngressProblem(
-                "workspace seed source must be a directory"
-            )
+            raise WorkspaceIngressProblem("workspace seed source must be a directory")
         validate_source(root_info, entry_type="directory")
         root_mode = _safe_mode(0, directory=True, shared=shared)
         destination.mkdir(mode=root_mode & 0o777)
@@ -1116,8 +1112,7 @@ class LocalWorkspaceIngress:
                 not isinstance(staged.sha256, str)
                 or len(staged.sha256) != 64
                 or any(
-                    character not in "0123456789abcdef"
-                    for character in staged.sha256
+                    character not in "0123456789abcdef" for character in staged.sha256
                 )
                 or isinstance(staged.file_count, bool)
                 or not isinstance(staged.file_count, int)

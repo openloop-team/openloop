@@ -240,9 +240,7 @@ async def test_setup_skips_exact_applied_migrations(monkeypatch):
         ),
     ],
 )
-async def test_setup_rejects_future_version_or_applied_drift(
-    monkeypatch, row, problem
-):
+async def test_setup_rejects_future_version_or_applied_drift(monkeypatch, row, problem):
     migration = Migration.from_bytes(1, "initial", b"SELECT 1;\n")
     if row["version"] == 1 and row["name"] == "renamed":
         row = {**row, "checksum": migration.checksum}

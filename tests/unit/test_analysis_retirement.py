@@ -37,7 +37,9 @@ RETIRED_GUIDANCE_MARKERS = (
 
 
 def test_analysis_product_modules_are_absent() -> None:
-    assert [str(path.relative_to(ROOT)) for path in RETIRED_PATHS if path.exists()] == []
+    assert [
+        str(path.relative_to(ROOT)) for path in RETIRED_PATHS if path.exists()
+    ] == []
     assert not list((ROOT / "src/openloop/analysis").glob("*.py"))
 
 
@@ -51,8 +53,7 @@ def test_analysis_settings_are_absent() -> None:
 
 def test_analysis_runtime_markers_are_absent_from_product_source() -> None:
     product = "\n".join(
-        path.read_text()
-        for path in sorted((ROOT / "src/openloop").rglob("*.py"))
+        path.read_text() for path in sorted((ROOT / "src/openloop").rglob("*.py"))
     )
     assert [marker for marker in RETIRED_RUNTIME_MARKERS if marker in product] == []
 
@@ -72,9 +73,7 @@ def test_active_operator_guidance_has_no_retired_paths() -> None:
 
 
 def test_destructive_sql_inlines_operator_safety_contract() -> None:
-    sql = (
-        ROOT / "ops/postgres/2026-07-22-retire-analysis-worker.sql"
-    ).read_text()
+    sql = (ROOT / "ops/postgres/2026-07-22-retire-analysis-worker.sql").read_text()
 
     assert "docs/operations/retire-analysis-worker.md" not in sql
     for requirement in (

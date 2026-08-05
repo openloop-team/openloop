@@ -165,11 +165,7 @@ class FakeDocker:
             else self.config.relay_image
         )
         image_index = argv.index(image)
-        memory = (
-            AGENT_MEMORY_BYTES
-            if role == "agent"
-            else 64 * 1024 * 1024
-        )
+        memory = AGENT_MEMORY_BYTES if role == "agent" else 64 * 1024 * 1024
         pids = AGENT_PIDS_LIMIT if role == "agent" else 64
         return {
             "Id": ("b" if role == "agent" else "c") * 64,
@@ -299,8 +295,7 @@ class FakeDocker:
             document = self.containers.get(name) if name is not None else None
             if (
                 document is not None
-                and document["Config"]["Labels"][LABEL_ROLE]
-                in self.fail_remove_roles
+                and document["Config"]["Labels"][LABEL_ROLE] in self.fail_remove_roles
             ):
                 return CommandExecution(1, stderr="injected remove failure")
             if name is not None:
@@ -401,11 +396,7 @@ def test_describe_endpoint_is_pure_and_uses_host_socket(short_root):
 
     assert driver.maximum_lifetime_seconds == 86_400
     assert endpoint.socket_path == (
-        driver.config.runtime_root
-        / str(JOB_ID)
-        / "1"
-        / "socket"
-        / "agent.sock"
+        driver.config.runtime_root / str(JOB_ID) / "1" / "socket" / "agent.sock"
     )
     assert docker.calls == []
     assert health.calls == []
@@ -454,8 +445,7 @@ async def test_quiesce_replaces_only_relay_and_replays_checkpoint_mode(short_roo
 
     first = await driver.quiesce(_spec())
     relay_creates = sum(
-        command.argv[1] == "create"
-        and _labels(command.argv)[LABEL_ROLE] == "relay"
+        command.argv[1] == "create" and _labels(command.argv)[LABEL_ROLE] == "relay"
         for command in docker.calls
     )
     second = await driver.quiesce(_spec())
@@ -467,11 +457,13 @@ async def test_quiesce_replaces_only_relay_and_replays_checkpoint_mode(short_roo
     assert docker.containers[names.agent]["State"]["Status"] == "running"
     assert docker.containers[names.relay]["State"]["Status"] == "running"
     assert relay_creates == 2
-    assert sum(
-        command.argv[1] == "create"
-        and _labels(command.argv)[LABEL_ROLE] == "relay"
-        for command in docker.calls
-    ) == relay_creates
+    assert (
+        sum(
+            command.argv[1] == "create" and _labels(command.argv)[LABEL_ROLE] == "relay"
+            for command in docker.calls
+        )
+        == relay_creates
+    )
     assert health.calls[-1].compiled_relay.endpoint.mode is RelayMode.CHECKPOINT
 
 
@@ -507,10 +499,9 @@ async def test_create_reply_loss_adopts_exact_resource_without_duplication(
         if command.argv[1] == "create"
     ]
     assert create_roles == ["agent", "relay"]
-    assert sum(
-        command.argv[1:3] == ("network", "create")
-        for command in docker.calls
-    ) == 1
+    assert (
+        sum(command.argv[1:3] == ("network", "create") for command in docker.calls) == 1
+    )
 
 
 async def test_inspect_returns_structured_state_without_docker_environment(short_root):
@@ -674,9 +665,7 @@ async def test_container_configuration_drift_is_never_adopted_or_deleted(
     agent = docker.containers[names.agent]
     if drift == "secret":
         agent["Config"]["Env"] = [
-            "OH_SECRET_KEY=" + "z" * 43
-            if value.startswith("OH_SECRET_KEY=")
-            else value
+            "OH_SECRET_KEY=" + "z" * 43 if value.startswith("OH_SECRET_KEY=") else value
             for value in agent["Config"]["Env"]
         ]
     elif drift == "tmpfs":
@@ -695,8 +684,7 @@ async def test_container_configuration_drift_is_never_adopted_or_deleted(
     mutations = [
         command
         for command in docker.calls[call_start:]
-        if command.argv[1] in ("stop", "rm")
-        or command.argv[1:3] == ("network", "rm")
+        if command.argv[1] in ("stop", "rm") or command.argv[1:3] == ("network", "rm")
     ]
     assert mutations == []
     assert names.agent in docker.containers
@@ -706,9 +694,7 @@ async def test_foreign_network_attachment_is_never_deleted(short_root):
     driver, docker, _ = _driver(short_root)
     await driver.ensure(_spec())
     names = derive_generation_names(_spec().identity)
-    docker.networks[names.network]["Containers"]["foreign-id"] = {
-        "Name": "foreign"
-    }
+    docker.networks[names.network]["Containers"]["foreign-id"] = {"Name": "foreign"}
 
     with pytest.raises(RuntimeIdentityConflict, match="foreign attachment"):
         await driver.ensure(_spec())

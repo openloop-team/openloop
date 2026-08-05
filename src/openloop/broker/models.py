@@ -97,9 +97,7 @@ def _contains_control(value: str) -> bool:
     return any(unicodedata.category(character) == "Cc" for character in value)
 
 
-def _validate_utf8(
-    name: str, value: object, *, minimum: int, maximum: int
-) -> str:
+def _validate_utf8(name: str, value: object, *, minimum: int, maximum: int) -> str:
     text = _require_string(name, value)
     length = len(text.encode("utf-8"))
     if not minimum <= length <= maximum:
@@ -151,7 +149,9 @@ def validate_sha256(name: str, value: object) -> str:
 def validate_base_commit(value: object) -> str:
     text = _require_string("base_commit", value)
     if _BASE_COMMIT.fullmatch(text) is None:
-        raise ValueError("base_commit must be 40 or 64 lowercase hexadecimal characters")
+        raise ValueError(
+            "base_commit must be 40 or 64 lowercase hexadecimal characters"
+        )
     return text
 
 
@@ -325,9 +325,7 @@ class JobRecord:
     created_at: datetime
     updated_at: datetime
     minimum_isolation: IsolationMode | None = None
-    authorization: JobAuthorizationMetadata | None = field(
-        default=None, repr=False
-    )
+    authorization: JobAuthorizationMetadata | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         validate_uuid("job_id", self.job_id)
@@ -641,9 +639,7 @@ class RecoverySnapshot:
     updated_at: datetime
     generation_record: RecoveryGenerationSnapshot | None
     minimum_isolation: IsolationMode | None = None
-    authorization: JobAuthorizationMetadata | None = field(
-        default=None, repr=False
-    )
+    authorization: JobAuthorizationMetadata | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)

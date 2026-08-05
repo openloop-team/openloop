@@ -138,9 +138,7 @@ class GitHubAppResolver:
     async def _mint(self) -> tuple[str, datetime]:
         import httpx
 
-        body = (
-            {"repositories": self.repositories} if self.repositories else None
-        )
+        body = {"repositories": self.repositories} if self.repositories else None
         try:
             async with httpx.AsyncClient(
                 timeout=30, transport=self._transport
@@ -163,9 +161,7 @@ class GitHubAppResolver:
             raise CredentialError(
                 f"minting GitHub App installation token failed: {exc}"
             ) from exc
-        expires_at = datetime.fromisoformat(
-            data["expires_at"].replace("Z", "+00:00")
-        )
+        expires_at = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00"))
         return data["token"], expires_at
 
     def _app_jwt(self) -> str:

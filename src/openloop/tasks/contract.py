@@ -11,7 +11,9 @@ class Gate(str, Enum):
     agent config may add gating, never remove it."""
 
     START = "start"
-    EFFECT = "effect"  # reserved for mid-task proposed effects (Gate F); unused in Stage 1
+    EFFECT = (
+        "effect"  # reserved for mid-task proposed effects (Gate F); unused in Stage 1
+    )
     NONE = "none"
 
 
@@ -128,12 +130,18 @@ _WT_FIELDS = frozenset(WorkspaceTask.__dataclass_fields__)
 
 WORKSPACE_TASK_PROFILES: dict[str, TaskProfile] = {
     "code:write": TaskProfile(
-        name="code", entry_action="code:write", args_model=object,
-        gate=Gate.START, capabilities=frozenset({"repo:write"}),
+        name="code",
+        entry_action="code:write",
+        args_model=object,
+        gate=Gate.START,
+        capabilities=frozenset({"repo:write"}),
     ),
     "investigate:read": TaskProfile(
-        name="investigate", entry_action="investigate:read", args_model=object,
-        gate=Gate.NONE, capabilities=frozenset({"repo:read"}),
+        name="investigate",
+        entry_action="investigate:read",
+        args_model=object,
+        gate=Gate.NONE,
+        capabilities=frozenset({"repo:read"}),
     ),
 }
 

@@ -24,8 +24,7 @@ BROKER_CONTROL = f"{BROKER_CONTAINER_ROOT}/control"
 BROKER_INGRESS = f"{BROKER_CONTAINER_ROOT}/ingress"
 BROKER_RECEIPTS = f"{BROKER_CONTAINER_ROOT}/receipts"
 COMPOSE_DATABASE_URL = (
-    "postgresql://${POSTGRES_USER:-openloop}"
-    "@postgres:5432/${POSTGRES_DB:-openloop}"
+    "postgresql://${POSTGRES_USER:-openloop}@postgres:5432/${POSTGRES_DB:-openloop}"
 )
 OPENLOOP_IMAGE = "${OPENLOOP_IMAGE:-openloop:local}"
 BUILD = {
@@ -248,9 +247,10 @@ def test_runtime_compositions_use_service_level_env_file():
     assert "PGPASSWORD" not in development["services"]["runtime"]["environment"]
     assert "PGPASSWORD" not in production["services"]["runtime"]["environment"]
     for document in (development, production):
-        assert document["services"]["postgres"]["environment"][
-            "POSTGRES_PASSWORD_FILE"
-        ] == "/run/secrets/postgres_password"
+        assert (
+            document["services"]["postgres"]["environment"]["POSTGRES_PASSWORD_FILE"]
+            == "/run/secrets/postgres_password"
+        )
 
 
 def test_production_deploy_creates_only_the_provided_secret_inventory():
@@ -277,9 +277,7 @@ def test_production_deploy_creates_only_the_provided_secret_inventory():
         "broker_receipt_roots": "BROKER_RECEIPT_ROOTS",
     }
     assert _secret_environments(document) == expected_environments
-    assert _secret_grants(postgres) == {
-        "postgres_password": "postgres_password"
-    }
+    assert _secret_grants(postgres) == {"postgres_password": "postgres_password"}
     assert postgres["environment"]["POSTGRES_PASSWORD_FILE"] == (
         "/run/secrets/postgres_password"
     )

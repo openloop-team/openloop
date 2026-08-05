@@ -112,11 +112,7 @@ class PostgresWorkflowStore(BorrowedPostgresStore):
         # drive_gen and leased_until are store-owned: the ordinary form leaves
         # both untouched (a payload write would roll back the ticker's renewed
         # lease); release bumps the gen and clears the lease.
-        ownership = (
-            "drive_gen = drive_gen + 1, leased_until = NULL,"
-            if release
-            else ""
-        )
+        ownership = "drive_gen = drive_gen + 1, leased_until = NULL," if release else ""
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
@@ -233,7 +229,9 @@ def _row_to_instance(row) -> WorkflowInstance:
         id=row["id"],
         workflow=row["workflow"],
         status=row["status"],
-        completed_steps=json.loads(row["completed_steps"]) if row["completed_steps"] else [],
+        completed_steps=json.loads(row["completed_steps"])
+        if row["completed_steps"]
+        else [],
         state=json.loads(row["state"]) if row["state"] else {},
         waiting_on=row["waiting_on"],
         result=json.loads(row["result"]) if row["result"] else None,

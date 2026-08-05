@@ -50,21 +50,35 @@ def test_scope_key_survives_a_rename():
 async def test_monthly_total_sums_current_month_only():
     store = InMemoryUsageStore()
     now = datetime.now(UTC)
-    last_month = (now.replace(day=1) - timedelta(days=2))
-    await store.record(UsageRecord(scope_key="s", workspace="w", agent="a",
-                                   model="m", cost_usd=3.0))
-    await store.record(UsageRecord(scope_key="s", workspace="w", agent="a",
-                                   model="m", cost_usd=1.5,
-                                   created_at=last_month))
+    last_month = now.replace(day=1) - timedelta(days=2)
+    await store.record(
+        UsageRecord(scope_key="s", workspace="w", agent="a", model="m", cost_usd=3.0)
+    )
+    await store.record(
+        UsageRecord(
+            scope_key="s",
+            workspace="w",
+            agent="a",
+            model="m",
+            cost_usd=1.5,
+            created_at=last_month,
+        )
+    )
     assert await store.monthly_total("s") == 3.0
 
 
 async def test_check_budget_blocks_when_monthly_exceeded():
     agent = _agent()
     store = InMemoryUsageStore()
-    await store.record(UsageRecord(scope_key=budget_scope_key(agent),
-                                   workspace="acme", agent="dev-platform",
-                                   model="m", cost_usd=50.0))
+    await store.record(
+        UsageRecord(
+            scope_key=budget_scope_key(agent),
+            workspace="acme",
+            agent="dev-platform",
+            model="m",
+            cost_usd=50.0,
+        )
+    )
     decision = await check_budget(agent, store)
     assert not decision.allowed
     assert "monthly budget reached" in decision.reason
@@ -79,8 +93,15 @@ async def test_handle_records_usage():
         usage=usage,
         engine=in_memory_workflow_engine(),
     )
-    await runtime.handle(Task(text="hi", surface="slack", channel="#dev-platform",
-                              user="U1", kind="summarize"))
+    await runtime.handle(
+        Task(
+            text="hi",
+            surface="slack",
+            channel="#dev-platform",
+            user="U1",
+            kind="summarize",
+        )
+    )
     assert len(usage.records) == 1
     rec = usage.records[0]
     assert rec.agent == "dev-platform"
@@ -92,9 +113,15 @@ async def test_handle_records_usage():
 async def test_budget_block_short_circuits_model_call():
     agent = _agent()
     usage = InMemoryUsageStore()
-    await usage.record(UsageRecord(scope_key=budget_scope_key(agent),
-                                   workspace="acme", agent="dev-platform",
-                                   model="m", cost_usd=50.0))
+    await usage.record(
+        UsageRecord(
+            scope_key=budget_scope_key(agent),
+            workspace="acme",
+            agent="dev-platform",
+            model="m",
+            cost_usd=50.0,
+        )
+    )
     gateway = FakeGateway(reply="should not run")
     runtime = Runtime(
         agent, gateway=gateway, usage=usage, engine=in_memory_workflow_engine()
@@ -116,6 +143,7 @@ async def test_per_task_overage_is_flagged():
 
     async def expensive(model, messages, **kwargs):
         from openloop.models.gateway import ModelResponse
+
         return ModelResponse(text="ok", model=model, cost_usd=0.75)
 
     gateway.complete = expensive  # type: ignore[assignment]

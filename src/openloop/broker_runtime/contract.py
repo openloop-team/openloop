@@ -250,9 +250,7 @@ class RuntimeDriver(Protocol):
         self, identity: GenerationRuntimeIdentity
     ) -> GenerationObservation: ...
 
-    async def quiesce(
-        self, spec: OpenHandsGenerationSpec
-    ) -> QuiescedGeneration: ...
+    async def quiesce(self, spec: OpenHandsGenerationSpec) -> QuiescedGeneration: ...
 
     async def release(
         self, identity: GenerationRuntimeIdentity

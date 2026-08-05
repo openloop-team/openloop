@@ -19,9 +19,7 @@ class MemoryRecord:
     kind: str = "message"
     metadata: dict[str, str] = field(default_factory=dict)
     embedding: list[float] | None = None
-    created_at: datetime = field(
-        default_factory=lambda: datetime.now(UTC)
-    )
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 def scope_key_for(agent: Agent, channel: str | None) -> str:

@@ -77,6 +77,7 @@ def create_app(
     slack_agent = next(
         (agent for agent in agents.values() if agent.has_slack_surface()), None
     )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         async with AsyncExitStack() as stack:
@@ -97,14 +98,10 @@ def create_app(
                 raise HTTPException(503, "Slack surface startup is incomplete")
             return await handler.handle(req)
 
-        log.info(
-            "Slack HTTP events configured for agent %r", slack_agent.metadata.name
-        )
+        log.info("Slack HTTP events configured for agent %r", slack_agent.metadata.name)
 
     @app.post("/tools/invoke")
-    async def invoke_tool(
-        body: InvokeBody, request: Request
-    ):  # type: ignore[no-untyped-def]
+    async def invoke_tool(body: InvokeBody, request: Request):  # type: ignore[no-untyped-def]
         """Run a tool action through the gateway (allowlist + approval gate)."""
         ctx = _context(request)
         inv = await ctx.tools.invoke(
@@ -131,9 +128,7 @@ def create_app(
         ]
 
     @app.post("/approvals/{request_id}/resolve")
-    async def resolve_approval(
-        request_id: str, body: ResolveBody, request: Request
-    ):  # type: ignore[no-untyped-def]
+    async def resolve_approval(request_id: str, body: ResolveBody, request: Request):  # type: ignore[no-untyped-def]
         inv = await _context(request).tools.resolve(
             request_id, body.approver, approve=body.approve
         )

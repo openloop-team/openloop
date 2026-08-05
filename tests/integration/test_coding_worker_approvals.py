@@ -112,7 +112,9 @@ async def test_approve_runs_worker_and_opens_draft_pr():
     gw = _gateway(runner, github)
 
     pending = await gw.invoke(
-        agent, "coding_worker.pr:write", {"repo": "acme/x", "instruction": "add retries"}
+        agent,
+        "coding_worker.pr:write",
+        {"repo": "acme/x", "instruction": "add retries"},
     )
     job_id = pending.approval.args["job_id"]
 
@@ -147,13 +149,20 @@ async def test_tool_loop_holds_coding_worker_for_approval():
     agent = _agent()
     github = FakeGitHub()
     gw = _gateway(github=github)
-    model = ScriptedGateway([
-        tool_call_response(
-            "m",
-            [("c1", "workspace_task_code_write",
-              {"repo": "acme/x", "instruction": "add retries"})],
-        ),
-    ])
+    model = ScriptedGateway(
+        [
+            tool_call_response(
+                "m",
+                [
+                    (
+                        "c1",
+                        "workspace_task_code_write",
+                        {"repo": "acme/x", "instruction": "add retries"},
+                    )
+                ],
+            ),
+        ]
+    )
     runtime = Runtime(
         agent, gateway=model, tools=gw, engine=in_memory_workflow_engine()
     )

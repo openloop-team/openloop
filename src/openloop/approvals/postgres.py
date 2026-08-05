@@ -43,23 +43,20 @@ class PostgresApprovalStore(BorrowedPostgresStore):
             # (same idiom as surface_threads' later columns). NULL doubles as
             # the pre-version sentinel version-checking consumers refuse.
             await conn.execute(
-                "ALTER TABLE approvals "
-                "ADD COLUMN IF NOT EXISTS args_schema INTEGER"
+                "ALTER TABLE approvals ADD COLUMN IF NOT EXISTS args_schema INTEGER"
             )
             # Decide-once columns (same idiom). NULL workflow_backed marks a
             # legacy row the resolver classifies by registry; NULL effect_at
             # keeps a decided row in the reconciler's sweep.
             await conn.execute(
-                "ALTER TABLE approvals "
-                "ADD COLUMN IF NOT EXISTS workflow_backed BOOLEAN"
+                "ALTER TABLE approvals ADD COLUMN IF NOT EXISTS workflow_backed BOOLEAN"
             )
             await conn.execute(
                 "ALTER TABLE approvals "
                 "ADD COLUMN IF NOT EXISTS workflow_instance_id TEXT"
             )
             await conn.execute(
-                "ALTER TABLE approvals "
-                "ADD COLUMN IF NOT EXISTS effect_at TIMESTAMPTZ"
+                "ALTER TABLE approvals ADD COLUMN IF NOT EXISTS effect_at TIMESTAMPTZ"
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS approvals_status_idx "

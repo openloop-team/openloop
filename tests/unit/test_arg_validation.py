@@ -45,9 +45,7 @@ _SCHEMA = {
 def test_validate_args_enforces_required_minlength_and_types():
     assert validate_args(_SCHEMA, {"name": "x"}) == []
     assert validate_args(_SCHEMA, {}) == ["missing required argument 'name'"]
-    assert validate_args(_SCHEMA, {"name": ""}) == [
-        "argument 'name' must not be empty"
-    ]
+    assert validate_args(_SCHEMA, {"name": ""}) == ["argument 'name' must not be empty"]
     assert validate_args(_SCHEMA, {"name": "x", "count": "5"}) == [
         "argument 'count' must be of type integer"
     ]

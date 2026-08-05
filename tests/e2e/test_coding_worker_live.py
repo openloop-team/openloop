@@ -107,8 +107,6 @@ async def test_coding_worker_live_draft_pr():
             )
         # Best-effort branch cleanup so runs don't accumulate refs.
         try:
-            await client._request(
-                "DELETE", f"/repos/{repo}/git/refs/heads/{branch}"
-            )
+            await client._request("DELETE", f"/repos/{repo}/git/refs/heads/{branch}")
         except Exception:
             pass

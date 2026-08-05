@@ -87,10 +87,7 @@ def _start_adapter(
         "--security-opt",
         "no-new-privileges",
         "--mount",
-        (
-            f"type=bind,src={CONFIG},"
-            "dst=/usr/local/etc/haproxy/haproxy.cfg,readonly"
-        ),
+        (f"type=bind,src={CONFIG},dst=/usr/local/etc/haproxy/haproxy.cfg,readonly"),
         "--mount",
         f"type=volume,src={volume},dst={DATA_PATH}",
         "--tmpfs",
@@ -149,9 +146,7 @@ def _assert_adapter_hardening(document: dict) -> None:
     assert host["SecurityOpt"] == ["no-new-privileges"]
     assert host["PortBindings"] == {}
     assert document["NetworkSettings"]["Ports"] == {}
-    assert host["Tmpfs"] == {
-        HEALTH_PATH: "rw,nosuid,nodev,noexec,size=64k,mode=0700"
-    }
+    assert host["Tmpfs"] == {HEALTH_PATH: "rw,nosuid,nodev,noexec,size=64k,mode=0700"}
     environment = config.get("Env") or []
     assert not any(
         value.startswith(
@@ -188,10 +183,7 @@ def test_haproxy_adapter_permissions_health_and_read_only_connectivity() -> None
         "--security-opt",
         "no-new-privileges",
         "--mount",
-        (
-            f"type=bind,src={CONFIG},"
-            "dst=/usr/local/etc/haproxy/haproxy.cfg,readonly"
-        ),
+        (f"type=bind,src={CONFIG},dst=/usr/local/etc/haproxy/haproxy.cfg,readonly"),
         "--entrypoint",
         "haproxy",
         DEFAULT_HAPROXY_RELAY_IMAGE,
@@ -220,15 +212,11 @@ def test_haproxy_adapter_permissions_health_and_read_only_connectivity() -> None
 
         document = _inspect(adapter)
         _assert_adapter_hardening(document)
-        mounts = {
-            mount["Destination"]: mount for mount in document["Mounts"]
-        }
+        mounts = {mount["Destination"]: mount for mount in document["Mounts"]}
         assert mounts[DATA_PATH]["Type"] == "volume"
         assert mounts[DATA_PATH]["RW"] is True
         assert mounts[RAW_SOCKET]["Type"] == "bind"
-        assert mounts[
-            "/usr/local/etc/haproxy/haproxy.cfg"
-        ]["RW"] is False
+        assert mounts["/usr/local/etc/haproxy/haproxy.cfg"]["RW"] is False
 
         probe = _success(
             "run",

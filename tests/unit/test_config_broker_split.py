@@ -195,12 +195,8 @@ def test_broker_public_keys_round_trip_through_env_json(monkeypatch):
 
     settings = BrokerSettings(_env_file=None)
 
-    assert settings.broker_identity_public_keys == {
-        "identity-v1": "cHVibGljLWtleQ=="
-    }
-    assert settings.broker_receipt_public_keys == {
-        "receipt-key-v1": "cmVjZWlwdC1rZXk="
-    }
+    assert settings.broker_identity_public_keys == {"identity-v1": "cHVibGljLWtleQ=="}
+    assert settings.broker_receipt_public_keys == {"receipt-key-v1": "cmVjZWlwdC1rZXk="}
 
 
 def test_uid_settings_are_owned_by_the_process_that_uses_them(monkeypatch):

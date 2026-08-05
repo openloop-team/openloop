@@ -58,7 +58,9 @@ def _approver_handle(user: dict) -> str:
     return f"@{name}" if name else "unknown"
 
 
-def _target_from_event(runtime: Runtime, event: dict, thread_ts: str | None) -> SurfaceTarget:
+def _target_from_event(
+    runtime: Runtime, event: dict, thread_ts: str | None
+) -> SurfaceTarget:
     agent = runtime.agent
     return SurfaceTarget(
         surface="slack",
@@ -129,7 +131,9 @@ async def handle_message(
         return  # the bot isn't part of this thread — stay silent
 
     task = Task(
-        text=text, surface="slack", channel=event.get("channel"),
+        text=text,
+        surface="slack",
+        channel=event.get("channel"),
         user=event.get("user"),
     )
     await runner.run_threaded(task, target)

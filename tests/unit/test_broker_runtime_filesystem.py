@@ -69,12 +69,8 @@ def _policy(tmp_path: Path, *, shared_gid: int | None = None):
 
 def test_prepare_installs_exact_artifacts_and_replays(short_root):
     policy = _policy(short_root)
-    prepare_generation_filesystem(
-        policy.paths, policy.compiled_relay, uid=os.getuid()
-    )
-    prepare_generation_filesystem(
-        policy.paths, policy.compiled_relay, uid=os.getuid()
-    )
+    prepare_generation_filesystem(policy.paths, policy.compiled_relay, uid=os.getuid())
+    prepare_generation_filesystem(policy.paths, policy.compiled_relay, uid=os.getuid())
 
     assert frozenset(path.name for path in policy.paths.root.iterdir()) == {
         "relay",
@@ -89,16 +85,15 @@ def test_prepare_installs_exact_artifacts_and_replays(short_root):
     )
     for path in policy.paths.artifacts.iterdir():
         assert stat.S_IMODE(path.stat().st_mode) == 0o400
-    assert generation_filesystem_observation(
-        policy.paths, uid=os.getuid()
-    ) == (True, True)
+    assert generation_filesystem_observation(policy.paths, uid=os.getuid()) == (
+        True,
+        True,
+    )
 
 
 def test_harden_relay_socket_validates_identity_and_sets_owner_only_mode(short_root):
     policy = _policy(short_root)
-    prepare_generation_filesystem(
-        policy.paths, policy.compiled_relay, uid=os.getuid()
-    )
+    prepare_generation_filesystem(policy.paths, policy.compiled_relay, uid=os.getuid())
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         listener.bind(os.fspath(policy.paths.host_socket))
@@ -143,9 +138,7 @@ def test_prepare_shared_relay_chain_keeps_private_leaves_owner_only(short_root):
 
 
 @pytest.mark.parametrize("component", ["runtime", "job", "generation", "socket"])
-def test_prepare_shared_relay_chain_rejects_owner_only_component(
-    short_root, component
-):
+def test_prepare_shared_relay_chain_rejects_owner_only_component(short_root, component):
     policy = _policy(short_root, shared_gid=os.getgid())
     prepare_generation_filesystem(
         policy.paths,
@@ -225,9 +218,7 @@ def test_checkpoint_transition_replaces_only_config_and_replays(short_root):
     prepare_generation_filesystem(
         running.paths, running.compiled_relay, uid=os.getuid()
     )
-    capability_before = (
-        running.paths.artifacts / "relay-capability"
-    ).read_bytes()
+    capability_before = (running.paths.artifacts / "relay-capability").read_bytes()
 
     install_checkpoint_relay_config(
         running.paths,
@@ -242,21 +233,24 @@ def test_checkpoint_transition_replaces_only_config_and_replays(short_root):
         uid=os.getuid(),
     )
 
-    assert relay_artifact_mode(
-        running.paths,
-        running.compiled_relay,
-        checkpoint.compiled_relay,
-        uid=os.getuid(),
-    ) is RelayMode.CHECKPOINT
+    assert (
+        relay_artifact_mode(
+            running.paths,
+            running.compiled_relay,
+            checkpoint.compiled_relay,
+            uid=os.getuid(),
+        )
+        is RelayMode.CHECKPOINT
+    )
     assert (running.paths.artifacts / "haproxy.cfg").read_bytes() == (
         checkpoint.compiled_relay.haproxy_config
     )
     assert (
         running.paths.artifacts / "relay-capability"
     ).read_bytes() == capability_before
-    assert stat.S_IMODE(
-        (running.paths.artifacts / "haproxy.cfg").stat().st_mode
-    ) == 0o400
+    assert (
+        stat.S_IMODE((running.paths.artifacts / "haproxy.cfg").stat().st_mode) == 0o400
+    )
 
 
 def test_checkpoint_transition_recovers_owned_partial_temp_file(short_root):
@@ -279,12 +273,15 @@ def test_checkpoint_transition_recovers_owned_partial_temp_file(short_root):
     )
 
     assert not temporary.exists()
-    assert relay_artifact_mode(
-        running.paths,
-        running.compiled_relay,
-        checkpoint.compiled_relay,
-        uid=os.getuid(),
-    ) is RelayMode.CHECKPOINT
+    assert (
+        relay_artifact_mode(
+            running.paths,
+            running.compiled_relay,
+            checkpoint.compiled_relay,
+            uid=os.getuid(),
+        )
+        is RelayMode.CHECKPOINT
+    )
 
 
 def test_checkpoint_transition_rejects_unsafe_temp_artifact(short_root):
@@ -341,9 +338,7 @@ def test_prepare_rejects_symlinked_generation_component(short_root):
 
 def test_prepare_rejects_existing_artifact_content_or_extra_entry(short_root):
     policy = _policy(short_root)
-    prepare_generation_filesystem(
-        policy.paths, policy.compiled_relay, uid=os.getuid()
-    )
+    prepare_generation_filesystem(policy.paths, policy.compiled_relay, uid=os.getuid())
     capability = policy.paths.artifacts / "relay-capability"
     capability.chmod(0o600)
     capability.write_text("z" * 43 + "\n")
@@ -357,9 +352,7 @@ def test_prepare_rejects_existing_artifact_content_or_extra_entry(short_root):
 
 def test_release_removes_generation_but_preserves_durable_state(short_root):
     policy = _policy(short_root)
-    prepare_generation_filesystem(
-        policy.paths, policy.compiled_relay, uid=os.getuid()
-    )
+    prepare_generation_filesystem(policy.paths, policy.compiled_relay, uid=os.getuid())
     (policy.paths.workspace / "generated.txt").write_text("data")
     (policy.paths.state / "conversation.json").write_text("durable")
 
@@ -372,9 +365,7 @@ def test_release_removes_generation_but_preserves_durable_state(short_root):
 
 def test_release_refuses_unknown_generation_entry(short_root):
     policy = _policy(short_root)
-    prepare_generation_filesystem(
-        policy.paths, policy.compiled_relay, uid=os.getuid()
-    )
+    prepare_generation_filesystem(policy.paths, policy.compiled_relay, uid=os.getuid())
     (policy.paths.root / "foreign").write_text("do not delete")
 
     with pytest.raises(RuntimeIdentityConflict, match="unknown root entry"):

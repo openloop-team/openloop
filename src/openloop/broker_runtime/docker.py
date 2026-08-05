@@ -108,8 +108,7 @@ class ExpirySweepObservation:
     def __post_init__(self) -> None:
         for collection in (self.released, self.failed):
             if not isinstance(collection, tuple) or any(
-                not isinstance(value, GenerationRuntimeIdentity)
-                for value in collection
+                not isinstance(value, GenerationRuntimeIdentity) for value in collection
             ):
                 raise TypeError(
                     "sweep identities must be tuples of generation identities"
@@ -385,9 +384,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
             mode=policy.compiled_relay.endpoint.mode,
         )
 
-    def describe_endpoint(
-        self, spec: OpenHandsGenerationSpec
-    ) -> RelayClientEndpoint:
+    def describe_endpoint(self, spec: OpenHandsGenerationSpec) -> RelayClientEndpoint:
         if not isinstance(spec, OpenHandsGenerationSpec):
             raise TypeError("spec must be an OpenHandsGenerationSpec")
         try:
@@ -409,9 +406,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
         return value.astimezone(UTC)
 
     @asynccontextmanager
-    async def _locked(
-        self, identity: GenerationRuntimeIdentity
-    ) -> AsyncIterator[None]:
+    async def _locked(self, identity: GenerationRuntimeIdentity) -> AsyncIterator[None]:
         key = f"{identity.job_id}:{identity.generation}"
         entry = self._resource_locks.setdefault(key, _LockEntry(asyncio.Lock()))
         entry.users += 1
@@ -660,10 +655,11 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
         if host.get("CapAdd") not in (None, []):
             raise RuntimeIdentityConflict(f"{role} capability policy does not match")
         security = host.get("SecurityOpt")
-        normalized_security = {
-            str(value).removesuffix(":true")
-            for value in security
-        } if isinstance(security, list) else set()
+        normalized_security = (
+            {str(value).removesuffix(":true") for value in security}
+            if isinstance(security, list)
+            else set()
+        )
         if normalized_security != {"no-new-privileges"}:
             raise RuntimeIdentityConflict(f"{role} security policy does not match")
         restart = host.get("RestartPolicy")
@@ -792,9 +788,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
         except RuntimeDriverError:
             raise
         except Exception as exc:
-            raise RuntimeUnavailable(
-                "generation filesystem inspection failed"
-            ) from exc
+            raise RuntimeUnavailable("generation filesystem inspection failed") from exc
         expired = self._now() >= identity.deadline
         structurally_healthy = (
             agent.state is RuntimeResourceState.RUNNING
@@ -975,9 +969,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
                     raise RuntimeHealthFailure(
                         "generation health checker failed"
                     ) from exc
-                observation = await self._observation(
-                    identity, spec=spec, healthy=True
-                )
+                observation = await self._observation(identity, spec=spec, healthy=True)
                 if not observation.complete:
                     raise RuntimeHealthFailure(
                         "generation was incomplete after its health gate"
@@ -999,9 +991,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
                             )
                 raise
 
-    async def quiesce(
-        self, spec: OpenHandsGenerationSpec
-    ) -> QuiescedGeneration:
+    async def quiesce(self, spec: OpenHandsGenerationSpec) -> QuiescedGeneration:
         if not isinstance(spec, OpenHandsGenerationSpec):
             raise TypeError("spec must be an OpenHandsGenerationSpec")
         identity = spec.identity
@@ -1051,9 +1041,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
                 raise RuntimeHealthFailure(
                     "checkpoint relay health checker failed"
                 ) from exc
-            observation = await self._observation(
-                identity, spec=spec, healthy=True
-            )
+            observation = await self._observation(identity, spec=spec, healthy=True)
             if not observation.complete:
                 raise RuntimeHealthFailure(
                     "generation was incomplete after checkpoint transition"
@@ -1095,9 +1083,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
                     f"Docker {role} stop failed: {_safe_output(execution, ())}"
                 )
         execution = await self._invoke(
-            DockerCommand(
-                (self.config.docker, "rm", object_id), timeout_seconds=60.0
-            )
+            DockerCommand((self.config.docker, "rm", object_id), timeout_seconds=60.0)
         )
         if execution.returncode != 0 and not _is_not_found(execution):
             raise RuntimeUnavailable(
@@ -1135,23 +1121,17 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
         except RuntimeDriverError:
             raise
         except Exception as exc:
-            raise RuntimeUnavailable(
-                "generation filesystem release failed"
-            ) from exc
+            raise RuntimeUnavailable("generation filesystem release failed") from exc
         if self._workspace_materializer is not None:
             try:
-                await asyncio.to_thread(
-                    self._workspace_materializer.discard, identity
-                )
+                await asyncio.to_thread(self._workspace_materializer.discard, identity)
             except Exception as exc:
                 raise RuntimeUnavailable(
                     "generation workspace seed cleanup failed"
                 ) from exc
         return ReleaseObservation(identity=identity, released=True)
 
-    async def release(
-        self, identity: GenerationRuntimeIdentity
-    ) -> ReleaseObservation:
+    async def release(self, identity: GenerationRuntimeIdentity) -> ReleaseObservation:
         if not isinstance(identity, GenerationRuntimeIdentity):
             raise TypeError("identity must be a GenerationRuntimeIdentity")
         async with self._locked(identity):

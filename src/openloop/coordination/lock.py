@@ -128,8 +128,9 @@ async def guard(
             try:
                 await lock.release(key, token)
             except Exception:  # noqa: BLE001 — TTL is the backstop; never raise here
-                logger.warning("failed to release lock %r; it will expire", key,
-                               exc_info=True)
+                logger.warning(
+                    "failed to release lock %r; it will expire", key, exc_info=True
+                )
 
 
 class InProcessLock:
@@ -221,7 +222,9 @@ class RedisLock:
 
     async def close(self) -> None:
         # redis-py 5 uses aclose(); older builds use close(). Tolerate both/none.
-        closer = getattr(self.client, "aclose", None) or getattr(self.client, "close", None)
+        closer = getattr(self.client, "aclose", None) or getattr(
+            self.client, "close", None
+        )
         if closer is not None:
             await closer()
 
@@ -283,7 +286,9 @@ class PostgresLock:
         pool = self._require_pool()
         conn = await pool.acquire()
         try:
-            got = await conn.fetchval("SELECT pg_try_advisory_lock($1)", self._lock_id(key))
+            got = await conn.fetchval(
+                "SELECT pg_try_advisory_lock($1)", self._lock_id(key)
+            )
         except BaseException:
             await pool.release(conn)
             raise

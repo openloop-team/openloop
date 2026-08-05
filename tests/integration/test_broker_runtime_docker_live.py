@@ -101,9 +101,7 @@ async def test_real_generation_is_private_healthy_and_self_expiring():
         reconciliation_grace_seconds=1,
     )
     driver = DockerOpenHandsRuntimeDriver(config)
-    deadline = datetime.now(UTC).replace(microsecond=0) + timedelta(
-        seconds=45
-    )
+    deadline = datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=45)
     spec = OpenHandsGenerationSpec(
         operation_id=uuid4(),
         job_id=uuid4(),
@@ -133,10 +131,15 @@ async def test_real_generation_is_private_healthy_and_self_expiring():
                 bindings in (None, []) for bindings in ports.values()
             )
 
-        stop = time.monotonic() + max(
-            0.0,
-            (deadline - datetime.now(UTC)).total_seconds(),
-        ) + config.kill_after_seconds + 15
+        stop = (
+            time.monotonic()
+            + max(
+                0.0,
+                (deadline - datetime.now(UTC)).total_seconds(),
+            )
+            + config.kill_after_seconds
+            + 15
+        )
         statuses = ("running", "running")
         while time.monotonic() < stop:
             observed_statuses = []

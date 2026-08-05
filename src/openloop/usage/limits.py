@@ -34,10 +34,7 @@ class LimitDecision:
 
 def limit_scope_key(agent: Agent, tenant: str = "default") -> str:
     """Throughput limits are per (tenant, agent) — tenant-shaped from day one."""
-    return (
-        f"tenant:{tenant}:ws:{agent.metadata.workspace}"
-        f":agent:{agent.metadata.name}"
-    )
+    return f"tenant:{tenant}:ws:{agent.metadata.workspace}:agent:{agent.metadata.name}"
 
 
 @runtime_checkable
@@ -92,10 +89,7 @@ class InMemoryTaskLimiter:
         ):
             return LimitDecision(
                 allowed=False,
-                reason=(
-                    f"task rate limit reached "
-                    f"({limits.tasks_per_minute}/minute)"
-                ),
+                reason=(f"task rate limit reached ({limits.tasks_per_minute}/minute)"),
             )
 
         window.append(now)

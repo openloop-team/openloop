@@ -74,11 +74,14 @@ def test_insert_preserves_comments_and_formatting(tmp_path):
     stamped = file.read_text()
     # Everything except the freshly minted id line is byte-identical — no
     # safe_dump round-trip stripping comments or reflowing formatting.
-    assert "".join(
-        line
-        for line in stamped.splitlines(keepends=True)
-        if not line.startswith("  id: ")
-    ) == without_id
+    assert (
+        "".join(
+            line
+            for line in stamped.splitlines(keepends=True)
+            if not line.startswith("  id: ")
+        )
+        == without_id
+    )
     assert ID_RE.match(_stamped_id(file))
 
 
@@ -241,9 +244,7 @@ def test_apply_keeps_the_generic_message_for_other_errors(tmp_path, capsys):
 def test_unit_agent_fixture_already_has_identity(capsys):
     # The committed unit fixture is stamped, so a re-run is the idempotent
     # keep path.
-    rc = main([
-        "agents", "id", "issue", "-f", str(UNIT_DATA / "agent.yaml"), "--yes"
-    ])
+    rc = main(["agents", "id", "issue", "-f", str(UNIT_DATA / "agent.yaml"), "--yes"])
 
     assert rc == 0
     assert "already has identity" in capsys.readouterr().out

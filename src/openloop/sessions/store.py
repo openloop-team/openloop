@@ -125,9 +125,7 @@ class SurfaceSessionStore(Protocol):
 
     async def get_by_approval(self, approval_id: str) -> SurfaceSession | None: ...
 
-    async def get_by_thread(
-        self, target: SurfaceTarget
-    ) -> SurfaceSession | None: ...
+    async def get_by_thread(self, target: SurfaceTarget) -> SurfaceSession | None: ...
 
     async def thread_history(
         self,
@@ -222,7 +220,5 @@ class InMemorySurfaceSessionStore:
         self._by_id[session.id] = session
 
     async def recent(self, limit: int = 100) -> list[SurfaceSession]:
-        ordered = sorted(
-            self._by_id.values(), key=lambda s: s.updated_at, reverse=True
-        )
+        ordered = sorted(self._by_id.values(), key=lambda s: s.updated_at, reverse=True)
         return ordered[:limit]

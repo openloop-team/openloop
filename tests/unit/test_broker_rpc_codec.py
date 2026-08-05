@@ -182,9 +182,7 @@ def test_checkpoint_release_and_finalize_frames_round_trip_exactly():
                 WorkloadIntent.QUIESCE_SEGMENT,
                 token,
                 capability,
-                QuiesceSegmentPayload(
-                    job_id, 1, "rpc-quiesce-key-01", "barrier-01"
-                ),
+                QuiesceSegmentPayload(job_id, 1, "rpc-quiesce-key-01", "barrier-01"),
             ),
             RpcResponse(
                 RPC_VERSION,

@@ -15,7 +15,10 @@ from openloop.tools.coding_worker import WorkerRunAborted, WorkerState
 
 def _state(instruction="add retries to the fetcher"):
     return WorkerState(
-        job_id="j1", repo="acme/x", instruction=instruction, base="main",
+        job_id="j1",
+        repo="acme/x",
+        instruction=instruction,
+        base="main",
         branch="openloop/job-j1",
     )
 
@@ -192,9 +195,7 @@ def test_defaults_are_the_safe_ones():
     assert worker.permission_mode == "acceptEdits"
 
 
-async def test_mounted_auth_is_exposed_only_to_the_claude_child(
-    monkeypatch, tmp_path
-):
+async def test_mounted_auth_is_exposed_only_to_the_claude_child(monkeypatch, tmp_path):
     captured = {}
 
     class Process:

@@ -102,15 +102,18 @@ async def test_runtime_loop_calls_mcp_tool():
     conn = await _connector()
     gw = ToolGateway(tools=[conn])
     agent = _mcp_agent(["get_run_logs", "list_runs"])
-    gateway = ScriptedGateway([
-        tool_call_response("m", [("c1", "ci-logs_get_run_logs", {"run_id": "7"})]),
-        ModelResponse(text="The build failed on step 3.", model="m"),
-    ])
+    gateway = ScriptedGateway(
+        [
+            tool_call_response("m", [("c1", "ci-logs_get_run_logs", {"run_id": "7"})]),
+            ModelResponse(text="The build failed on step 3.", model="m"),
+        ]
+    )
     runtime = Runtime(
         agent, gateway=gateway, tools=gw, engine=in_memory_workflow_engine()
     )
-    result = await runtime.handle(Task(text="why did CI fail?", surface="slack",
-                                       channel="#ci"))
+    result = await runtime.handle(
+        Task(text="why did CI fail?", surface="slack", channel="#ci")
+    )
     assert result.text == "The build failed on step 3."
     assert conn.client.calls == [("get_run_logs", {"run_id": "7"})]
 

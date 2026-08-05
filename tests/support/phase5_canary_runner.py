@@ -183,9 +183,7 @@ def _broker_environment(settings: BrokerSettings) -> dict[str, str]:
             "BROKER_STATE_ROOT": settings.broker_state_root,
             "BROKER_RUNTIME_ROOT": settings.broker_runtime_root,
             "BROKER_INGRESS_ROOT": settings.broker_ingress_root,
-            "BROKER_CHECKPOINT_RECEIPT_ROOT": (
-                settings.broker_checkpoint_receipt_root
-            ),
+            "BROKER_CHECKPOINT_RECEIPT_ROOT": (settings.broker_checkpoint_receipt_root),
             "BROKER_SHARED_DATA_GID": str(settings.broker_shared_data_gid),
             "BROKER_EXPECTED_APP_UID": str(settings.broker_expected_app_uid),
             "BROKER_CAPABILITY_ROOTS": json.dumps(

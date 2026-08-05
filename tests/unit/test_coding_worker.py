@@ -39,7 +39,10 @@ def _connector(runner=None, github=None):
 
 def _state(job_id="j1"):
     return WorkerState(
-        job_id=job_id, repo="a/b", instruction="x", base="main",
+        job_id=job_id,
+        repo="a/b",
+        instruction="x",
+        base="main",
         branch=f"openloop/job-{job_id}",
     )
 
@@ -94,11 +97,7 @@ def test_worker_state_roundtrips_agent_and_tolerates_old_checkpoints():
     assert restored.agent == "docs-bot"
     assert restored.agent_id == "b1f2a7c92f3d4f45a51f2f8f31c9dd42"
     # A pre-Phase 5 checkpoint has no agent keys: attribution falls back.
-    old = {
-        k: v
-        for k, v in state.to_dict().items()
-        if k not in {"agent", "agent_id"}
-    }
+    old = {k: v for k, v in state.to_dict().items() if k not in {"agent", "agent_id"}}
     assert WorkerState.from_dict(old).agent is None
     assert WorkerState.from_dict(old).agent_id is None
 
@@ -250,12 +249,8 @@ async def test_attempt_provisions_edits_commits_and_pushes(monkeypatch):
     assert outcome.title == "t"
     assert state.completed_steps == list(STEPS)
 
-    clone_cmd, clone_redact = next(
-        (cmd, r) for cmd, r in commands if "clone" in cmd
-    )
-    push_cmd, push_redact = next(
-        (cmd, r) for cmd, r in commands if "push" in cmd
-    )
+    clone_cmd, clone_redact = next((cmd, r) for cmd, r in commands if "clone" in cmd)
+    push_cmd, push_redact = next((cmd, r) for cmd, r in commands if "push" in cmd)
     # No token-in-URL anywhere: the raw token appears in no command argument
     # except inside the one-shot auth header.
     for cmd, _ in commands:
@@ -415,8 +410,7 @@ async def test_git_worker_applies_diff_through_sandbox():
         async def complete(self, model, messages, **kwargs):
             class R:
                 text = (
-                    "TITLE: t\nBODY: b\nDIFF:\n"
-                    "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+                    "TITLE: t\nBODY: b\nDIFF:\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
                 )
                 cost_usd = 0.3
                 prompt_tokens = 10

@@ -42,9 +42,10 @@ class JobCapability:
     value: str = field(repr=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.value, str) or _CAPABILITY_TEXT.fullmatch(
-            self.value
-        ) is None:
+        if (
+            not isinstance(self.value, str)
+            or _CAPABILITY_TEXT.fullmatch(self.value) is None
+        ):
             raise ValueError("job capability encoding is invalid")
         try:
             decoded = base64.urlsafe_b64decode(self.value + "=")
@@ -71,9 +72,7 @@ def _encode_root(data: bytes) -> bytes:
 
 
 class CapabilityRootRing:
-    def __init__(
-        self, roots: Mapping[str, bytes], *, current_version: str
-    ) -> None:
+    def __init__(self, roots: Mapping[str, bytes], *, current_version: str) -> None:
         try:
             validate_identifier("current_version", current_version)
         except (TypeError, ValueError) as error:
@@ -137,9 +136,7 @@ def _length_prefixed(value: bytes) -> bytes:
     return struct.pack(">H", len(value)) + value
 
 
-def _context(
-    owner: BrokerOwner, job_id: UUID, key_version: str, epoch: int
-) -> bytes:
+def _context(owner: BrokerOwner, job_id: UUID, key_version: str, epoch: int) -> bytes:
     if not isinstance(owner, BrokerOwner):
         raise TypeError("owner must be a BrokerOwner")
     validate_uuid("job_id", job_id)
@@ -226,7 +223,4 @@ class JobCapabilityAuthority:
             raise TypeError("capability must be JobCapability")
         root = self._roots._root(metadata.key_version)
         candidate = _mac(_subkey(root, _VERIFY_INFO), capability._bytes()).hex()
-        return stdlib_hmac.compare_digest(
-            candidate, metadata.capability_digest
-        )
-
+        return stdlib_hmac.compare_digest(candidate, metadata.capability_digest)

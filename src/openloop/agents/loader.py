@@ -23,8 +23,7 @@ def load_agent(path: str | Path) -> Agent:
     api_version = raw.get("apiVersion")
     if api_version != API_VERSION:
         raise AgentConfigError(
-            f"{path}: unsupported apiVersion {api_version!r} "
-            f"(expected {API_VERSION!r})"
+            f"{path}: unsupported apiVersion {api_version!r} (expected {API_VERSION!r})"
         )
 
     try:

@@ -32,11 +32,14 @@ async def test_model_calls_read_tool_then_answers():
     agent = _agent()
     github = FakeGitHub()
     tools = ToolGateway(tools=[GitHubConnector(github)])
-    gateway = ScriptedGateway([
-        tool_call_response("m", [("c1", "github_issues_read",
-                                  {"repo": "acme/x", "number": 7})]),
-        ModelResponse(text="Issue #7 is open.", model="m"),
-    ])
+    gateway = ScriptedGateway(
+        [
+            tool_call_response(
+                "m", [("c1", "github_issues_read", {"repo": "acme/x", "number": 7})]
+            ),
+            ModelResponse(text="Issue #7 is open.", model="m"),
+        ]
+    )
     runtime = Runtime(
         agent, gateway=gateway, tools=tools, engine=in_memory_workflow_engine()
     )
@@ -61,10 +64,20 @@ async def test_write_tool_call_is_held_for_approval():
     agent = _agent()
     github = FakeGitHub()
     tools = ToolGateway(tools=[GitHubConnector(github)])
-    gateway = ScriptedGateway([
-        tool_call_response("m", [("c1", "github_issues_write",
-                                  {"repo": "acme/x", "title": "Track decision"})]),
-    ])
+    gateway = ScriptedGateway(
+        [
+            tool_call_response(
+                "m",
+                [
+                    (
+                        "c1",
+                        "github_issues_write",
+                        {"repo": "acme/x", "title": "Track decision"},
+                    )
+                ],
+            ),
+        ]
+    )
     runtime = Runtime(
         agent, gateway=gateway, tools=tools, engine=in_memory_workflow_engine()
     )
@@ -82,10 +95,12 @@ async def test_unoffered_tool_call_is_reported_to_model():
     # gateway's forbidden path guards the direct API route, not this loop.
     agent = _agent()
     tools = ToolGateway(tools=[GitHubConnector(FakeGitHub())])
-    gateway = ScriptedGateway([
-        tool_call_response("m", [("c1", "github_repos_delete", {})]),
-        ModelResponse(text="I can't do that.", model="m"),
-    ])
+    gateway = ScriptedGateway(
+        [
+            tool_call_response("m", [("c1", "github_repos_delete", {})]),
+            ModelResponse(text="I can't do that.", model="m"),
+        ]
+    )
     runtime = Runtime(
         agent, gateway=gateway, tools=tools, engine=in_memory_workflow_engine()
     )
@@ -114,10 +129,12 @@ class _VerboseTool:
 async def test_oversized_tool_result_is_capped():
     agent = _agent()
     tools = ToolGateway(tools=[_VerboseTool()])
-    gateway = ScriptedGateway([
-        tool_call_response("m", [("c1", "github_issues_read", {})]),
-        ModelResponse(text="done", model="m"),
-    ])
+    gateway = ScriptedGateway(
+        [
+            tool_call_response("m", [("c1", "github_issues_read", {})]),
+            ModelResponse(text="done", model="m"),
+        ]
+    )
     runtime = Runtime(
         agent, gateway=gateway, tools=tools, engine=in_memory_workflow_engine()
     )
@@ -148,8 +165,9 @@ async def test_usage_accumulates_across_loop():
         "m", [("c1", "github_issues_read", {"repo": "a/b", "number": 1})]
     )
     first.cost_usd, first.prompt_tokens, first.completion_tokens = 0.01, 10, 5
-    second = ModelResponse(text="done", model="m", cost_usd=0.02,
-                           prompt_tokens=20, completion_tokens=8)
+    second = ModelResponse(
+        text="done", model="m", cost_usd=0.02, prompt_tokens=20, completion_tokens=8
+    )
 
     usage = InMemoryUsageStore()
     runtime = Runtime(

@@ -17,8 +17,6 @@ def make_agent(
 ) -> Agent:
     spec.setdefault("model_policy", ModelPolicy(default="m"))
     return Agent(
-        metadata=AgentMetadata(
-            name=name, workspace=workspace, id=id or uuid4().hex
-        ),
+        metadata=AgentMetadata(name=name, workspace=workspace, id=id or uuid4().hex),
         spec=AgentSpec(**spec),
     )

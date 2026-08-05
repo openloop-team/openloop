@@ -65,7 +65,11 @@ class WarmHandle:
 
     def to_json(self) -> str:
         return json.dumps(
-            {"workspace_id": self.workspace_id, "repo": self.repo, "replica": self.replica}
+            {
+                "workspace_id": self.workspace_id,
+                "repo": self.repo,
+                "replica": self.replica,
+            }
         )
 
     @classmethod
@@ -183,11 +187,7 @@ class WarmWorkspacePool:
             # Fall back to a private cold checkout rather than block or share.
             return self._ephemeral_lease(repo)
 
-        if (
-            entry is not None
-            and entry.repo == repo
-            and entry.path.exists()
-        ):
+        if entry is not None and entry.repo == repo and entry.path.exists():
             await entry.lock.acquire()
             # Re-check liveness under the lock (idle sweep can't run concurrently
             # in this single-threaded loop, but the directory could have vanished).

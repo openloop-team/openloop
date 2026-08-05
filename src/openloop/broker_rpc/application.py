@@ -109,9 +109,7 @@ class BrokerRpcApplication:
         if not isinstance(policy, BrokerRpcPolicy):
             raise TypeError("policy must be BrokerRpcPolicy")
         if not isinstance(segment_coordinator, SegmentCoordinator):
-            raise TypeError(
-                "segment_coordinator must implement SegmentCoordinator"
-            )
+            raise TypeError("segment_coordinator must implement SegmentCoordinator")
         if principal_limiter is not None and not isinstance(
             principal_limiter, TokenBucketLimiter
         ):
@@ -329,9 +327,7 @@ class BrokerRpcApplication:
                 AuditDecision.ERROR,
                 AuditReason.INTERNAL,
                 job_id=ticket.job_id if ticket is not None else None,
-                operation_id=(
-                    ticket.operation_id if ticket is not None else None
-                ),
+                operation_id=(ticket.operation_id if ticket is not None else None),
             )
 
         if not await self._audit(
@@ -370,9 +366,7 @@ class BrokerRpcApplication:
             authorization = await self._ledger.inspect_job_authorization(
                 principal.owner, payload.job_id
             )
-            if not principal.isolation_mode.allows(
-                authorization.minimum_isolation
-            ):
+            if not principal.isolation_mode.allows(authorization.minimum_isolation):
                 raise PermissionError
             if not self._capability_authority.verify(
                 principal.owner,
@@ -465,9 +459,7 @@ class BrokerRpcApplication:
             authorization = await self._ledger.inspect_job_authorization(
                 principal.owner, job_id
             )
-            if not principal.isolation_mode.allows(
-                authorization.minimum_isolation
-            ):
+            if not principal.isolation_mode.allows(authorization.minimum_isolation):
                 raise PermissionError
             if not self._capability_authority.verify(
                 principal.owner,
@@ -711,9 +703,7 @@ class BrokerRpcApplication:
             authorization = await self._ledger.inspect_job_authorization(
                 principal.owner, payload.job_id
             )
-            if not principal.isolation_mode.allows(
-                authorization.minimum_isolation
-            ):
+            if not principal.isolation_mode.allows(authorization.minimum_isolation):
                 raise PermissionError
             if not self._capability_authority.verify(
                 principal.owner,
@@ -722,15 +712,11 @@ class BrokerRpcApplication:
                 capability,
             ):
                 raise PermissionError
-            snapshot = await self._ledger.inspect_job(
-                principal.owner, payload.job_id
-            )
+            snapshot = await self._ledger.inspect_job(principal.owner, payload.job_id)
             access = await self._segment_coordinator.inspect_running_access(
                 principal.owner, payload.job_id
             )
-            if access is not None and not isinstance(
-                access, RunningGenerationAccess
-            ):
+            if access is not None and not isinstance(access, RunningGenerationAccess):
                 raise TypeError("coordinator returned invalid running access")
         except (JobNotFound, OwnerMismatch, PermissionError):
             return await self._failure(

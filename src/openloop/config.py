@@ -18,9 +18,7 @@ DEFAULT_EXTERNAL_BROKER_CONTAINER_ROOT = Path("/var/lib/openloop/broker")
 DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR = (
     DEFAULT_EXTERNAL_BROKER_CONTAINER_ROOT / "control"
 )
-DEFAULT_EXTERNAL_BROKER_STATE_ROOT = (
-    DEFAULT_EXTERNAL_BROKER_CONTAINER_ROOT / "state"
-)
+DEFAULT_EXTERNAL_BROKER_STATE_ROOT = DEFAULT_EXTERNAL_BROKER_CONTAINER_ROOT / "state"
 DEFAULT_EXTERNAL_BROKER_RUNTIME_ROOT = (
     DEFAULT_EXTERNAL_BROKER_CONTAINER_ROOT / "runtime"
 )
@@ -195,9 +193,7 @@ class RuntimeSettings(_OpenLoopSettings):
     coding_worker_openhands_broker_enabled: bool = False
     # Runtime-side mount targets. Compose may bind any host source to these
     # stable paths; source and target paths are independent.
-    broker_control_socket_dir: str = str(
-        DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR
-    )
+    broker_control_socket_dir: str = str(DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR)
     broker_ingress_root: str = str(DEFAULT_EXTERNAL_BROKER_INGRESS_ROOT)
     broker_checkpoint_receipt_root: str = str(
         DEFAULT_EXTERNAL_BROKER_CHECKPOINT_RECEIPT_ROOT
@@ -368,9 +364,7 @@ class BrokerSettings(_OpenLoopSettings):
     )
 
     # Stable container targets. Deployments choose host sources independently.
-    broker_control_socket_dir: str = str(
-        DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR
-    )
+    broker_control_socket_dir: str = str(DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR)
     broker_state_root: str = str(DEFAULT_EXTERNAL_BROKER_STATE_ROOT)
     broker_runtime_root: str = str(DEFAULT_EXTERNAL_BROKER_RUNTIME_ROOT)
     broker_ingress_root: str = str(DEFAULT_EXTERNAL_BROKER_INGRESS_ROOT)

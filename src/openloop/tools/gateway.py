@@ -162,8 +162,15 @@ class ToolGateway:
             # so policy and display stay in canonical space either way.
             legacy_tool_name, legacy_permission = split_action(requested_action)
             legacy_tool = self._tools.get(legacy_tool_name)
-            if legacy_tool is not None and legacy_permission in legacy_tool.supported_permissions():
-                tool_name, permission, tool = legacy_tool_name, legacy_permission, legacy_tool
+            if (
+                legacy_tool is not None
+                and legacy_permission in legacy_tool.supported_permissions()
+            ):
+                tool_name, permission, tool = (
+                    legacy_tool_name,
+                    legacy_permission,
+                    legacy_tool,
+                )
 
         if tool is None or permission not in tool.supported_permissions():
             return Invocation(
@@ -405,9 +412,7 @@ class ToolGateway:
         healed = 0
         cursor: tuple | None = None
         while True:
-            batch = await self.approvals.decided_unreconciled(
-                limit=200, after=cursor
-            )
+            batch = await self.approvals.decided_unreconciled(limit=200, after=cursor)
             if not batch:
                 return healed
             cursor = (batch[-1].created_at, batch[-1].id)
@@ -707,7 +712,8 @@ def _workflow_invocation(instance) -> Invocation:
         return Invocation(
             status="executed",
             result=ToolResult(
-                ok=True, summary=result.get("summary", "workflow completed"),
+                ok=True,
+                summary=result.get("summary", "workflow completed"),
                 data=result,
             ),
         )
@@ -737,7 +743,9 @@ def _workflow_invocation(instance) -> Invocation:
 
 def _summarize(action: str, args: dict) -> str:
     if action == "github.issues:write":
-        return f"create issue in {args.get('repo', '?')}: {args.get('title', '')}".strip()
+        return (
+            f"create issue in {args.get('repo', '?')}: {args.get('title', '')}".strip()
+        )
     if action == "github.pulls:write":
         return (
             f"open PR in {args.get('repo', '?')} "

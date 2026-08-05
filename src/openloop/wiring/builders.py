@@ -228,7 +228,8 @@ async def _setup_coordination(
                 "CROSS-PROCESS COORDINATION DISABLED: LOCK_BACKEND=%s could not "
                 "start; multiple replicas may run recovery concurrently. Falling "
                 "back to a process-local lock.",
-                settings.lock_backend, exc_info=True,
+                settings.lock_backend,
+                exc_info=True,
             )
         else:
             log.exception(
@@ -485,9 +486,7 @@ def build_coding_worker(
             network=settings.coding_worker_openhands_network,
             docker_adapter=docker_adapter,
             artifact_store=artifact_store,
-            cold_resume_enabled=(
-                settings.coding_worker_openhands_cold_resume_enabled
-            ),
+            cold_resume_enabled=(settings.coding_worker_openhands_cold_resume_enabled),
         )
         try:
             worker.probe()
@@ -551,7 +550,9 @@ def _exposes_coding_worker(agent: Agent) -> bool:
     # workspace_task/code:write — a raw comparison would hide a legacy-named
     # worker-exposing agent from the boot-time fail-closed cap gate and from
     # ledger owner attribution.
-    target = _canonical_action(f"{CodingWorkerConnector.name}.{CODING_WORKER_CODE_WRITE}")
+    target = _canonical_action(
+        f"{CodingWorkerConnector.name}.{CODING_WORKER_CODE_WRITE}"
+    )
     return any(
         _canonical_action(f"{t.name}.{p}") == target
         for t in agent.spec.tools
@@ -602,8 +603,7 @@ def _uncapped_worker_agents(
     exposed = {a.metadata.name: a for a in agents.values() if exposes(a)}
     exposed.setdefault(ledger.default_agent, agents[ledger.default_agent])
     return sorted(
-        name for name, a in exposed.items()
-        if a.spec.budget.per_task_usd is None
+        name for name, a in exposed.items() if a.spec.budget.per_task_usd is None
     )
 
 
@@ -624,9 +624,7 @@ def build_tool_gateway(
     gateway = ToolGateway(approvals=approvals, engine=engine)
     github_credentials = build_github_credentials(settings)
     github_client = (
-        HttpGitHubClient(github_credentials)
-        if github_credentials is not None
-        else None
+        HttpGitHubClient(github_credentials) if github_credentials is not None else None
     )
     if github_credentials is not None:
         gateway.register(GitHubConnector(github_client))
@@ -716,13 +714,9 @@ def build_tool_gateway(
                     ledger.per_task_usd_for(None) if ledger is not None else None,
                 )
         else:
-            log.info(
-                "workspace_task tool not registered: set CODING_WORKER_ENABLED=1"
-            )
+            log.info("workspace_task tool not registered: set CODING_WORKER_ENABLED=1")
     else:
-        log.warning(
-            "github tool not registered: set GITHUB_TOKEN or GITHUB_APP_*"
-        )
+        log.warning("github tool not registered: set GITHUB_TOKEN or GITHUB_APP_*")
 
     mcp_connectors: list[MCPConnector] = []
     seen: set[str] = set()

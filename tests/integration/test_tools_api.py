@@ -19,7 +19,7 @@ def client(settings):
             "tools_factory": lambda stores: ToolGateway(
                 tools=[GitHubConnector(fake)], approvals=stores.approvals
             )
-        }
+        },
     )
     with TestClient(app) as c:
         c.fake_github = fake  # type: ignore[attr-defined]

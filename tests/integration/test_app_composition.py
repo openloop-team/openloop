@@ -33,27 +33,20 @@ composemod = importlib.import_module("openloop.wiring.compose")
 
 def test_effective_storage_mode_precedence_and_legacy_mapping():
     assert Settings().effective_storage_mode == "memory"
-    assert (
-        Settings(memory_backend="postgres").effective_storage_mode
-        == "auto"
-    )
+    assert Settings(memory_backend="postgres").effective_storage_mode == "auto"
     assert (
         Settings(
-                        storage_mode="memory",
+            storage_mode="memory",
             memory_backend="postgres",
         ).effective_storage_mode
         == "memory"
     )
     assert isinstance(
-        builders.build_lock(
-            Settings(storage_mode="postgres", lock_backend="auto")
-        ),
+        builders.build_lock(Settings(storage_mode="postgres", lock_backend="auto")),
         PostgresLock,
     )
     assert isinstance(
-        builders.build_lock(
-            Settings(storage_mode="memory", lock_backend="auto")
-        ),
+        builders.build_lock(Settings(storage_mode="memory", lock_backend="auto")),
         InProcessLock,
     )
 
@@ -73,7 +66,7 @@ async def test_broker_handle_is_a_recognized_override():
     # threads through to build_tool_gateway without an "unknown override" error.
     async with compose(
         Settings(
-                        storage_mode="memory",
+            storage_mode="memory",
             coding_worker_openhands_broker_enabled=True,
             broker_mode="external",
         ),
@@ -95,7 +88,7 @@ async def test_app_composition_refuses_coprocess_broker_mode(monkeypatch, caplog
     with caplog.at_level("ERROR"):
         async with compose(
             Settings(
-                                storage_mode="memory",
+                storage_mode="memory",
                 coding_worker_openhands_broker_enabled=True,
                 broker_mode="coprocess",
             ),
@@ -117,9 +110,11 @@ async def test_external_broker_mode_wires_adapter_without_app_reconciler(
     identity_seed = bytes(range(1, 33))
     identity_private = Ed25519PrivateKey.from_private_bytes(identity_seed)
     receipt_root = bytes([4]) * 32
-    receipt_public = _derive_receipt_key(
-        receipt_root, "broker-receipt", "receipt-key-v1"
-    ).public_key().public_bytes_raw()
+    receipt_public = (
+        _derive_receipt_key(receipt_root, "broker-receipt", "receipt-key-v1")
+        .public_key()
+        .public_bytes_raw()
+    )
 
     broker_state = tmp_path / "broker-state"
     broker_runtime = tmp_path / "broker-runtime"
@@ -134,7 +129,7 @@ async def test_external_broker_mode_wires_adapter_without_app_reconciler(
         path.chmod(0o2750)
 
     settings = Settings(
-                storage_mode="memory",
+        storage_mode="memory",
         embeddings_enabled=False,
         recovery_interval_seconds=0,
         coding_worker_enabled=True,
@@ -149,9 +144,7 @@ async def test_external_broker_mode_wires_adapter_without_app_reconciler(
         broker_ingress_root=str(app_ingress),
         broker_checkpoint_receipt_root=str(app_receipts),
         broker_shared_data_gid=os.getgid(),
-        broker_identity_private_key=SecretStr(
-            base64.b64encode(identity_seed).decode()
-        ),
+        broker_identity_private_key=SecretStr(base64.b64encode(identity_seed).decode()),
         broker_receipt_roots={
             "receipt-key-v1": base64.b64encode(receipt_root).decode()
         },
@@ -210,7 +203,7 @@ async def test_auto_fallback_settles_every_capture_before_wiring(monkeypatch):
 
     agent = load_agent(AGENT_YAML)
     settings = Settings(
-                storage_mode="auto",
+        storage_mode="auto",
         lock_backend="memory",
         embeddings_enabled=False,
         recovery_interval_seconds=0,
@@ -267,7 +260,7 @@ async def test_postgres_store_setup_failure_unwinds_pool_once():
     with pytest.raises(RuntimeError, match="schema setup failed"):
         async with compose(
             Settings(
-                                storage_mode="postgres",
+                storage_mode="postgres",
                 embeddings_enabled=False,
                 recovery_interval_seconds=0,
             ),

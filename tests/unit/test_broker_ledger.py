@@ -246,18 +246,24 @@ def test_existing_job_identity_generation_and_lease_are_digest_semantics():
         replace(command, execution_lease_seconds=31),
     ]
     assert all(value.request_digest != command.request_digest for value in variants)
-    assert replace(
-        command,
-        idempotency_key="caller-start-9999",
-        operation_id=OTHER_OPERATION_ID,
-    ).request_digest == command.request_digest
-    assert replace(
-        command,
-        runtime_key_version="runtime-v2",
-        durable_state_ref="local-openhands:v1:rotated",
-        durable_key_version="durable-v2",
-        durable_digest="e" * 64,
-    ).request_digest == command.request_digest
+    assert (
+        replace(
+            command,
+            idempotency_key="caller-start-9999",
+            operation_id=OTHER_OPERATION_ID,
+        ).request_digest
+        == command.request_digest
+    )
+    assert (
+        replace(
+            command,
+            runtime_key_version="runtime-v2",
+            durable_state_ref="local-openhands:v1:rotated",
+            durable_key_version="durable-v2",
+            durable_digest="e" * 64,
+        ).request_digest
+        == command.request_digest
+    )
 
 
 def test_receipt_release_target_and_outcome_are_digest_semantics():
@@ -334,16 +340,13 @@ class RecordingRepository:
         return await self._record("inspect_job_for_recovery", (owner, job_id))
 
     async def scan_recovery_candidates(self, after_job_id, limit):
-        return await self._record(
-            "scan_recovery_candidates", (after_job_id, limit)
-        )
+        return await self._record("scan_recovery_candidates", (after_job_id, limit))
 
 
 class IdFactory:
     def __init__(self):
         self.values = [
-            UUID(f"00000000-0000-4000-8000-{number:012d}")
-            for number in range(100, 130)
+            UUID(f"00000000-0000-4000-8000-{number:012d}") for number in range(100, 130)
         ]
         self.calls = 0
 
@@ -420,9 +423,7 @@ async def test_ledger_builds_and_delegates_every_named_command():
     )
     assert isinstance(quiesce, BeginQuiesceCommand)
     assert isinstance(
-        await ledger.mark_quiesced(
-            OWNER, quiesce.operation_id, job_id, 1
-        ),
+        await ledger.mark_quiesced(OWNER, quiesce.operation_id, job_id, 1),
         MarkQuiescedCommand,
     )
 

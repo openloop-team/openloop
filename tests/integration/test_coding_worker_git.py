@@ -43,8 +43,7 @@ def remote(tmp_path: Path) -> Path:
     _git("clone", str(bare), str(seed))
     (seed / "README.md").write_text("hello\n")
     _git("add", "-A", cwd=seed)
-    _git("-c", "user.email=t@t", "-c", "user.name=t",
-         "commit", "-m", "seed", cwd=seed)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "seed", cwd=seed)
     _git("push", "origin", "HEAD:main", cwd=seed)
     return bare
 
@@ -84,8 +83,11 @@ def _orchestrator(remote: Path, worker=None):
 
 def _state(job_id="j1"):
     return WorkerState(
-        job_id=job_id, repo="acme/x", instruction="say hello world",
-        base="main", branch=f"openloop/job-{job_id}",
+        job_id=job_id,
+        repo="acme/x",
+        instruction="say hello world",
+        base="main",
+        branch=f"openloop/job-{job_id}",
     )
 
 
@@ -98,9 +100,7 @@ async def test_real_attempt_pushes_branch_with_edit(remote):
     assert outcome.title == "Say hello world"
     assert state.completed_steps == list(STEPS)
     # The branch landed in the remote with the worker's edit applied.
-    assert "openloop/job-j1" in _git(
-        "branch", "--list", "openloop/job-j1", cwd=remote
-    )
+    assert "openloop/job-j1" in _git("branch", "--list", "openloop/job-j1", cwd=remote)
     assert _git("show", "openloop/job-j1:README.md", cwd=remote) == "hello world 1\n"
     # Commit is authored by the worker bot identity.
     log = _git("log", "-1", "--format=%an <%ae>", "openloop/job-j1", cwd=remote)
@@ -116,9 +116,7 @@ async def test_workspace_handed_to_worker_holds_no_credential(remote):
             # git config visible from the workspace, plus every file in .git
             # that stores remote/auth settings.
             seen["config"] = _git("config", "--list", cwd=workspace)
-            seen["origin"] = _git(
-                "remote", "get-url", "origin", cwd=workspace
-            ).strip()
+            seen["origin"] = _git("remote", "get-url", "origin", cwd=workspace).strip()
             return await super().run(workspace, state, on_step)
 
     worker = SpyWorker(model="stub", gateway=_StubCompleter())

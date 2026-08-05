@@ -120,9 +120,7 @@ def broker_rpc_test_fixture(
     repository = InMemoryBrokerRepository(clock=clock)
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=5000))
     capability = JobCapabilityAuthority(
-        CapabilityRootRing(
-            {"cap-v1": bytes(range(32))}, current_version="cap-v1"
-        )
+        CapabilityRootRing({"cap-v1": bytes(range(32))}, current_version="cap-v1")
     )
     audit = InMemoryRpcAuditSink(clock=lambda: NOW)
     receipt_private_key = Ed25519PrivateKey.generate()

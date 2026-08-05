@@ -107,9 +107,7 @@ class OpenHandsKeyDeriver:
         )
 
     @classmethod
-    def from_base64(
-        cls, encoded: str, *, master_key_id: str
-    ) -> OpenHandsKeyDeriver:
+    def from_base64(cls, encoded: str, *, master_key_id: str) -> OpenHandsKeyDeriver:
         if not isinstance(encoded, str) or not encoded:
             raise OpenHandsStateError(
                 "OpenHands state master key must be base64-encoded"

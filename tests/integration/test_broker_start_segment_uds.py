@@ -82,9 +82,7 @@ def _server(path, fixture):
 def _client(path, fixture, owner=OWNER, *, start=20_000, **identity_options):
     return BrokerRpcClient(
         path=path,
-        identity_provider=fixture.identity_provider(
-            owner, **identity_options
-        ),
+        identity_provider=fixture.identity_provider(owner, **identity_options),
         request_id_factory=SequenceIds(start=start),
     )
 
@@ -131,9 +129,7 @@ async def test_real_uds_start_replay_and_inspect(private_paths):
         assert first.access.socket_path.name == "agent.sock"
         assert first.access.relay_capability != first.access.session_api_key
         durable_job = state_root / str(created.ticket.job_id)
-        assert sorted(item.name for item in durable_job.iterdir()) == [
-            "agent-server"
-        ]
+        assert sorted(item.name for item in durable_job.iterdir()) == ["agent-server"]
         marker = durable_job / "agent-server" / "preserved.txt"
         marker.write_text("preserve", encoding="utf-8")
 
@@ -143,9 +139,7 @@ async def test_real_uds_start_replay_and_inspect(private_paths):
             "uds-start-key-01",
             created.capability,
         )
-        inspected = await client.inspect_job(
-            created.ticket.job_id, created.capability
-        )
+        inspected = await client.inspect_job(created.ticket.job_id, created.capability)
         assert replay.replayed is True
         assert replay.operation_id == first.operation_id
         assert replay.access == first.access == inspected.access
@@ -382,10 +376,7 @@ async def test_start_authorization_and_fencing_precede_runtime(private_paths):
                 "uds-auth-capability-01",
                 JobCapability("A" * 43),
             )
-        assert (
-            wrong_capability.value.code
-            is RpcErrorCode.NOT_FOUND_OR_UNAUTHORIZED
-        )
+        assert wrong_capability.value.code is RpcErrorCode.NOT_FOUND_OR_UNAUTHORIZED
 
         token = fixture.identity_provider(OWNER)(WorkloadIntent.INSPECT_JOB)
         missing_intent = RpcRequest(
@@ -409,9 +400,7 @@ async def test_start_authorization_and_fencing_precede_runtime(private_paths):
             start=22_600,
             required=IsolationMode.DEDICATED,
         )
-        dedicated = await dedicated_creator.create_job(
-            "uds-auth-dedicated-create-01"
-        )
+        dedicated = await dedicated_creator.create_job("uds-auth-dedicated-create-01")
         shared = _client(
             socket_path,
             fixture,
@@ -425,10 +414,7 @@ async def test_start_authorization_and_fencing_precede_runtime(private_paths):
                 "uds-auth-isolation-01",
                 dedicated.capability,
             )
-        assert (
-            weak_isolation.value.code
-            is RpcErrorCode.NOT_FOUND_OR_UNAUTHORIZED
-        )
+        assert weak_isolation.value.code is RpcErrorCode.NOT_FOUND_OR_UNAUTHORIZED
 
         with pytest.raises(BrokerRpcRemoteError) as stale:
             await client.start_segment(

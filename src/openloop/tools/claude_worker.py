@@ -271,7 +271,8 @@ class ClaudeCodeCodingWorker:
         except (FileNotFoundError, OSError):
             logger.warning(
                 "claude run for job %s wrote no %s — using fallback title",
-                state.job_id, PR_FILE,
+                state.job_id,
+                PR_FILE,
             )
             title = state.instruction.strip().splitlines()[0][:72]
             return title or "Automated change", ""
@@ -293,9 +294,7 @@ class ClaudeCodeCodingWorker:
         child_env = None
         if self._claude_auth is not None:
             child_env = dict(os.environ)
-            child_env["CLAUDE_CODE_OAUTH_TOKEN"] = (
-                self._claude_auth.get_secret_value()
-            )
+            child_env["CLAUDE_CODE_OAUTH_TOKEN"] = self._claude_auth.get_secret_value()
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=str(cwd),

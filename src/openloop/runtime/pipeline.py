@@ -108,7 +108,7 @@ def _turn_start(messages: list[dict]) -> int:
 
 
 def _turn_slice(messages: list[dict]) -> list[dict]:
-    return messages[_turn_start(messages):]
+    return messages[_turn_start(messages) :]
 
 
 def _trailing_assistant(turn: list[dict]) -> dict | None:
@@ -279,7 +279,9 @@ class Runtime:
             logger.warning("rate-limited task for %s: %s", scope, decision.reason)
             model = self.agent.model_for(task.kind)
             await self._record_usage(
-                task, model, ModelResponse(text="", model=model),
+                task,
+                model,
+                ModelResponse(text="", model=model),
                 outcome="rate_limited",
             )
             return _limited_response(decision.reason)
@@ -354,9 +356,13 @@ class Runtime:
     ) -> None:
         logger.info(
             "completed task on %s/%s with %s (%d+%d tok, $%.4f, %s)",
-            task.surface, task.channel, accounted.model,
-            accounted.prompt_tokens, accounted.completion_tokens,
-            accounted.cost_usd, outcome,
+            task.surface,
+            task.channel,
+            accounted.model,
+            accounted.prompt_tokens,
+            accounted.completion_tokens,
+            accounted.cost_usd,
+            outcome,
         )
 
     # --- durable workflow path (consumer #2) ---
@@ -408,8 +414,12 @@ class Runtime:
             self.workflow_name,
             instance_id,
             {
-                "task": _task_to_dict(task), "model": model, "scope": scope,
-                "messages": messages, "query_embedding": None, "continuation": True,
+                "task": _task_to_dict(task),
+                "model": model,
+                "scope": scope,
+                "messages": messages,
+                "query_embedding": None,
+                "continuation": True,
             },
         )
         return self._response_from(instance)
@@ -424,7 +434,9 @@ class Runtime:
             if not decision.allowed:
                 s.update({"blocked": True, "block_reason": decision.reason})
             return
-        model, scope, messages, query_embedding, block_reason = await self._prepare(task)
+        model, scope, messages, query_embedding, block_reason = await self._prepare(
+            task
+        )
         s.update({"model": model, "scope": scope})
         if block_reason is not None:
             s.update({"blocked": True, "block_reason": block_reason})
@@ -448,7 +460,9 @@ class Runtime:
         if s.get("blocked"):
             if not s.get("usage_recorded"):
                 await self._record_usage(
-                    task, s["model"], ModelResponse(text="", model=s["model"]),
+                    task,
+                    s["model"],
+                    ModelResponse(text="", model=s["model"]),
                     outcome="blocked",
                 )
                 s["usage_recorded"] = True
@@ -526,7 +540,12 @@ class Runtime:
         messages = state["messages"]
         usage = state.setdefault(
             "usage_total",
-            {"model": model, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0},
+            {
+                "model": model,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cost_usd": 0.0,
+            },
         )
 
         while True:
@@ -544,11 +563,15 @@ class Runtime:
             pending = _unresolved_tool_calls(turn)
             if not pending:
                 # Would start a NEW model round (turn start, or round fully resolved).
-                if _rounds_used(turn) >= MAX_TOOL_ITERS:  # (G) budget stops a new round only
-                    messages.append({
-                        "role": "assistant",
-                        "content": "I couldn't finish that within the tool-call limit.",
-                    })
+                if (
+                    _rounds_used(turn) >= MAX_TOOL_ITERS
+                ):  # (G) budget stops a new round only
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": "I couldn't finish that within the tool-call limit.",
+                        }
+                    )
                     state["final_text"] = messages[-1]["content"]
                     await checkpoint()
                     break
@@ -574,11 +597,15 @@ class Runtime:
                 call_name = fn.get("name", "")
                 action = by_name.get(call_name)
                 if action is None:
-                    messages.append(_tool_message(call_id, f"error: unknown tool {call_name}"))
+                    messages.append(
+                        _tool_message(call_id, f"error: unknown tool {call_name}")
+                    )
                     await checkpoint()
                     continue
                 inv = await self.tools.invoke(
-                    self.agent, action, _parse_json(fn.get("arguments")),
+                    self.agent,
+                    action,
+                    _parse_json(fn.get("arguments")),
                     requested_by=task.user,
                     warm_key=task.thread_key,
                     session_id=task.session_id,
@@ -591,15 +618,21 @@ class Runtime:
                         # Map approval -> the tool call it gates, so a continuation
                         # (M0b) can fold the approved result into this exact call's
                         # held message and re-run the model.
-                        state.setdefault("approval_calls", {})[inv.approval.id] = call_id
+                        state.setdefault("approval_calls", {})[inv.approval.id] = (
+                            call_id
+                        )
                     note = inv.message or "approval required"
                     prev = state.get("final_text")
                     state["final_text"] = f"{prev}\n{note}" if prev else note
                     messages.append(
-                        _tool_message(call_id, f"held for human approval: {inv.message}")
+                        _tool_message(
+                            call_id, f"held for human approval: {inv.message}"
+                        )
                     )
                 else:  # forbidden / denied
-                    messages.append(_tool_message(call_id, f"{inv.status}: {inv.message}"))
+                    messages.append(
+                        _tool_message(call_id, f"{inv.status}: {inv.message}")
+                    )
                 await checkpoint()  # (D) commit each tool result / approval hold
             if state.get("approval_ids"):
                 # M0a: approval ends the turn (M0b adds the continuation post-Phase-C).

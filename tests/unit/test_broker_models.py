@@ -131,9 +131,7 @@ def test_owner_accepts_exact_utf8_byte_bounds(tenant_id, workload_subject):
         ("tenant", "work\u0085load"),
     ],
 )
-def test_owner_rejects_empty_oversize_and_control_values(
-    tenant_id, workload_subject
-):
+def test_owner_rejects_empty_oversize_and_control_values(tenant_id, workload_subject):
     with pytest.raises(ValueError):
         BrokerOwner(tenant_id=tenant_id, workload_subject=workload_subject)
 

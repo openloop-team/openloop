@@ -157,7 +157,9 @@ def _specs(args: argparse.Namespace) -> tuple[_DirectorySpec, ...]:
     )
     paths = [spec.path for spec in specs]
     if any(path == Path(os.sep) for path in paths):
-        raise ProvisioningProblem("a provisioned directory cannot be the filesystem root")
+        raise ProvisioningProblem(
+            "a provisioned directory cannot be the filesystem root"
+        )
     if len(set(paths)) != len(paths):
         raise ProvisioningProblem("the five provisioned directories must be distinct")
     return specs
@@ -203,7 +205,9 @@ def _provision(spec: _DirectorySpec) -> None:
     except ProvisioningProblem:
         raise
     except OSError as error:
-        raise ProvisioningProblem(f"could not provision directory: {spec.path}") from error
+        raise ProvisioningProblem(
+            f"could not provision directory: {spec.path}"
+        ) from error
     finally:
         os.close(descriptor)
 

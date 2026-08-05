@@ -204,9 +204,7 @@ class OpenHandsResumeState:
                 f"unsupported OpenHands resume schema version {self.schema_version}"
             )
         if self.minimum_reader_version > OPENHANDS_RESUME_READER_VERSION:
-            raise OpenHandsResumeError(
-                "OpenHands resume state requires a newer reader"
-            )
+            raise OpenHandsResumeError("OpenHands resume state requires a newer reader")
         if self.minimum_reader_version < 1:
             raise OpenHandsResumeError("invalid OpenHands minimum reader version")
         if self.status not in _STATUSES:

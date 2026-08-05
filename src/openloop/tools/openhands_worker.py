@@ -87,6 +87,7 @@ class _RunAborted(Exception):
         super().__init__(reason)
         self.reason = reason
 
+
 # The handoff protocol for PR metadata: the agent's last required act is to
 # write this file (first line = PR title, rest = body). The worker reads and
 # DELETES it before returning, so it never lands in the commit. This keeps the
@@ -109,9 +110,7 @@ _DEFAULT_SERVER_IMAGE = DEFAULT_OPENHANDS_SERVER_IMAGE
 # RemoteConversation.close() deliberately does NOT stop the workspace — the
 # DockerWorkspace owns its container (started at construction) and only its
 # own cleanup() reaps it. Injectable so tests never import the heavy SDK.
-ConversationFactory = Callable[
-    [Path, list, str], "tuple[object, Callable[[], None]]"
-]
+ConversationFactory = Callable[[Path, list, str], "tuple[object, Callable[[], None]]"]
 
 
 @dataclass(slots=True)
@@ -239,7 +238,11 @@ class OpenHandsCodingWorker:
         on_step: StepCallback | None,
     ) -> WorkerEdit | WorkerPaused:
         """Drive one durable OpenHands segment in a disposable container."""
-        if not self.docker or self._docker_adapter is None or self.artifact_store is None:
+        if (
+            not self.docker
+            or self._docker_adapter is None
+            or self.artifact_store is None
+        ):
             raise OpenHandsResumeError(
                 "OpenHands cold resume requires the hardened Docker adapter "
                 "and encrypted artifact store"
@@ -418,9 +421,7 @@ class OpenHandsCodingWorker:
         conversation = runtime.conversation
         conv_box.append(conversation)
         try:
-            broker_identity = getattr(
-                self._docker_adapter, "generation_identity", None
-            )
+            broker_identity = getattr(self._docker_adapter, "generation_identity", None)
             if callable(broker_identity):
                 identity = broker_identity(state.job_id)
                 if (
@@ -574,8 +575,8 @@ class OpenHandsCodingWorker:
                     self._docker_adapter, "websocket_factory", None
                 )
                 if callable(websocket_factory):
-                    conversation_kwargs["websocket_client_factory"] = (
-                        websocket_factory(state.job_id)
+                    conversation_kwargs["websocket_client_factory"] = websocket_factory(
+                        state.job_id
                     )
                     # The public Conversation factory does not accept the
                     # pinned fork's injected WebSocket transport parameter.
@@ -597,9 +598,7 @@ class OpenHandsCodingWorker:
                     max_iterations=self.max_iterations,
                 )
         except BaseException:
-            close_workspace = getattr(
-                self._docker_adapter, "close_workspace", None
-            )
+            close_workspace = getattr(self._docker_adapter, "close_workspace", None)
             if callable(close_workspace):
                 close_workspace(target)
             else:
@@ -636,7 +635,9 @@ class OpenHandsCodingWorker:
     @staticmethod
     def _execution_status(conversation) -> str:
         status = conversation.state.execution_status
-        rendered = f"{getattr(status, 'name', '')} {getattr(status, 'value', '')} {status}"
+        rendered = (
+            f"{getattr(status, 'name', '')} {getattr(status, 'value', '')} {status}"
+        )
         if "WAITING_FOR_CONFIRMATION" in rendered.upper():
             return "waiting"
         if "FINISHED" in rendered.upper():
@@ -680,9 +681,7 @@ class OpenHandsCodingWorker:
         assert self.artifact_store is not None
         resume = state.openhands_resume
         assert resume is not None
-        checkpoint_identity = getattr(
-            self._docker_adapter, "checkpoint_identity", None
-        )
+        checkpoint_identity = getattr(self._docker_adapter, "checkpoint_identity", None)
         identity = (
             checkpoint_identity(state.job_id, barrier_id)
             if callable(checkpoint_identity) and barrier_id is not None
@@ -772,9 +771,7 @@ class OpenHandsCodingWorker:
             ("diff", "--binary", "--full-index", "--no-ext-diff", "HEAD", "--", "."),
             capture=True,
         )
-        identity = self._docker_adapter.checkpoint_identity(
-            state.job_id, barrier_id
-        )
+        identity = self._docker_adapter.checkpoint_identity(state.job_id, barrier_id)
         # ``put_atomic`` consumes a stream; publish the sanitized bytes through a
         # bounded temporary file instead of ever placing plaintext in the store.
         with tempfile.TemporaryFile(mode="w+b") as plaintext:
@@ -790,10 +787,14 @@ class OpenHandsCodingWorker:
                     pr_body=body,
                 ),
             )
-        return title, body, WorkspaceArtifactRef(
-            artifact=descriptor,
-            format="git-delta",
-            base_commit=archived.base_commit,
+        return (
+            title,
+            body,
+            WorkspaceArtifactRef(
+                artifact=descriptor,
+                format="git-delta",
+                base_commit=archived.base_commit,
+            ),
         )
 
     @staticmethod
@@ -923,9 +924,7 @@ class OpenHandsCodingWorker:
         return emit
 
     @staticmethod
-    def _checkpoint_bridge(
-        loop, state: WorkerState, on_step: StepCallback | None
-    ):
+    def _checkpoint_bridge(loop, state: WorkerState, on_step: StepCallback | None):
         """Synchronously persist an intent before the worker thread has effects."""
         if on_step is None:
             return lambda: None
@@ -972,7 +971,8 @@ class OpenHandsCodingWorker:
         except (FileNotFoundError, OSError):
             logger.warning(
                 "openhands run for job %s wrote no %s — using fallback title",
-                state.job_id, PR_FILE,
+                state.job_id,
+                PR_FILE,
             )
             title = state.instruction.strip().splitlines()[0][:72]
             return title or "Automated change", ""

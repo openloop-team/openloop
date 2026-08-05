@@ -347,7 +347,9 @@ def _ticket_dict(ticket: OperationTicket) -> dict[str, object]:
         "operation_id": str(ticket.operation_id),
         "command": ticket.command.value,
         "job_id": str(ticket.job_id) if ticket.job_id else None,
-        "conversation_id": str(ticket.conversation_id) if ticket.conversation_id else None,
+        "conversation_id": str(ticket.conversation_id)
+        if ticket.conversation_id
+        else None,
         "generation": ticket.generation,
         "job_state": ticket.job_state.value if ticket.job_state else None,
         "generation_state": (

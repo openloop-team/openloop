@@ -31,12 +31,14 @@ def test_runtime_profile_preserves_fixed_policy():
     assert require_immutable_server_image(DEFAULT_OPENHANDS_SERVER_IMAGE) == (
         DEFAULT_OPENHANDS_SERVER_IMAGE
     )
-    assert runtime_server_image(
-        DEFAULT_OPENHANDS_SERVER_IMAGE, "linux/amd64"
-    ) == AMD64_IMAGE
-    assert runtime_server_image(
-        DEFAULT_OPENHANDS_SERVER_IMAGE, "linux/arm64"
-    ) == ARM64_IMAGE
+    assert (
+        runtime_server_image(DEFAULT_OPENHANDS_SERVER_IMAGE, "linux/amd64")
+        == AMD64_IMAGE
+    )
+    assert (
+        runtime_server_image(DEFAULT_OPENHANDS_SERVER_IMAGE, "linux/arm64")
+        == ARM64_IMAGE
+    )
 
 
 @pytest.mark.parametrize(

@@ -64,6 +64,7 @@ ERROR_TEXT = "⚠️ This task was interrupted and could not be completed."
 # on context size, not a correctness limit — older turns fall back to recall.
 HISTORY_TURN_LIMIT = 20
 
+
 def _is_non_terminal_invocation(inv) -> bool:
     if inv.status in ("started", "approved"):
         # "approved" = a durable decision with no result yet (a losing
@@ -162,12 +163,18 @@ def _inbox_payload(task: Task, target: SurfaceTarget) -> dict:
 
 def _task_target_from_payload(p: dict) -> tuple[Task, SurfaceTarget]:
     task = Task(
-        text=p["text"], surface=p["surface"], channel=p.get("channel"),
-        user=p.get("user"), kind=p.get("kind"),
+        text=p["text"],
+        surface=p["surface"],
+        channel=p.get("channel"),
+        user=p.get("user"),
+        kind=p.get("kind"),
     )
     target = SurfaceTarget(
-        surface=p["surface"], workspace=p["workspace"], agent=p["agent"],
-        channel=p.get("channel"), thread=p.get("thread"),
+        surface=p["surface"],
+        workspace=p["workspace"],
+        agent=p["agent"],
+        channel=p.get("channel"),
+        thread=p.get("thread"),
         event_id=p.get("event_id"),
     )
     return task, target
@@ -490,7 +497,11 @@ class SessionRunner:
         return await recover(instance_id)
 
     async def _continue_session(
-        self, session: SurfaceSession, inv, approver: str, message: str,
+        self,
+        session: SurfaceSession,
+        inv,
+        approver: str,
+        message: str,
         approval_id: str | None = None,
     ) -> None:
         """Apply an approval outcome without treating non-terminal work as final."""
@@ -573,7 +584,11 @@ class SessionRunner:
             )
 
     async def _continue_with_model(
-        self, session: SurfaceSession, approval_id: str, inv, approver: str,
+        self,
+        session: SurfaceSession,
+        approval_id: str,
+        inv,
+        approver: str,
         message: str,
     ) -> bool:
         """Re-run the model with the approved tool result folded in, under the SAME
@@ -754,7 +769,9 @@ class SessionRunner:
                     [],
                 )
             except Exception:  # noqa: BLE001 — decision is already durable
-                logger.warning("failed to collapse OpenHands decision card", exc_info=True)
+                logger.warning(
+                    "failed to collapse OpenHands decision card", exc_info=True
+                )
         engine.drive_background(job_id)
         return "✅ Decision recorded; resuming work."
 
@@ -818,7 +835,10 @@ class SessionRunner:
                     decided_by=request.decided_by,
                 )
                 await self._continue_session(
-                    session, inv, approver, resolution_message(inv, approver),
+                    session,
+                    inv,
+                    approver,
+                    resolution_message(inv, approver),
                     approval_id=approval_id,
                 )
                 return True
@@ -840,7 +860,10 @@ class SessionRunner:
             inv = _workflow_invocation(instance)
             inv.decided_by = request.decided_by
             await self._continue_session(
-                session, inv, approver, resolution_message(inv, approver),
+                session,
+                inv,
+                approver,
+                resolution_message(inv, approver),
                 approval_id=approval_id,
             )
             return True
@@ -943,7 +966,10 @@ class SessionRunner:
         return out
 
     async def _post_final(
-        self, session: SurfaceSession, result: Deliverable | str, *,
+        self,
+        session: SurfaceSession,
+        result: Deliverable | str,
+        *,
         recover: bool = False,
     ) -> None:
         if session.final_message_id is not None:
@@ -988,8 +1014,10 @@ class SessionRunner:
         if session.final_message_id is not None:
             return
         mid = await self.delivery.post_error(
-            session.target, session.error or ERROR_TEXT,
-            key=self._delivery_key(session, "error"), recover=recover,
+            session.target,
+            session.error or ERROR_TEXT,
+            key=self._delivery_key(session, "error"),
+            recover=recover,
         )
         session.final_message_id = mid
         await self.sessions.upsert(session)

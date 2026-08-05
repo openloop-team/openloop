@@ -140,9 +140,7 @@ class LocalCheckpointReceiptStore:
         if not isinstance(issuer, CheckpointReceiptIssuer):
             raise TypeError("issuer must be CheckpointReceiptIssuer")
         if not isinstance(historical_verifier, CheckpointReceiptVerifier):
-            raise TypeError(
-                "historical_verifier must be CheckpointReceiptVerifier"
-            )
+            raise TypeError("historical_verifier must be CheckpointReceiptVerifier")
         expected_ownership = (
             ("expected_uid", expected_uid),
             ("expected_gid", expected_gid),
@@ -175,9 +173,7 @@ class LocalCheckpointReceiptStore:
             raise TypeError("descriptor must be WorkspaceArtifact")
         return await asyncio.to_thread(self._publish, key, descriptor)
 
-    async def lookup(
-        self, key: CheckpointReceiptKey
-    ) -> SignedCheckpointReceipt | None:
+    async def lookup(self, key: CheckpointReceiptKey) -> SignedCheckpointReceipt | None:
         if not isinstance(key, CheckpointReceiptKey):
             raise TypeError("key must be CheckpointReceiptKey")
         return await asyncio.to_thread(self._lookup, key)
@@ -364,9 +360,7 @@ class LocalCheckpointReceiptStore:
             self._sweep_orphaned_temporaries(current)
             if self._shared_sidecar_matches(current, name, payload):
                 return
-            temporary = (
-                f".{name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
-            )
+            temporary = f".{name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
             flags = (
                 os.O_WRONLY
                 | os.O_CREAT
@@ -441,11 +435,7 @@ class LocalCheckpointReceiptStore:
     def _shared_sidecar_matches(
         self, directory_fd: int, name: str, expected: bytes
     ) -> bool:
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-        )
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         try:
             descriptor = os.open(name, flags, dir_fd=directory_fd)
         except OSError:
@@ -474,11 +464,7 @@ class LocalCheckpointReceiptStore:
     @staticmethod
     def _sweep_orphaned_temporaries(directory_fd: int) -> None:
         now = time.time()
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-        )
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         for entry in os.listdir(directory_fd):
             if not entry.startswith(".") or not entry.endswith(".tmp"):
                 continue
@@ -501,11 +487,10 @@ class LocalCheckpointReceiptStore:
                     continue
                 current = os.stat(entry, dir_fd=directory_fd, follow_symlinks=False)
                 locked = os.fstat(descriptor)
-                if (
-                    not stat.S_ISREG(current.st_mode)
-                    or (current.st_dev, current.st_ino)
-                    != (locked.st_dev, locked.st_ino)
-                ):
+                if not stat.S_ISREG(current.st_mode) or (
+                    current.st_dev,
+                    current.st_ino,
+                ) != (locked.st_dev, locked.st_ino):
                     continue
                 try:
                     os.unlink(entry, dir_fd=directory_fd)
@@ -514,9 +499,7 @@ class LocalCheckpointReceiptStore:
             finally:
                 os.close(descriptor)
 
-    def _validate_shared_directory(
-        self, descriptor: int, *, expected_uid: int
-    ) -> None:
+    def _validate_shared_directory(self, descriptor: int, *, expected_uid: int) -> None:
         if self._shared_gid is None:
             raise LocalCheckpointReceiptProblem()
         info = os.fstat(descriptor)
@@ -608,11 +591,7 @@ class LocalCheckpointReceiptStore:
     def _read_sidecar(
         self, directory_fd: int, name: str
     ) -> SignedCheckpointReceipt | None:
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-        )
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         try:
             descriptor = os.open(name, flags, dir_fd=directory_fd)
         except FileNotFoundError:
@@ -673,9 +652,7 @@ class ReadOnlyCheckpointReceiptLocator:
         self._uid = expected_uid
         self._gid = expected_gid
 
-    async def lookup(
-        self, key: CheckpointReceiptKey
-    ) -> SignedCheckpointReceipt | None:
+    async def lookup(self, key: CheckpointReceiptKey) -> SignedCheckpointReceipt | None:
         if not isinstance(key, CheckpointReceiptKey):
             raise TypeError("key must be CheckpointReceiptKey")
         return await asyncio.to_thread(self._lookup, key)
@@ -722,11 +699,7 @@ class ReadOnlyCheckpointReceiptLocator:
     def _read_verified(
         self, directory_fd: int, name: str
     ) -> SignedCheckpointReceipt | None:
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-        )
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         try:
             descriptor = os.open(name, flags, dir_fd=directory_fd)
         except FileNotFoundError:

@@ -105,9 +105,7 @@ class InMemoryBrokerRepository:
     @staticmethod
     def _expected_generation(job: JobRecord, expected: int) -> None:
         if job.generation != expected:
-            raise StaleGeneration(
-                job.job_id, expected=expected, actual=job.generation
-            )
+            raise StaleGeneration(job.job_id, expected=expected, actual=job.generation)
 
     def _generation(self, job_id: UUID, generation: int) -> GenerationRecord:
         record = self._generations.get((job_id, generation))
@@ -505,9 +503,7 @@ class InMemoryBrokerRepository:
             self._audit.append(audit)
             return result
 
-    async def begin_quiesce(
-        self, command: BeginQuiesceCommand
-    ) -> OperationTicket:
+    async def begin_quiesce(self, command: BeginQuiesceCommand) -> OperationTicket:
         async with self._lock:
             replay = self._caller_replay(command)
             if replay is not None:
@@ -665,9 +661,7 @@ class InMemoryBrokerRepository:
             if actual != expected:
                 raise ReceiptBindingMismatch(field_name)
 
-    async def begin_release(
-        self, command: BeginReleaseCommand
-    ) -> OperationTicket:
+    async def begin_release(self, command: BeginReleaseCommand) -> OperationTicket:
         async with self._lock:
             replay = self._caller_replay(command)
             if replay is not None:
@@ -1004,15 +998,13 @@ class InMemoryBrokerRepository:
             self._generations[(job.job_id, generation.generation)] = updated_generation
             self._operations[operation.operation_id] = operation
             if superseded_operation is not None:
-                self._operations[
-                    superseded_operation.operation_id
-                ] = superseded_operation
+                self._operations[superseded_operation.operation_id] = (
+                    superseded_operation
+                )
             self._audit.append(audit)
             return result
 
-    async def begin_finalize(
-        self, command: BeginFinalizeCommand
-    ) -> OperationTicket:
+    async def begin_finalize(self, command: BeginFinalizeCommand) -> OperationTicket:
         async with self._lock:
             replay = self._caller_replay(command)
             if replay is not None:
