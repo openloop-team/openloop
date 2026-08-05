@@ -140,6 +140,12 @@ class UnixSocketPolicy:
             raise ValueError("socket gid must be a nonnegative integer")
 
 
+# Shared default, built once at import. BrokerRpcLimits is a frozen dataclass,
+# so there is nothing to mutate between servers; naming it keeps the call out of
+# the signature's default, where it would be evaluated at definition time.
+_DEFAULT_LIMITS = BrokerRpcLimits()
+
+
 class BrokerRpcServer:
     def __init__(
         self,
@@ -147,7 +153,7 @@ class BrokerRpcServer:
         application: BrokerRpcApplication,
         socket_policy: UnixSocketPolicy,
         peer_provider: PeerCredentialProvider,
-        limits: BrokerRpcLimits = BrokerRpcLimits(),
+        limits: BrokerRpcLimits = _DEFAULT_LIMITS,
         monotonic_clock=time.monotonic,
     ) -> None:
         if not isinstance(application, BrokerRpcApplication):

@@ -36,7 +36,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -252,14 +252,16 @@ class PostgresLock:
         self._max_size = max_size
         self._password = password
         self._pool = None  # asyncpg.Pool, created in setup()
-        self._held: dict[str, object] = {}  # token -> checked-out Connection
+        # Any, not object: the values are asyncpg Connections, which this module
+        # deliberately does not import, and it calls execute() on them.
+        self._held: dict[str, Any] = {}  # token -> checked-out Connection
 
     async def setup(self) -> None:
         import asyncpg  # noqa: PLC0415 — optional until a Postgres deploy needs it
 
         # min_size=0 keeps idle usage at zero, so explicitly borrow once here:
         # pool construction is lazy and is not itself a connectivity probe.
-        kwargs = {"min_size": 0, "max_size": self._max_size}
+        kwargs: dict[str, Any] = {"min_size": 0, "max_size": self._max_size}
         if self._password is not None:
             kwargs["password"] = self._password
         pool = await asyncpg.create_pool(self.dsn, **kwargs)

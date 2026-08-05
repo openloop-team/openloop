@@ -13,6 +13,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from openloop.broker.models import (
     SignedCheckpointReceipt,
@@ -141,7 +142,7 @@ class LocalCheckpointReceiptStore:
             raise TypeError("issuer must be CheckpointReceiptIssuer")
         if not isinstance(historical_verifier, CheckpointReceiptVerifier):
             raise TypeError("historical_verifier must be CheckpointReceiptVerifier")
-        expected_ownership = (
+        expected_ownership: tuple[tuple[str, Any], ...] = (
             ("expected_uid", expected_uid),
             ("expected_gid", expected_gid),
         )

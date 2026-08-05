@@ -207,7 +207,8 @@ def test_non_binary_plaintext_stream_is_rejected_and_cleaned(tmp_path):
 def test_verified_stream_cleanup_is_explicit(tmp_path):
     store = _store(tmp_path)
     descriptor = store.put_atomic(_identity(), io.BytesIO(b"payload"), _manifest())
-    with store.open_verified(descriptor, _identity()) as verified:
+    # The stream itself is not what's under test — the scratch file's lifetime is.
+    with store.open_verified(descriptor, _identity()):
         scratch_path = next(store.scratch_root.iterdir())
         assert scratch_path.exists()
     assert not scratch_path.exists()

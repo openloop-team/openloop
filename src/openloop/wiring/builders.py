@@ -10,6 +10,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from openloop.agents.schema import Agent
 from openloop.approvals import ApprovalStore, InMemoryApprovalStore
@@ -71,6 +72,12 @@ from openloop.usage.postgres import PostgresUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowStore
 from openloop.workflows.coding_worker import build_workspace_task_workflow
 from openloop.workflows.postgres import PostgresWorkflowStore
+
+if TYPE_CHECKING:
+    # Annotation-only, to keep this module's import graph as flat as it is now:
+    # wiring.broker pulls in the whole broker RPC stack, and build_coding_worker
+    # only ever receives a handle that wiring.compose already built.
+    from openloop.wiring.broker import BrokerClientHandle
 
 log = logging.getLogger("openloop")
 
@@ -249,11 +256,18 @@ def build_github_credentials(settings: RuntimeSettings) -> CredentialResolver | 
     so it fails loudly, then degrades to the token if one is set — mirroring
     the lock backend's explicit-vs-auto policy.
     """
-    if settings.github_app_configured:
+    app_id = settings.github_app_id
+    key_path = settings.github_app_private_key_path
+    installation_id = settings.github_app_installation_id
+    # github_app_configured is exactly "all three are set", but it says so behind
+    # a property, so bind the three locally and test them here where the types
+    # narrow. Keeping the property in the condition would leave each use below
+    # as str | None.
+    if app_id and key_path and installation_id:
         try:
             import jwt
 
-            private_key = Path(settings.github_app_private_key_path).read_text()
+            private_key = Path(key_path).read_text()
             # Prove the WHOLE signing path at boot, not just importability:
             # PyJWT without its crypto backend, or a malformed key, would
             # otherwise pass this gate and fail on the first tool call — after
@@ -273,9 +287,9 @@ def build_github_credentials(settings: RuntimeSettings) -> CredentialResolver | 
                 settings.github_app_id,
             )
             return GitHubAppResolver(
-                settings.github_app_id,
+                app_id,
                 private_key,
-                settings.github_app_installation_id,
+                installation_id,
                 repositories=settings.github_app_repository_list or None,
             )
     if settings.github_token:
@@ -345,7 +359,7 @@ def _provider_key(settings: RuntimeSettings, model: str) -> str | None:
 
 
 def build_coding_worker(
-    settings: RuntimeSettings, broker_handle: object | None = None
+    settings: RuntimeSettings, broker_handle: BrokerClientHandle | None = None
 ) -> CodingWorker | None:
     """Pick the worker backend behind ``CODING_WORKER_BACKEND`` — fail-closed.
 
@@ -404,21 +418,24 @@ def build_coding_worker(
             return None
 
         docker = settings.coding_worker_sandbox == "docker"
-        if docker and (
-            not broker_enabled
-            or settings.broker_mode != "external"
-            or broker_handle is None
-        ):
-            log.error(
-                "containerized OpenHands requires the external broker: set "
-                "CODING_WORKER_OPENHANDS_BROKER_ENABLED=1, "
-                "BROKER_MODE=external, and provide a live broker client — "
-                "coding worker DISABLED"
-            )
-            return None
         docker_adapter = None
         artifact_store = None
         if docker:
+            # Nested rather than `if docker and (...)`, so the broker handle
+            # narrows to non-None for the rest of this block. Same condition,
+            # same message, same return — only the shape changed.
+            if (
+                not broker_enabled
+                or settings.broker_mode != "external"
+                or broker_handle is None
+            ):
+                log.error(
+                    "containerized OpenHands requires the external broker: set "
+                    "CODING_WORKER_OPENHANDS_BROKER_ENABLED=1, "
+                    "BROKER_MODE=external, and provide a live broker client — "
+                    "coding worker DISABLED"
+                )
+                return None
             master_secret = settings.coding_worker_openhands_state_master_key
             if master_secret is None:
                 log.error(
@@ -614,7 +631,7 @@ def build_tool_gateway(
     checkpoints: CheckpointStore,
     engine: WorkflowEngine,
     usage: UsageStore | None = None,
-    broker_handle: object | None = None,
+    broker_handle: BrokerClientHandle | None = None,
 ) -> ToolGateway:
     """Register native connectors plus an MCP connector per configured server.
 
@@ -623,10 +640,11 @@ def build_tool_gateway(
     """
     gateway = ToolGateway(approvals=approvals, engine=engine)
     github_credentials = build_github_credentials(settings)
-    github_client = (
-        HttpGitHubClient(github_credentials) if github_credentials is not None else None
-    )
     if github_credentials is not None:
+        # Built inside the branch rather than as a conditional expression above
+        # it: every use is in here, and this way the client is a client rather
+        # than a client-or-None at each one.
+        github_client = HttpGitHubClient(github_credentials)
         gateway.register(GitHubConnector(github_client))
         log.info("registered native tool: github")
         # The coding worker runs model-generated edits, so it stays off unless

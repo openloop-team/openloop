@@ -140,7 +140,10 @@ class BrokerClientConfig:
             )
 
         return cls(
-            mode=settings.broker_mode,
+            # `external` above is this same comparison; restating it as a
+            # conditional is what produces the BrokerMode literal the field
+            # declares, rather than the bare str the setting carries.
+            mode="external" if external else "coprocess",
             control_socket_dir=control_socket_dir,
             ingress_root=ingress_root,
             checkpoint_receipt_root=checkpoint_receipt_root,

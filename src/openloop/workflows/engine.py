@@ -43,9 +43,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from functools import partial
+from typing import Any
 
 from openloop.workflows.store import (
     TERMINAL,
@@ -79,7 +80,9 @@ class WorkflowContext:
             await self._checkpoint(self.instance)
 
 
-StepFn = Callable[[WorkflowContext], Awaitable[None]]
+# Coroutine, not Awaitable: steps are handed to asyncio.create_task, which does
+# not accept an arbitrary awaitable. Every step is an `async def` already.
+StepFn = Callable[[WorkflowContext], Coroutine[Any, Any, None]]
 
 
 @dataclass(slots=True)
@@ -488,9 +491,14 @@ class WorkflowEngine:
         for callback in self._progress_callbacks:
             task = asyncio.create_task(self._run_progress(callback, instance))
             self._progress_tasks.setdefault(instance.id, set()).add(task)
-            task.add_done_callback(
-                lambda t, iid=instance.id: self._discard_progress(iid, t)
-            )
+
+            # A named function rather than a lambda: the default-argument trick
+            # that pins instance.id per iteration leaves mypy unable to infer
+            # the callback's signature.
+            def _discard(t: asyncio.Task, iid: str = instance.id) -> None:
+                self._discard_progress(iid, t)
+
+            task.add_done_callback(_discard)
 
     def _discard_progress(self, instance_id: str, task: asyncio.Task) -> None:
         tasks = self._progress_tasks.get(instance_id)

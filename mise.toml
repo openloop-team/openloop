@@ -9,7 +9,36 @@ _.python.venv = { path = ".venv", create = true }
 
 [tasks.install]
 description = "Install the runtime with dependencies exercised by the test suite"
-run = "uv pip install -e '.[dev,broker,openhands]'"
+# `uv sync --locked`, not `uv pip install -e`: only sync reads uv.lock. Under
+# pip-install the lockfile was decorative, every CI run re-resolved from the
+# version ranges in pyproject, and a release of some transitive dependency could
+# turn an unrelated PR red. --locked additionally fails rather than silently
+# updating the lock, so a dependency change has to be committed to take effect.
+run = "uv sync --locked --extra dev --extra broker --extra openhands"
+
+[tasks.lint]
+description = "Check lint rules (ruff)"
+run = "ruff check src tests"
+
+[tasks.lint-fix]
+description = "Apply the lint fixes ruff can make automatically"
+run = "ruff check src tests --fix"
+
+[tasks.format]
+description = "Format the source tree (ruff)"
+run = "ruff format src tests"
+
+[tasks.format-check]
+description = "Verify the source tree is formatted, without rewriting it"
+run = "ruff format --check src tests"
+
+[tasks.typecheck]
+description = "Type-check the runtime (mypy)"
+run = "mypy"
+
+[tasks.check]
+description = "Run every gate CI runs: lint, format, types, then tests"
+depends = ["lint", "format-check", "typecheck", "test"]
 
 [tasks.compose-build]
 description = "Fetch the pinned Docker adapter and build the shared OpenLoop image"

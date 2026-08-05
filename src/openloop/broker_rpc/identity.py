@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from uuid import UUID, uuid4
 
 import jwt
@@ -28,7 +28,7 @@ MAX_IDENTITY_LIFETIME_SECONDS = 300
 IDENTITY_CLOCK_SKEW_SECONDS = 30
 
 
-class WorkloadIntent(str, Enum):
+class WorkloadIntent(StrEnum):
     CREATE_JOB = "CREATE_JOB"
     INSPECT_JOB = "INSPECT_JOB"
     START_SEGMENT = "START_SEGMENT"

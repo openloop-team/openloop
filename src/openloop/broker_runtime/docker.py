@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
@@ -1138,6 +1139,8 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
             return await self._release_unlocked(identity)
 
     async def _listed_names(self, kind: str) -> tuple[str, ...]:
+        # The two branches build argv vectors of different lengths.
+        argv: tuple[str, ...]
         if kind == "container":
             argv = (
                 self.config.docker,

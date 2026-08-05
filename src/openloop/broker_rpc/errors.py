@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 
-class RpcErrorCode(str, Enum):
+class RpcErrorCode(StrEnum):
     MALFORMED_FRAME = "MALFORMED_FRAME"
     UNSUPPORTED_VERSION = "UNSUPPORTED_VERSION"
     INVALID_REQUEST = "INVALID_REQUEST"

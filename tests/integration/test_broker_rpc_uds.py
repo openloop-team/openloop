@@ -40,7 +40,10 @@ def socket_path(short_socket_root):
     return short_socket_root / "broker.sock"
 
 
-def _server(path, fixture, *, limits=BrokerRpcLimits()):
+_DEFAULT_LIMITS = BrokerRpcLimits()
+
+
+def _server(path, fixture, *, limits=_DEFAULT_LIMITS):
     return BrokerRpcServer(
         application=fixture.application,
         socket_policy=UnixSocketPolicy(path, mode=0o600),

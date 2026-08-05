@@ -14,7 +14,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from openloop.agents.schema import Agent
 from openloop.memory import (
@@ -284,7 +284,9 @@ class Runtime:
                 ModelResponse(text="", model=model),
                 outcome="rate_limited",
             )
-            return _limited_response(decision.reason)
+            # BudgetDecision.reason is Optional; a denial normally carries one,
+            # and the fallback keeps a bare "None" out of the user-facing text.
+            return _limited_response(decision.reason or "rate limited")
         try:
             return await self._handle_workflow(task, instance_id)
         finally:
@@ -592,11 +594,15 @@ class Runtime:
 
             # (C) Execute this round's unresolved tool calls (budget can't abandon them).
             for tc in pending:
-                call_id = tc.get("id")
+                # Straight off the model's JSON, so unnarrowed on purpose.
+                call_id: Any = tc.get("id")
                 fn = tc.get("function", {})
                 call_name = fn.get("name", "")
                 action = by_name.get(call_name)
-                if action is None:
+                if action is None or self.tools is None:
+                    # The gateway check is unreachable in practice — by_name is
+                    # empty without one, so action is already None — but it puts
+                    # the invariant where the invoke below depends on it.
                     messages.append(
                         _tool_message(call_id, f"error: unknown tool {call_name}")
                     )

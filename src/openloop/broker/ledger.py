@@ -74,7 +74,10 @@ class BrokerLedger:
     @staticmethod
     def _prepare(command):
         if hasattr(command, "request_digest"):
-            command.request_digest
+            # Force the digest here, and discard it. request_digest canonicalizes
+            # the command to JSON before hashing, so a command that cannot be
+            # canonicalized raises at prepare time rather than at persist time.
+            _ = command.request_digest
         return command
 
     async def create_job(

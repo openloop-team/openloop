@@ -204,7 +204,10 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
         operation_id: UUID,
     ) -> SegmentCoordinatorProblem:
         try:
-            code = SegmentCoordinatorCode(generation.failure_reason_code)
+            # StrEnum's constructor is typed str, where the old (str, Enum) base
+            # accepted anything. An unset failure_reason_code lands in the same
+            # ValueError fallback it always did.
+            code = SegmentCoordinatorCode(generation.failure_reason_code or "")
         except (TypeError, ValueError):
             code = SegmentCoordinatorCode.INTERNAL
         return SegmentCoordinatorProblem(code, operation_id=operation_id)
@@ -468,6 +471,17 @@ class BrokerSegmentCoordinator(SegmentCoordinator):
             if self._now() >= generation.execution_lease_deadline:
                 raise RuntimeExpired("generation execution deadline elapsed")
             spec, secrets = self._derive_spec(owner, snapshot, generation)
+            if (
+                generation.durable_key_version is None
+                or generation.durable_digest is None
+            ):
+                # Both are Optional across a generation's life — unset before
+                # any durable state exists — but a generation being started
+                # here has them, and describe() cannot locate state without.
+                raise SegmentCoordinatorProblem(
+                    SegmentCoordinatorCode.STATE_CONFLICT,
+                    operation_id=ticket.operation_id,
+                )
             descriptor = self._durable.describe(
                 snapshot.job_id,
                 generation.durable_key_version,

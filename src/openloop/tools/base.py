@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from pydantic import BaseModel
+
 from openloop.approvals.store import ApprovalRequest
 
 
@@ -30,7 +32,8 @@ class ActionSpec:
 
     description: str
     parameters: dict
-    model: type | None = None
+    # type[BaseModel], not bare type: the gateway calls model_validate on it.
+    model: type[BaseModel] | None = None
     version: int | None = None
 
 

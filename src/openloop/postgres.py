@@ -17,6 +17,14 @@ class BorrowedPostgresStore:
     def __init__(self) -> None:
         self._pool: Any | None = None
 
+    async def setup(self, pool: Any) -> None:
+        """Bind *pool* and ensure this store's schema.
+
+        Declared here because the composition root calls it on every borrowed
+        store it settles, and knows them only by this base.
+        """
+        raise NotImplementedError
+
     @asynccontextmanager
     async def _setup_connection(self, pool: Any) -> AsyncIterator[Any]:
         """Bind *pool* while schema setup runs, clearing it on failure."""
@@ -50,7 +58,7 @@ async def create_pool(
     """Create an asyncpg pool without importing asyncpg at module import time."""
     import asyncpg
 
-    kwargs = {"min_size": min_size, "max_size": max_size}
+    kwargs: dict[str, Any] = {"min_size": min_size, "max_size": max_size}
     if password is not None:
         kwargs["password"] = password
     return await asyncpg.create_pool(dsn, **kwargs)

@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -45,6 +45,16 @@ class WorkspaceArtifactConflict(WorkspaceArtifactError):
 
 class WorkspaceArtifactVerificationError(WorkspaceArtifactError):
     """An artifact did not authenticate or match its expected identity."""
+
+
+def _untrusted(raw: dict, name: str) -> Any:
+    """Read one field of a decoded JSON document, unnarrowed.
+
+    The value goes straight into a frozen dataclass that validates its own
+    fields, so returning Any keeps the guarantee where it is actually made
+    instead of claiming a type the JSON has not been checked to hold.
+    """
+    return raw.get(name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,10 +170,13 @@ class WorkspaceArtifact:
             raise WorkspaceArtifactError("invalid artifact identity descriptor")
         return cls(
             identity=WorkspaceArtifactIdentity(
-                job_id=identity.get("job_id"),
-                conversation_id=identity.get("conversation_id"),
-                segment_id=identity.get("segment_id"),
-                kind=identity.get("kind"),
+                # Passed through unnarrowed: these come from an untrusted JSON
+                # document and WorkspaceArtifactIdentity's own validation is
+                # what rejects a missing or wrong-typed value.
+                job_id=_untrusted(identity, "job_id"),
+                conversation_id=_untrusted(identity, "conversation_id"),
+                segment_id=_untrusted(identity, "segment_id"),
+                kind=_untrusted(identity, "kind"),
             ),
             key=str(raw.get("key", "")),
             ciphertext_sha256=str(raw.get("ciphertext_sha256", "")),

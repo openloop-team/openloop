@@ -634,7 +634,9 @@ async def test_workflow_progress_is_surfaced_as_transient_status():
     assert worker_phrases  # progress was surfaced
     assert all(p.startswith("is ") and p.endswith("…") for p in worker_phrases)
     # Deduped: an unchanged phrase never re-hits the API back-to-back.
-    assert all(a != b for a, b in zip(phrases, phrases[1:]))
+    # strict=False is the point: this zips the list against itself offset by one
+    # to compare adjacent pairs, so the two sides are deliberately ragged.
+    assert all(a != b for a, b in zip(phrases, phrases[1:], strict=False))
     # It still delivers the final answer (the M0b model reply) after the ticks.
     assert delivery.finals[-1]["text"] == "Opened draft PR #1 🚀"
 

@@ -6,7 +6,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from uuid import UUID
 
 POSTGRES_BIGINT_MAX = 2**63 - 1
@@ -18,9 +18,13 @@ _BASE_COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _SIGNED_RECEIPT = re.compile(r"[A-Za-z0-9_.-]+\Z")
 
 
-class _StringEnum(str, Enum):
-    def __str__(self) -> str:
-        return self.value
+class _StringEnum(StrEnum):
+    """Kept as a named base so the enums below read as one family.
+
+    It carries no behavior of its own: StrEnum already renders as the member's
+    value under str(), f-strings, and %s, which is what the hand-written
+    __str__ here used to do.
+    """
 
 
 class JobState(_StringEnum):

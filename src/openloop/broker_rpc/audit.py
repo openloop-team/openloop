@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
@@ -20,13 +20,13 @@ from openloop.postgres import BorrowedPostgresStore
 from .identity import WorkloadIntent, WorkloadPrincipal
 
 
-class AuditDecision(str, Enum):
+class AuditDecision(StrEnum):
     ALLOWED = "allowed"
     DENIED = "denied"
     ERROR = "error"
 
 
-class AuditReason(str, Enum):
+class AuditReason(StrEnum):
     ALLOWED = "allowed"
     MISSING_INTENT = "missing_intent"
     NOT_FOUND_OR_UNAUTHORIZED = "not_found_or_unauthorized"

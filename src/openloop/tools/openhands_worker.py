@@ -46,7 +46,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from openloop.openhands.runtime_profile import (
     DEFAULT_OPENHANDS_SERVER_IMAGE,
@@ -110,13 +110,16 @@ _DEFAULT_SERVER_IMAGE = DEFAULT_OPENHANDS_SERVER_IMAGE
 # RemoteConversation.close() deliberately does NOT stop the workspace — the
 # DockerWorkspace owns its container (started at construction) and only its
 # own cleanup() reaps it. Injectable so tests never import the heavy SDK.
-ConversationFactory = Callable[[Path, list, str], "tuple[object, Callable[[], None]]"]
+# Any, not object, for the conversation: it is an SDK handle this module drives
+# by calling send_message/run/conversation_stats on it, and object would type it
+# as something with no attributes at all.
+ConversationFactory = Callable[[Path, list, str], "tuple[Any, Callable[[], None]]"]
 
 
 @dataclass(slots=True)
 class _ColdRuntime:
-    conversation: object
-    workspace: object
+    conversation: Any
+    workspace: Any
     cleanup: Callable[[], None]
 
 
@@ -1007,7 +1010,7 @@ class OpenHandsCodingWorker:
                 )
             # Constructing the adapter target starts the authenticated,
             # loopback-only agent-server over this job's isolated state mount.
-            target: object = self._docker_adapter.create(workspace, job_id)
+            target: Any = self._docker_adapter.create(workspace, job_id)
             cleanup = target.cleanup
         else:
             target = str(workspace)

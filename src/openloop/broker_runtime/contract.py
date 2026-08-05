@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
@@ -67,7 +67,7 @@ class RuntimeHealthFailure(RuntimeDriverError):
     """The generation failed its fixed relay health gate."""
 
 
-class RuntimeResourceState(str, Enum):
+class RuntimeResourceState(StrEnum):
     ABSENT = "absent"
     CREATED = "created"
     RUNNING = "running"

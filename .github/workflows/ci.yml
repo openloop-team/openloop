@@ -10,6 +10,32 @@ permissions:
   contents: read
 
 jobs:
+  quality:
+    name: Lint, format, types
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up mise
+        uses: jdx/mise-action@v2
+
+      - name: Install dependencies
+        run: mise run install
+
+      # Three separate steps, not one `mise run check`: when this job fails, the
+      # step name alone says whether it was a rule, formatting, or a type.
+      - name: Lint
+        run: mise run lint
+
+      - name: Check formatting
+        run: mise run format-check
+
+      - name: Type-check
+        run: mise run typecheck
+
   test:
     name: Tests
     runs-on: ubuntu-latest

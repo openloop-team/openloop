@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class Gate(str, Enum):
+class Gate(StrEnum):
     """Where a profile's approval boundary sits. A profile's value is a floor;
     agent config may add gating, never remove it."""
 

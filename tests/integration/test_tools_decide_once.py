@@ -347,7 +347,7 @@ async def test_duplicate_click_decided_row_connector_absent_reports_decision():
 async def test_deny_direct_request_never_cancels_colliding_workflow():
     gw, engine, _, orchestrator = _workflow_gateway()
     # Park a real workflow named "live".
-    live = await _seed_workflow_request(gw, ["@a"], job_id="live")
+    _live = await _seed_workflow_request(gw, ["@a"], job_id="live")
     # A direct request whose model-supplied args carry job_id="live".
     direct = await _seed_direct_request(
         gw, ["@a"], args={"repo": "acme/x", "title": "T", "job_id": "live"}
@@ -533,7 +533,7 @@ async def test_reconcile_poison_head_pagination_heals_younger_rows():
             id=f"poison{i}",
             created_at=base + timedelta(minutes=i),
         )
-    healable = await _seed_direct_request(
+    _healable = await _seed_direct_request(
         gw,
         ["@a"],
         status="approved",
@@ -549,14 +549,14 @@ async def test_reconcile_poison_head_pagination_heals_younger_rows():
 
 async def test_reconcile_per_row_isolation_continues_past_raise():
     gw, engine, github, orchestrator = _workflow_gateway()
-    good1 = await _seed_direct_request(
+    _good1 = await _seed_direct_request(
         gw, ["@a"], status="approved", decided_by="@a", id="g1"
     )
     # A row whose classification will raise inside _reconcile_decision.
     boom = await _seed_workflow_request(
         gw, ["@a"], job_id="boom", status="approved", decided_by="@a"
     )
-    good2 = await _seed_direct_request(
+    _good2 = await _seed_direct_request(
         gw, ["@a"], status="approved", decided_by="@a", id="g2"
     )
 

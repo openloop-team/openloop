@@ -156,7 +156,7 @@ async def run_broker(
                 log.warning("broker startup: DEVELOPMENT in-memory state enabled")
             else:
                 log.info("broker startup: opening Postgres pool")
-                pool_kwargs = {
+                pool_kwargs: dict[str, Any] = {
                     "min_size": settings.postgres_pool_min_size,
                     "max_size": settings.postgres_pool_max_size,
                 }
@@ -176,6 +176,20 @@ async def run_broker(
             log.info(
                 "broker startup: building receipt locator and lifecycle reconciler"
             )
+            # External mode is the only mode this entrypoint runs, and
+            # BrokerConfig already requires all three there — coprocess mode is
+            # what leaves them None. Restated here because the config type keeps
+            # them Optional across both modes, and a silent None would surface
+            # much later as an unverifiable receipt path.
+            if (
+                config.checkpoint_receipt_root is None
+                or config.expected_app_uid is None
+                or config.shared_data_gid is None
+            ):
+                raise ValueError(
+                    "the broker service requires broker_checkpoint_receipt_root, "
+                    "broker_expected_app_uid, and broker_shared_data_gid"
+                )
             locator = ReadOnlyCheckpointReceiptLocator(
                 root=config.checkpoint_receipt_root,
                 verifier=service.receipt_verifier,

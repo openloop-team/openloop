@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from typing import Any
 
 from openloop.deliverable import Artifact, Deliverable, Prose
 from openloop.runtime import Runtime, Task
@@ -117,6 +118,7 @@ def _deliverable_from_outcome_data(data) -> Deliverable | None:
             return None
         from openloop.tasks.outcomes import Diagnosis, EvidenceBundle, to_deliverable
 
+        built: Diagnosis | EvidenceBundle
         if kind == "diagnosis":
             built = Diagnosis(text=outcome["text"])
         else:
@@ -223,7 +225,13 @@ class SessionRunner:
         twice). A session still mid-turn is left for the startup reconciler
         (Slice 6) — this inline retry path does not replay the model call.
         """
-        existing = await self.sessions.get_by_event(target.event_id)
+        # A target with no event id has nothing the unique index could match, so
+        # the lookup is skipped rather than issued with None.
+        existing = (
+            await self.sessions.get_by_event(target.event_id)
+            if target.event_id is not None
+            else None
+        )
         if existing is not None:
             return await self._ensure_delivered(existing)
 
@@ -253,7 +261,11 @@ class SessionRunner:
         except Exception:  # noqa: BLE001 — a concurrent duplicate won the race
             # The event_id unique index rejected this insert: another delivery of
             # the same event created the session first. Defer to the winner.
-            racer = await self.sessions.get_by_event(target.event_id)
+            racer = (
+                await self.sessions.get_by_event(target.event_id)
+                if target.event_id is not None
+                else None
+            )
             if racer is not None:
                 return await self._ensure_delivered(racer)
             raise
@@ -482,8 +494,10 @@ class SessionRunner:
             for s in await self.sessions.thread_history(
                 session.target, exclude_id=session.id, limit=HISTORY_TURN_LIMIT
             ):
-                turns.append({"role": "user", "content": s.request_text})
-                turns.append({"role": "assistant", "content": s.result_summary})
+                # Both are unset for a turn that never recorded them; empty
+                # strings keep the transcript shape the model expects.
+                turns.append({"role": "user", "content": s.request_text or ""})
+                turns.append({"role": "assistant", "content": s.result_summary or ""})
         if turns:
             task.history = turns
 
@@ -717,7 +731,11 @@ class SessionRunner:
     ) -> str:
         """Authorize, durably record, and asynchronously drive a Slack action."""
         from openloop.tasks import WorkspaceTask
-        from openloop.tools.openhands_resume import OpenHandsResumeState, ResumeDecision
+        from openloop.tools.openhands_resume import (
+            DecisionKind,
+            OpenHandsResumeState,
+            ResumeDecision,
+        )
 
         engine = getattr(self.runtime, "engine", None)
         if engine is None:
@@ -737,7 +755,9 @@ class SessionRunner:
         # there by the same compat shim workflows/coding_worker.py relies on.
         task = WorkspaceTask.from_dict(instance.state or {})
         raw_worker = task.profile_state.get("code", {}).get("worker_state") or {}
-        raw_resume = raw_worker.get("openhands_resume")
+        # Decoded persisted state, so unnarrowed: from_dict below validates it,
+        # and the except returns the user-facing error for anything malformed.
+        raw_resume: Any = raw_worker.get("openhands_resume")
         try:
             resume = OpenHandsResumeState.from_dict(raw_resume)
         except Exception:
@@ -746,8 +766,19 @@ class SessionRunner:
             return "⛔ That decision is stale."
         if actor_id != resume.slack_requester_id:
             return "⛔ Only the user who approved this task may decide."
+        # Written as a branch rather than a membership test so the Literal the
+        # ResumeDecision field wants is produced here. ResumeDecision would
+        # reject an unknown kind too, but by raising out of an action handler;
+        # the check belongs where there is still a reply to return.
+        decision_kind: DecisionKind
+        if kind == "accept":
+            decision_kind = "accept"
+        elif kind == "reject":
+            decision_kind = "reject"
+        else:
+            return "⛔ That decision is not one this task understands."
         decision = ResumeDecision(
-            kind=kind,
+            kind=decision_kind,
             decision_id=decision_id,
             event_id=event_id,
             actor_id=actor_id,

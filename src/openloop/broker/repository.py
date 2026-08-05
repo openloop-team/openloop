@@ -89,9 +89,13 @@ def _canonical_value(value: object) -> object:
 def canonical_request_json(command: _DigestCommand) -> str:
     if not isinstance(command, _DigestCommand):
         raise TypeError("command does not support canonical request digests")
+    # Every _DigestCommand subclass is a dataclass, but the base cannot say so
+    # — dataclass-ness is not inherited in the type system — and fields() only
+    # accepts a declared dataclass.
+    instance: Any = command
     request = {
         item.name: _canonical_value(getattr(command, item.name))
-        for item in fields(command)
+        for item in fields(instance)
         if item.metadata.get("digest", True)
         and not (
             item.metadata.get("omit_none", False)

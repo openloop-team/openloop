@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
 from openloop.agents.schema import Agent
 from openloop.usage.budget import budget_scope_key, check_budget
@@ -153,7 +154,9 @@ class WorkerSpendLedger:
         approval/approver/session here would lose them permanently.
         """
         agent = self._agent_for(agent_name, agent_id)
-        envelope = dict(
+        # Annotated because it is splatted into _record below: mypy cannot match
+        # a dict[str, str | None] against that signature's individual parameters.
+        envelope: dict[str, Any] = dict(
             job_id=job_id,
             approval_id=approval_id,
             approver=approver,

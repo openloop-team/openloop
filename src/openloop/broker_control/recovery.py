@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, StrEnum
 from uuid import UUID
 
 from openloop.broker.errors import BrokerError
@@ -31,15 +31,12 @@ from .receipts import (
 )
 
 
-class RecoveryOutcome(str, Enum):
+class RecoveryOutcome(StrEnum):
     REPAIRED = "repaired"
     DEFERRED = "deferred"
     STALE = "stale"
     FAILED_CLOSED = "failed_closed"
     ERROR = "error"
-
-    def __str__(self) -> str:
-        return self.value
 
 
 class _ReceiptLookupStatus(Enum):

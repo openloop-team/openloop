@@ -260,6 +260,11 @@ def _cmd_broker_keys(args: argparse.Namespace) -> int:
     # Derive everything before printing, so a malformed value can't leave a
     # half-written map that looks paste-ready.
     try:
+        if settings.broker_identity_private_key is None:
+            # Raised as ValueError so the handler below renders it as a CLI
+            # error; unset, it would otherwise reach the decoder as None and
+            # fail with a traceback instead.
+            raise ValueError("broker_identity_private_key is not set")
         identity = {
             settings.broker_identity_key_id: public_of(
                 _decode_identity_seed(settings.broker_identity_private_key)

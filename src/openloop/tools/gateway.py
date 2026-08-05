@@ -388,6 +388,22 @@ class ToolGateway:
             return inv
 
         tool, permission = self._resolve_stored_tool(claimed.tool, claimed.permission)
+        if tool is None:
+            # kind is "unknown" here: _classify reports that precisely when this
+            # lookup misses, which happens when the connector was disabled by
+            # config or renamed out from under a durable row. Reaching execute
+            # with no tool would raise AttributeError on the None.
+            logger.warning(
+                "approval %s names tool %r, which is not registered on this "
+                "gateway; reporting instead of executing",
+                request_id,
+                claimed.tool,
+            )
+            return Invocation(
+                status="forbidden",
+                message=f"tool {claimed.tool!r} is not registered",
+                decided_by=claimed.decided_by,
+            )
         result = await tool.execute(
             permission, _args_for_execute(tool, claimed, permission)
         )
@@ -582,18 +598,24 @@ class ToolGateway:
         The event payload's approver is always the row's ``decided_by``.
         """
         tool, _ = self._resolve_stored_tool(request.tool, request.permission)
+        engine = self.engine
+        # `workflow` is an optional connector attribute, not part of the Tool
+        # protocol, so it is read the way _approve_effect_unavailable reads it.
+        workflow = getattr(tool, "workflow", None)
+        # All three are what that gate checks, and the docstring above requires
+        # every caller to run it first. Asserting states the contract in the
+        # place that depends on it; without the gate these were AttributeErrors.
+        assert tool is not None and engine is not None and workflow is not None
         instance_id = request.workflow_instance_id or _instance_id(request)
-        await self.engine.start(
-            tool.workflow, instance_id, _workflow_initial_state(request)
-        )
-        instance = await self.engine.send_event(
+        await engine.start(workflow, instance_id, _workflow_initial_state(request))
+        instance = await engine.send_event(
             instance_id,
             "await_approval",
             {"approver": request.decided_by, "approval_id": request.id},
             drive=False,
         )
         if instance is not None and instance.status not in WORKFLOW_TERMINAL:
-            self.engine.drive_background(instance_id)
+            engine.drive_background(instance_id)
         await self._mark_reconciled_safe(request.id)
         return instance
 
@@ -619,7 +641,16 @@ class ToolGateway:
                 return False
             # A None return means already terminal or never created — nothing
             # can revive a denied row, so the effect is ensured either way.
-            await self.engine.cancel(instance_id, "approval denied")
+            #
+            # instance_id is None only on a legacy row: invoke() stamps
+            # workflow_backed and workflow_instance_id together, and
+            # _instance_id() never yields an empty one. A row naming no
+            # instance is the "never created" case above, so it retires here.
+            # Deferring instead would be permanent — the column never becomes
+            # non-null, so every later sweep would re-read a row it can never
+            # retire.
+            if instance_id is not None:
+                await self.engine.cancel(instance_id, "approval denied")
             await self._mark_reconciled_safe(request.id)
             return True
         if kind == "direct":

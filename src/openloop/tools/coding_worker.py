@@ -47,10 +47,10 @@ import logging
 import shutil
 import tempfile
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -83,7 +83,11 @@ if TYPE_CHECKING:
 # Persist-after-each-step callback invoked after each completed step so a crash
 # leaves an accurate mid-phase record (completed_steps + state_json), not just a
 # status. The orchestrator owns the git-side steps; the worker reports its own.
-StepCallback = Callable[["WorkerState"], Awaitable[None]]
+# Coroutine, not Awaitable: the OpenHands worker hands these to
+# asyncio.run_coroutine_threadsafe, which rejects awaitables that are not
+# coroutines at runtime. Every implementation is an `async def` already, so this
+# narrows the declared contract to what the code has always required.
+StepCallback = Callable[["WorkerState"], Coroutine[Any, Any, None]]
 
 logger = logging.getLogger(__name__)
 
@@ -997,11 +1001,16 @@ class CodingWorkerConnector:
                 },
             )
         except Exception as exc:  # noqa: BLE001
-            state = locals().get("state")
-            task = locals().get("task")
-            if isinstance(state, WorkerState) and isinstance(task, WorkspaceTask):
-                await self._save(task, state, "failed", error=str(exc))
-                return _failed(job_id, state, "failed", exc)
+            # Rebound under new names: `state` and `task` are already typed in
+            # this scope, and locals() hands back Any | None for whichever of
+            # them the try block managed to reach before raising.
+            failed_state = locals().get("state")
+            failed_task = locals().get("task")
+            if isinstance(failed_state, WorkerState) and isinstance(
+                failed_task, WorkspaceTask
+            ):
+                await self._save(failed_task, failed_state, "failed", error=str(exc))
+                return _failed(job_id, failed_state, "failed", exc)
             return ToolResult(
                 ok=False, summary=f"coding worker job {job_id} failed: {exc}"
             )
@@ -1209,7 +1218,11 @@ class CodingWorkerConnector:
 
 @runtime_checkable
 class _Completer(Protocol):
-    async def complete(self, model: str, messages: list[dict], **kwargs): ...
+    # Two positional arguments and nothing else — that is the whole call shape
+    # used below. A **kwargs here would oblige every implementation to accept
+    # arbitrary keywords, which ModelGateway's keyword-only signature does not,
+    # so the protocol would exclude its only real implementation.
+    async def complete(self, model: str, messages: list[dict]): ...
 
 
 class GitWorkspaceOrchestrator:

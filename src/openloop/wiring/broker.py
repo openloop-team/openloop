@@ -600,6 +600,11 @@ async def build_broker_client(
 
     # --- identity issuer (client side holds the PRIVATE key) -------------
     if identity_private_key is None:
+        if config.identity_private_key is None:
+            raise ValueError(
+                "the broker client needs an identity private key: set "
+                "broker_identity_private_key or pass identity_private_key"
+            )
         identity_private_key = _decode_identity_seed(config.identity_private_key)
     if identity_key_id is None:
         identity_key_id = config.identity_key_id

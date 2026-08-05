@@ -6,6 +6,7 @@ import json
 import struct
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 from openloop.broker.models import (
@@ -38,8 +39,10 @@ from .models import (
     QuiesceSegmentResult,
     ReleaseSegmentPayload,
     ReleaseSegmentResult,
+    RpcPayload,
     RpcRequest,
     RpcResponse,
+    RpcResult,
     RunningGenerationAccess,
     StartSegmentPayload,
     StartSegmentResult,
@@ -255,6 +258,10 @@ def decode_request(frame: bytes) -> RpcRequest:
             if value["job_capability"] is None
             else JobCapability(_text(value["job_capability"]))
         )
+        # One variable per branch, each holding a different member of the union
+        # RpcRequest.payload accepts; without this the first branch would pin it
+        # to CreateJobPayload.
+        payload: RpcPayload
         if method is WorkloadIntent.CREATE_JOB:
             payload_value = _exact(value["payload"], {"idempotency_key"})
             payload = CreateJobPayload(_text(payload_value["idempotency_key"]))
@@ -643,8 +650,10 @@ def _decode_checkpoint_access(value: object) -> CheckpointGenerationAccess:
 
 
 def _response_dict(response: RpcResponse) -> dict[str, object]:
-    result = None
-    error = None
+    # Heterogeneous by construction: each branch below emits the shape for one
+    # result type, mixing strings, bools, and nested dicts.
+    result: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
     if isinstance(response.result, CreateJobResult):
         result = {
             "type": WorkloadIntent.CREATE_JOB.value,
@@ -728,6 +737,9 @@ def decode_response(frame: bytes) -> RpcResponse:
             if not isinstance(result, dict):
                 raise RpcProtocolProblem()
             result_type = result.get("type")
+            # As in _decode_request: the branches below each build a different
+            # member of the RpcResult union.
+            decoded: RpcResult
             if result_type == WorkloadIntent.CREATE_JOB.value:
                 item = _exact(result, {"type", "ticket", "capability"})
                 decoded = CreateJobResult(
