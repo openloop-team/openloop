@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
-import logging
 from uuid import UUID
 
 from openloop.broker.errors import (
@@ -64,7 +64,6 @@ from .secrets import (
     RuntimeSecretAuthority,
     RuntimeSecretProblem,
 )
-
 
 log = logging.getLogger("openloop.broker")
 

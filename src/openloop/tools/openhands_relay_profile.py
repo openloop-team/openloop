@@ -14,7 +14,6 @@ from openloop.tools.openhands_relay_client import (
     RelayMode,
 )
 
-
 DEFAULT_HAPROXY_RELAY_IMAGE = (
     "haproxy@sha256:9f196dc9ec57310a1a430939221b33b36c14113497aca7ead9b13f4d5c2d37f5"
 )

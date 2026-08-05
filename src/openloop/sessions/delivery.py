@@ -60,7 +60,7 @@ class SurfaceDelivery(Protocol):
         target: SurfaceTarget,
         message_id: str,
         text: str,
-        requests: "list[ApprovalRequest]",
+        requests: list[ApprovalRequest],
     ) -> None:
         """Update an existing approval card with buttons or resolution text.
 
@@ -74,7 +74,7 @@ class SurfaceDelivery(Protocol):
         self,
         target: SurfaceTarget,
         text: str,
-        requests: "list[ApprovalRequest]",
+        requests: list[ApprovalRequest],
         *,
         key: str | None = None,
         recover: bool = False,
@@ -108,7 +108,7 @@ class SurfaceDelivery(Protocol):
     ) -> None: ...
 
     async def post_final(
-        self, target: SurfaceTarget, result: "Deliverable | str", *,
+        self, target: SurfaceTarget, result: Deliverable | str, *,
         key: str | None = None, recover: bool = False,
     ) -> str:
         """Render and post the final answer; return its provider id.
@@ -410,7 +410,7 @@ class SlackSurfaceDelivery:
     async def post_final(
         self,
         target: SurfaceTarget,
-        result: "Deliverable | str",
+        result: Deliverable | str,
         *,
         key: str | None = None,
         recover: bool = False,

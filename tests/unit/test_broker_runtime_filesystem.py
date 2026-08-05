@@ -1,7 +1,7 @@
 import os
 import socket
 import stat
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -26,8 +26,7 @@ from openloop.broker_runtime.filesystem import (
 )
 from openloop.tools.openhands_relay import RelayMode
 
-
-NOW = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
 JOB_ID = UUID("22222222-2222-4222-8222-222222222222")
 
 

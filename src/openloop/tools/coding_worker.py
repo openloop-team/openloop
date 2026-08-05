@@ -228,7 +228,7 @@ class WorkerState:
         return data
 
     @classmethod
-    def from_dict(cls, data: dict) -> "WorkerState":
+    def from_dict(cls, data: dict) -> WorkerState:
         fields = {
             "job_id", "repo", "instruction", "base", "branch",
             "completed_steps", "title", "body", "agent", "agent_id",
@@ -273,7 +273,7 @@ class WorkerEdit:
     completion_tokens: int = 0
     # OpenHands captures a final authenticated delta before its live container
     # disappears. Other worker backends leave this unset.
-    workspace_artifact: "WorkspaceArtifactRef | None" = None
+    workspace_artifact: WorkspaceArtifactRef | None = None
 
 
 @runtime_checkable
@@ -318,8 +318,8 @@ class AttemptRunner(Protocol):
     async def provision_readonly(self, repo: str, ref: str | None = None) -> Path: ...
 
     async def run_investigation(
-        self, task: "WorkspaceTask", investigator: RepoInvestigator
-    ) -> tuple["EvidenceBundle", "ModelResponse"]: ...
+        self, task: WorkspaceTask, investigator: RepoInvestigator
+    ) -> tuple[EvidenceBundle, ModelResponse]: ...
 
 
 def _branch_for(job_id: str) -> str:
@@ -463,7 +463,7 @@ def _pr_body(body: str, job_id: str) -> str:
     return f"{body}\n\n{footer}" if body else footer
 
 
-def _pull_request_outcome(state: "WorkerState", pull: dict, summary: str) -> dict:
+def _pull_request_outcome(state: WorkerState, pull: dict, summary: str) -> dict:
     """Build a typed PullRequest outcome for the result data."""
     return {
         "kind": "pull_request",
@@ -498,8 +498,8 @@ class CodingWorkerConnector:
         self,
         orchestrator: AttemptRunner,
         github: GitHubClient,
-        checkpoints: "CheckpointStore | None" = None,
-        investigator: "RepoInvestigator | None" = None,
+        checkpoints: CheckpointStore | None = None,
+        investigator: RepoInvestigator | None = None,
     ) -> None:
         # The orchestrator owns provision → worker → commit → push (and the git
         # credential); this connector never sees a worker that could push.
@@ -1243,8 +1243,8 @@ class GitWorkspaceOrchestrator:
         scope: CredentialScope | None = None,
         remote_base: str = "https://github.com",
         workspace_root: Path | None = None,
-        ledger: "WorkerSpendLedger | None" = None,
-        warm_pool: "WarmWorkspacePool | None" = None,
+        ledger: WorkerSpendLedger | None = None,
+        warm_pool: WarmWorkspacePool | None = None,
     ) -> None:
         self.worker = worker
         self._credentials = credentials
@@ -1500,8 +1500,8 @@ class GitWorkspaceOrchestrator:
         return workspace
 
     async def run_investigation(
-        self, task: "WorkspaceTask", investigator: RepoInvestigator
-    ) -> tuple["EvidenceBundle", "ModelResponse"]:
+        self, task: WorkspaceTask, investigator: RepoInvestigator
+    ) -> tuple[EvidenceBundle, ModelResponse]:
         """Run one read-only investigation with the same spend bracket
         ``run_attempt`` gives a coding-worker attempt (contract-convergence
         gap #4: investigation spend was untracked and uncapped).
@@ -1713,7 +1713,7 @@ class GitWorkspaceOrchestrator:
             shutil.rmtree(workspace, ignore_errors=True)
 
     async def _restore_artifact(
-        self, workspace: Path, artifact_ref: "WorkspaceArtifactRef"
+        self, workspace: Path, artifact_ref: WorkspaceArtifactRef
     ):
         store = getattr(self.worker, "artifact_store", None)
         if store is None:
@@ -2149,7 +2149,7 @@ class GitWorkspaceOrchestrator:
         *args: str,
         cwd: Path | None = None,
         stdin: str | None = None,
-        redact: "str | tuple[str, ...] | None" = None,
+        redact: str | tuple[str, ...] | None = None,
     ) -> str:
         return await self._run("git", *args, cwd=cwd, stdin=stdin, redact=redact)
 
@@ -2158,7 +2158,7 @@ class GitWorkspaceOrchestrator:
         *cmd: str,
         cwd: Path | None = None,
         stdin: str | None = None,
-        redact: "str | tuple[str, ...] | None" = None,
+        redact: str | tuple[str, ...] | None = None,
     ) -> str:
         return await _run_process(*cmd, cwd=cwd, stdin=stdin, redact=redact)
 
@@ -2187,7 +2187,7 @@ class BuiltinCodingWorker:
         model: str,
         gateway: _Completer | None = None,
         *,
-        sandbox: "Sandbox | None" = None,
+        sandbox: Sandbox | None = None,
         max_context_bytes: int = 60_000,
     ) -> None:
         from openloop.sandbox import HostSandbox
@@ -2281,7 +2281,7 @@ async def _run_process(
     *cmd: str,
     cwd: Path | None = None,
     stdin: str | None = None,
-    redact: "str | tuple[str, ...] | None" = None,
+    redact: str | tuple[str, ...] | None = None,
 ) -> str:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -2322,7 +2322,7 @@ def _auth_secrets(token: str) -> tuple[str, str]:
     return (token, _basic_auth(token))
 
 
-def _redact(text: str, secrets: "str | tuple[str, ...] | None") -> str:
+def _redact(text: str, secrets: str | tuple[str, ...] | None) -> str:
     if isinstance(secrets, str):
         secrets = (secrets,)
     for secret in secrets or ():

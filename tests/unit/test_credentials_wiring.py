@@ -5,10 +5,10 @@ import types
 from uuid import uuid4
 
 from openloop.agents.schema import Agent
-from openloop.wiring.builders import build_github_credentials, build_tool_gateway
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.credentials import EnvCredentialResolver, GitHubAppResolver
+from openloop.wiring.builders import build_github_credentials, build_tool_gateway
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from tests.support.settings import IsolatedSettings as Settings
 

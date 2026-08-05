@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import time
 from collections import OrderedDict
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass
-import math
-import time
 
 
 def _positive_int(name: str, value: object, *, maximum: int) -> int:

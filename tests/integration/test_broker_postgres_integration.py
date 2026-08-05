@@ -36,8 +36,7 @@ from tests.support.broker_repository_contract import (
     quiesce_generation,
     receipt_for,
 )
-from tests.support.postgres import require_postgres, postgres_dsn
-
+from tests.support.postgres import postgres_dsn, require_postgres
 
 DSN = postgres_dsn()
 

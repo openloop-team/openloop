@@ -1,19 +1,19 @@
 """Tests for the usage audit trail, budget enforcement, and throughput limits."""
 
-from pathlib import Path
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from openloop.agents import load_agent
 from openloop.agents.schema import Agent
 from openloop.runtime import Runtime, Task
+from openloop.testing import FakeGateway, in_memory_workflow_engine
 from openloop.usage import (
     InMemoryUsageStore,
     UsageRecord,
     budget_scope_key,
     check_budget,
 )
-from openloop.testing import FakeGateway, in_memory_workflow_engine
 from tests.support.agents import make_agent
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
@@ -49,7 +49,7 @@ def test_scope_key_survives_a_rename():
 
 async def test_monthly_total_sums_current_month_only():
     store = InMemoryUsageStore()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     last_month = (now.replace(day=1) - timedelta(days=2))
     await store.record(UsageRecord(scope_key="s", workspace="w", agent="a",
                                    model="m", cost_usd=3.0))

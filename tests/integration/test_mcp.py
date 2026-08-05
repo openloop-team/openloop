@@ -5,13 +5,13 @@ from uuid import uuid4
 from openloop.agents.schema import Agent
 from openloop.models.gateway import ModelResponse
 from openloop.runtime import Runtime, Task
-from openloop.tools import ToolGateway
-from openloop.tools.mcp import MCPConnector, MCPToolInfo
 from openloop.testing import (
     ScriptedGateway,
     in_memory_workflow_engine,
     tool_call_response,
 )
+from openloop.tools import ToolGateway
+from openloop.tools.mcp import MCPConnector, MCPToolInfo
 
 
 class FakeMCPClient:

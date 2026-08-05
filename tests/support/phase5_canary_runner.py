@@ -17,7 +17,7 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from openhands.sdk import Agent, LLM, Tool
+from openhands.sdk import LLM, Agent, Tool
 from openhands.tools.file_editor import FileEditorTool
 from openhands.tools.terminal import TerminalTool
 
@@ -27,7 +27,6 @@ from openloop.tools.openhands_resume import ResumeDecision, WorkerPaused
 from openloop.wiring.broker import _derive_receipt_key, build_broker
 from openloop.wiring.builders import build_coding_worker
 from tests.support.processes import cleanup_process
-
 
 _BROKER_TOPOLOGIES = {"subprocess", "managed"}
 _IDENTITY_SEED = bytes(range(32))

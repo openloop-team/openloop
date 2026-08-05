@@ -11,11 +11,11 @@ the gateway's approval hop on both paths.
 """
 
 from pathlib import Path
-import pytest
 
 from openloop.agents import load_agent
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.credentials import EnvCredentialResolver
+from openloop.testing import FakeCodingWorker, FakeGitHub
 from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import (
     CodingWorkerConnector,
@@ -30,7 +30,6 @@ from openloop.usage import (
 )
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from openloop.workflows.coding_worker import build_coding_worker_workflow
-from openloop.testing import FakeCodingWorker, FakeGitHub
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 

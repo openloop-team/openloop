@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping
-from dataclasses import dataclass, field
 import hmac as stdlib_hmac
 import os
 import re
 import struct
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from uuid import UUID
 
 from cryptography.hazmat.primitives import hashes, hmac
@@ -24,7 +24,6 @@ from openloop.broker.models import (
 )
 
 from .keys import KeyFileProblem, load_private_bytes
-
 
 _CAPABILITY_TEXT = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 _ROOT_TEXT = re.compile(rb"[A-Za-z0-9_-]{43}\n?\Z")
@@ -102,7 +101,7 @@ class CapabilityRootRing:
         *,
         current_version: str,
         expected_uid: int | None = None,
-    ) -> "CapabilityRootRing":
+    ) -> CapabilityRootRing:
         try:
             roots = {
                 version: _encode_root(

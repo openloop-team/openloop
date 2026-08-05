@@ -1,6 +1,5 @@
 import asyncio
 import os
-from pathlib import Path
 import struct
 from uuid import UUID
 
@@ -19,9 +18,9 @@ from openloop.broker_rpc.errors import RpcErrorCode
 from openloop.broker_rpc.identity import WorkloadIntent
 from openloop.broker_rpc.limits import BrokerRpcLimits
 from openloop.broker_rpc.models import (
+    RPC_VERSION,
     CreateJobPayload,
     CreateJobResult,
-    RPC_VERSION,
     RpcRequest,
 )
 from openloop.broker_rpc.peer import StaticPeerCredentialProvider
@@ -31,7 +30,6 @@ from openloop.broker_rpc.server import (
 )
 from tests.support.broker_repository_contract import SequenceIds
 from tests.support.broker_rpc import broker_rpc_test_fixture
-
 
 OWNER = BrokerOwner("tenant-a", "workload-a")
 OTHER_OWNER = BrokerOwner("tenant-b", "workload-b")

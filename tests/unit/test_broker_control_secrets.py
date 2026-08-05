@@ -9,7 +9,6 @@ from openloop.broker_control.secrets import (
     RuntimeSecretRootRing,
 )
 
-
 OWNER = BrokerOwner("tenant-a", "workload-a")
 JOB_ID = UUID("00000000-0000-4000-8000-000000000301")
 CONVERSATION_ID = UUID("00000000-0000-4000-8000-000000000302")

@@ -6,12 +6,12 @@ import pytest
 
 from openloop.credentials import EnvCredentialResolver
 from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
+from openloop.testing import FakeCodingWorker, FakeGitHub, FakeWorkerOrchestrator
 from openloop.tools.coding_worker import (
     STEPS,
-    CodingWorkerConnector,
     BuiltinCodingWorker,
+    CodingWorkerConnector,
     GitWorkspaceOrchestrator,
-    WorkerOutcome,
     WorkerState,
     _basic_auth,
     _parse_generation,
@@ -27,7 +27,6 @@ from openloop.tools.openhands_resume import (
     WorkerPaused,
     WorkspaceArtifactRef,
 )
-from openloop.testing import FakeCodingWorker, FakeGitHub, FakeWorkerOrchestrator
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 

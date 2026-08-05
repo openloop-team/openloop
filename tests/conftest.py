@@ -4,8 +4,8 @@ import shutil
 
 import pytest
 
-from tests.support.socket_paths import create_short_socket_root
 from tests.support.settings import IsolatedSettings, build_test_settings
+from tests.support.socket_paths import create_short_socket_root
 
 
 @pytest.fixture

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 import json
-from pathlib import Path
 import struct
-from typing import Any
+from datetime import datetime
+from pathlib import Path
 from uuid import UUID
 
 from openloop.broker.models import (
@@ -27,25 +26,24 @@ from .capability import JobCapability
 from .errors import RpcErrorCode, RpcFailure, RpcProtocolProblem
 from .identity import WorkloadIdentityToken, WorkloadIntent
 from .models import (
+    RPC_VERSION,
+    CheckpointGenerationAccess,
     CreateJobPayload,
     CreateJobResult,
-    CheckpointGenerationAccess,
     FinalizeJobPayload,
     FinalizeJobResult,
     InspectJobPayload,
     InspectJobResult,
-    RPC_VERSION,
     QuiesceSegmentPayload,
     QuiesceSegmentResult,
     ReleaseSegmentPayload,
     ReleaseSegmentResult,
-    RunningGenerationAccess,
     RpcRequest,
     RpcResponse,
+    RunningGenerationAccess,
     StartSegmentPayload,
     StartSegmentResult,
 )
-
 
 MAX_RPC_FRAME_BYTES = 32 * 1024
 MAX_RPC_JSON_DEPTH = 8

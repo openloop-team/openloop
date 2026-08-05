@@ -51,7 +51,6 @@ from .models import (
     StartSegmentResult,
 )
 
-
 _COORDINATOR_FAILURES = {
     SegmentCoordinatorCode.IDEMPOTENCY_CONFLICT: (
         RpcErrorCode.IDEMPOTENCY_CONFLICT,

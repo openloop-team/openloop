@@ -5,23 +5,22 @@ from __future__ import annotations
 import base64
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import time
 import uuid
+from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import yaml
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from tests.support.fake_openai import fake_openai
+from openloop.wiring.broker import _derive_receipt_key
 from tests.integration.test_openhands_broker_canary_live import (
     run_phase5_checkpoint_park_resume_finalize_real_docker as _run_phase5_canary,
 )
-from openloop.wiring.broker import _derive_receipt_key
-
+from tests.support.fake_openai import fake_openai
 
 pytestmark = [
     pytest.mark.integration,

@@ -6,11 +6,11 @@ agentic backend — no fail-closed spend cap) disables the coding worker loudly
 instead of degrading to a different worker or a weaker boundary.
 """
 
-from pathlib import Path
 import base64
+from pathlib import Path
+
 import pytest
 
-from openloop.wiring import builders as appmod
 from openloop.agents import load_agent
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
@@ -24,6 +24,7 @@ from openloop.tools.openhands_worker import (
     OpenHandsUnavailable,
 )
 from openloop.usage import InMemoryUsageStore
+from openloop.wiring import builders as appmod
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from tests.support.settings import IsolatedSettings as Settings
 

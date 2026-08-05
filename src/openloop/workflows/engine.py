@@ -105,7 +105,7 @@ class Workflow:
     # Optional: derive the instance's step list from its immutable initial
     # state (e.g. profile). Deterministic across re-drives, so the engine's
     # name-based completed-step skipping is unchanged.
-    steps_resolver: "Callable[[dict], list[Step]] | None" = None
+    steps_resolver: Callable[[dict], list[Step]] | None = None
 
     def steps_for(self, instance) -> list[Step]:
         if self.steps_resolver is not None:

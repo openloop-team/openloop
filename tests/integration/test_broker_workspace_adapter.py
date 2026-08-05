@@ -12,7 +12,6 @@ import io
 import subprocess
 import uuid
 from contextlib import AsyncExitStack
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -20,25 +19,27 @@ import pytest
 from openloop.broker.models import JobState, VerifiedCheckpointReceipt
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 from openloop.openhands.workspace_protocol import ArchiveStreamResult
-from openloop.tools.openhands_broker_workspace import (
-    BrokerWorkspaceAdapter,
-    BrokerWorkspaceError,
-)
-from openloop.tools.openhands_resume import ResumeDecision, WorkerPaused
-from openloop.tools.openhands_state import OpenHandsKeyDeriver, OpenHandsStateLayout
+from openloop.tools.coding_worker import WorkerState
 from openloop.tools.openhands_artifacts import (
     WorkspaceArtifactManifest,
     WorkspaceArtifactStore,
 )
-from openloop.tools.openhands_worker import (
-    _ColdRuntime,
-    OpenHandsCodingWorker,
+from openloop.tools.openhands_broker_workspace import (
+    BrokerWorkspaceAdapter,
+    BrokerWorkspaceError,
 )
-from openloop.tools.coding_worker import WorkerState
 from openloop.tools.openhands_relay_client import RelayClientEndpoint, RelayMode
+from openloop.tools.openhands_resume import ResumeDecision, WorkerPaused
+from openloop.tools.openhands_state import OpenHandsKeyDeriver, OpenHandsStateLayout
+from openloop.tools.openhands_worker import (
+    OpenHandsCodingWorker,
+    _ColdRuntime,
+)
 from openloop.wiring.broker import build_broker
 from tests.support.settings import (
     IsolatedCoprocessBrokerSettings,
+)
+from tests.support.settings import (
     IsolatedSettings as Settings,
 )
 
@@ -395,13 +396,13 @@ async def test_worker_checkpoint_park_resume_finalize_over_real_rpc(tmp_path, so
     _git(repo, "commit", "-m", "base")
     base = _git(repo, "rev-parse", "HEAD")
     final_patch = (
-        "diff --git a/OPENLOOP_PR.md b/OPENLOOP_PR.md\n"
-        "new file mode 100644\n--- /dev/null\n+++ b/OPENLOOP_PR.md\n"
-        "@@ -0,0 +1,2 @@\n+Broker canary\n+Body\n"
-        "diff --git a/result.txt b/result.txt\n"
-        "new file mode 100644\n--- /dev/null\n+++ b/result.txt\n"
-        "@@ -0,0 +1 @@\n+resumed\n"
-    ).encode()
+        b"diff --git a/OPENLOOP_PR.md b/OPENLOOP_PR.md\n"
+        b"new file mode 100644\n--- /dev/null\n+++ b/OPENLOOP_PR.md\n"
+        b"@@ -0,0 +1,2 @@\n+Broker canary\n+Body\n"
+        b"diff --git a/result.txt b/result.txt\n"
+        b"new file mode 100644\n--- /dev/null\n+++ b/result.txt\n"
+        b"@@ -0,0 +1 @@\n+resumed\n"
+    )
     patches = [b"", final_patch]
 
     async with AsyncExitStack() as stack:

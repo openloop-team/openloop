@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from openloop.broker.ledger import BrokerLedger
 from openloop.broker.models import BrokerOwner, GenerationState
@@ -26,12 +26,11 @@ from openloop.broker_rpc.coordinator import (
     SegmentCoordinatorCode,
     SegmentCoordinatorProblem,
 )
-from openloop.broker_rpc.models import StartSegmentPayload
 from openloop.broker_rpc.keys import VerificationKeySet
+from openloop.broker_rpc.models import StartSegmentPayload
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 from tests.support.broker_repository_contract import SequenceIds
-from tests.support.postgres import require_postgres, postgres_dsn
-
+from tests.support.postgres import postgres_dsn, require_postgres
 
 DSN = postgres_dsn()
 OWNER = BrokerOwner("tenant-start-postgres", "workload-start-postgres")

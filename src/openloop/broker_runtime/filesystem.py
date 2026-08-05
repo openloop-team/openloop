@@ -18,7 +18,6 @@ from openloop.tools.openhands_relay import (
 from .contract import RuntimeIdentityConflict, RuntimeUnavailable
 from .docker_policy import GenerationPaths
 
-
 _EXPECTED_ROOT_ENTRIES = frozenset({"relay", "socket", "workspace"})
 _EXPECTED_ARTIFACT_ENTRIES = frozenset({"haproxy.cfg", "relay-capability"})
 _CHECKPOINT_TRANSITION_ARTIFACT = ".haproxy.cfg.checkpoint"

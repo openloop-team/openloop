@@ -1,6 +1,7 @@
 """Integration: the runtime recalls memory into context and remembers tasks."""
 
 from pathlib import Path
+
 from openloop.agents import load_agent
 from openloop.memory import InMemoryStore, MemoryRecord, scope_key_for
 from openloop.runtime import Runtime, Task

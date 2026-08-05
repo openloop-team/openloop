@@ -22,10 +22,10 @@ from openloop.postgres import BorrowedPostgresStore, create_pool
 from openloop.sessions import InMemorySurfaceSessionStore, InMemoryThreadRecordStore
 from openloop.surfaces.slack import build_slack_app
 from openloop.usage import InMemoryTaskLimiter, InMemoryUsageStore
-from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from openloop.wiring import builders
 from openloop.wiring.broker import build_broker
 from openloop.wiring.context import AgentRuntimes, AppContext, SettledStores
+from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 
 log = logging.getLogger("openloop")
 

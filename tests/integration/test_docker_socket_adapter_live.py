@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import subprocess
 import time
 import uuid
+from pathlib import Path
 
 import pytest
 
 from openloop.tools.openhands_relay_profile import DEFAULT_HAPROXY_RELAY_IMAGE
-
 
 pytestmark = [
     pytest.mark.integration,

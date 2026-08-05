@@ -14,7 +14,6 @@ from openloop.broker.models import (
     VerifiedCheckpointReceipt,
 )
 
-
 OWNER = BrokerOwner("tenant-contract", "workload-contract")
 OTHER_OWNER = BrokerOwner("tenant-other", "workload-other")
 CAPABILITY_DIGEST = "a" * 64

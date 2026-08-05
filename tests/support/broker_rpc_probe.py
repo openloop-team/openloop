@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import UTC, datetime
 import hashlib
 import json
 import os
-from pathlib import Path
 import signal
 import struct
 import sys
-from uuid import UUID, uuid4
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
 
 from openloop.broker.ledger import BrokerLedger
 from openloop.broker.postgres import PostgresBrokerRepository
@@ -25,21 +25,21 @@ from openloop.broker_rpc.capability import (
 )
 from openloop.broker_rpc.client import BrokerRpcClient, BrokerRpcRemoteError
 from openloop.broker_rpc.codec import decode_response, encode_request
+from openloop.broker_rpc.coordinator import (
+    SegmentCoordinatorCode,
+    SegmentCoordinatorProblem,
+)
 from openloop.broker_rpc.identity import (
     WorkloadIdentityToken,
     WorkloadIdentityVerifier,
     WorkloadIntent,
 )
-from openloop.broker_rpc.coordinator import (
-    SegmentCoordinatorCode,
-    SegmentCoordinatorProblem,
-)
 from openloop.broker_rpc.keys import VerificationKeySet
 from openloop.broker_rpc.limits import BrokerRpcLimits
 from openloop.broker_rpc.models import (
+    RPC_VERSION,
     CreateJobPayload,
     CreateJobResult,
-    RPC_VERSION,
     RpcRequest,
 )
 from openloop.broker_rpc.peer import LinuxPeerCredentialProvider
@@ -48,7 +48,6 @@ from openloop.broker_rpc.server import (
     UnixSocketPolicy,
 )
 from openloop.postgres import create_pool
-
 
 _CONFIG_PATH = Path("/run/openloop/config/broker.json")
 

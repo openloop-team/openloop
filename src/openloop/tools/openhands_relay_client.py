@@ -14,7 +14,6 @@ from typing import BinaryIO
 
 import httpx
 
-
 LOGICAL_RELAY_HOST = "http://openhands-relay.invalid"
 RELAY_CAPABILITY_HEADER = "X-OpenLoop-Relay-Capability"
 AGENT_SESSION_HEADER = "X-Session-API-Key"
@@ -110,8 +109,8 @@ def _http_timeout(read_timeout: float) -> httpx.Timeout:
 
 @lru_cache(maxsize=1)
 def _relay_workspace_class():
-    from pydantic import Field, PrivateAttr
     from openhands.sdk.workspace import RemoteWorkspace
+    from pydantic import Field, PrivateAttr
 
     class _RelayRemoteWorkspace(RemoteWorkspace):
         api_key: str | None = Field(default=None, exclude=True, repr=False)

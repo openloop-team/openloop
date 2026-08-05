@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-import re
-import unicodedata
 from uuid import UUID
-
 
 POSTGRES_BIGINT_MAX = 2**63 - 1
 MAX_BROKER_JSON_BYTES = 16 * 1024
@@ -62,7 +61,7 @@ class IsolationMode(_StringEnum):
     SHARED = "shared"
     DEDICATED = "dedicated"
 
-    def allows(self, required: "IsolationMode") -> bool:
+    def allows(self, required: IsolationMode) -> bool:
         if not isinstance(required, IsolationMode):
             raise TypeError("required must be an IsolationMode")
         rank = {IsolationMode.SHARED: 0, IsolationMode.DEDICATED: 1}

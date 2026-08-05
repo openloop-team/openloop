@@ -10,8 +10,6 @@ directory the file lives in is the uniqueness authority.
 import re
 from pathlib import Path
 
-import pytest
-
 from openloop.cli import main
 
 UNIT_DATA = Path(__file__).with_name("data")

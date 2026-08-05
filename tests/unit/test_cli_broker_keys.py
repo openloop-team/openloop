@@ -13,13 +13,12 @@ than calling the shipped helper, so the test would catch a change to it.
 import base64
 import json
 
+import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-import pytest
 
 from openloop.cli import main
-
 
 IDENTITY_SEED = b"\x11" * 32
 RECEIPT_ROOT = b"\x22" * 32

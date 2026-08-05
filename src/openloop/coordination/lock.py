@@ -34,8 +34,9 @@ import contextlib
 import hashlib
 import logging
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +189,7 @@ class RedisLock:
         self.namespace = namespace
 
     @classmethod
-    def from_url(cls, url: str, **kwargs) -> "RedisLock":
+    def from_url(cls, url: str, **kwargs) -> RedisLock:
         """Build from a Redis URL (imports ``redis`` lazily so it stays optional)."""
         import redis.asyncio as redis  # noqa: PLC0415 — optional dependency
 

@@ -6,7 +6,8 @@ mention → progress → final / waiting / interrupted flows with idempotent del
 """
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -26,17 +27,7 @@ from openloop.sessions import (
     TranscriptFragment,
     thread_scope_key,
 )
-import time
-
 from openloop.sessions.runner import PROGRESS_REFRESH_SECONDS, PROGRESS_STATUS_TEXT
-from openloop.tools import Invocation, ToolGateway, ToolResult
-from openloop.tools.coding_worker import CodingWorkerConnector, WorkerOutcome
-from openloop.tools.github import GitHubConnector
-from openloop.tools.openhands_artifacts import WorkspaceArtifact, WorkspaceArtifactIdentity
-from openloop.tools.openhands_resume import OpenHandsResumeState, WorkspaceArtifactRef
-from openloop.usage import InMemoryUsageStore
-from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowInstance
-from openloop.workflows.coding_worker import build_coding_worker_workflow
 from openloop.testing import (
     FakeGitHub,
     FakeSurfaceDelivery,
@@ -44,6 +35,17 @@ from openloop.testing import (
     ScriptedGateway,
     tool_call_response,
 )
+from openloop.tools import Invocation, ToolGateway, ToolResult
+from openloop.tools.coding_worker import CodingWorkerConnector, WorkerOutcome
+from openloop.tools.github import GitHubConnector
+from openloop.tools.openhands_artifacts import (
+    WorkspaceArtifact,
+    WorkspaceArtifactIdentity,
+)
+from openloop.tools.openhands_resume import OpenHandsResumeState, WorkspaceArtifactRef
+from openloop.usage import InMemoryUsageStore
+from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowInstance
+from openloop.workflows.coding_worker import build_coding_worker_workflow
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
@@ -1200,7 +1202,7 @@ async def test_apply_thread_history_falls_back_to_sessions_without_thread_store(
     # No thread store → the old per-session thread_history path still works.
     runner, sessions, _ = _runner(ScriptedGateway([]))  # threads=None
     await sessions.upsert(_completed(
-        "a", request="q1", answer="a1", at=datetime(2026, 6, 28, tzinfo=timezone.utc)
+        "a", request="q1", answer="a1", at=datetime(2026, 6, 28, tzinfo=UTC)
     ))
 
     task = _task("now")
@@ -1212,7 +1214,7 @@ async def test_apply_thread_history_falls_back_to_sessions_without_thread_store(
 
 async def test_history_skips_non_completed_and_orders_oldest_first():
     runner, sessions, _ = _runner(ScriptedGateway([]))
-    base = datetime(2026, 6, 28, tzinfo=timezone.utc)
+    base = datetime(2026, 6, 28, tzinfo=UTC)
     await sessions.upsert(_completed("a", request="q1", answer="a1", at=base))
     # A failed turn has no trustworthy answer — skip it entirely.
     await sessions.upsert(
@@ -1242,7 +1244,7 @@ async def test_history_skips_non_completed_and_orders_oldest_first():
 
 async def test_history_is_scoped_to_the_thread():
     runner, sessions, _ = _runner(ScriptedGateway([]))
-    base = datetime(2026, 6, 28, tzinfo=timezone.utc)
+    base = datetime(2026, 6, 28, tzinfo=UTC)
     # A completed turn in a *different* thread must not leak in.
     await sessions.upsert(
         _completed("other", request="elsewhere", answer="nope", at=base, thread="999.9")
@@ -1260,7 +1262,7 @@ async def test_history_is_scoped_to_the_thread():
 
 async def test_history_left_untouched_without_thread_or_when_preset():
     runner, sessions, _ = _runner(ScriptedGateway([]))
-    base = datetime(2026, 6, 28, tzinfo=timezone.utc)
+    base = datetime(2026, 6, 28, tzinfo=UTC)
     await sessions.upsert(_completed("a", request="q", answer="a", at=base))
 
     # No thread on the target → nothing to replay.
@@ -1284,7 +1286,7 @@ async def test_history_excludes_completed_but_undelivered_turn():
     # never reached the user (final_message_id is None — the transient-failure /
     # crash-before-delivery window) must NOT be replayed: the user never saw it.
     store = InMemorySurfaceSessionStore()
-    base = datetime(2026, 6, 28, tzinfo=timezone.utc)
+    base = datetime(2026, 6, 28, tzinfo=UTC)
     await store.upsert(_completed("d", request="q1", answer="a1", at=base))
     await store.upsert(
         _completed(
@@ -1301,7 +1303,7 @@ async def test_history_limit_counts_only_delivered_turns():
     # The limit is applied AFTER filtering to replayable turns, so a burst of
     # recent unusable turns can't crowd a valid older exchange out of the window.
     store = InMemorySurfaceSessionStore()
-    base = datetime(2026, 6, 28, tzinfo=timezone.utc)
+    base = datetime(2026, 6, 28, tzinfo=UTC)
     # Oldest: one genuinely delivered exchange.
     await store.upsert(_completed("old", request="q", answer="a", at=base))
     # Newer noise that would fill a naive most-recent-N window: a failed turn, an
@@ -1336,7 +1338,6 @@ async def test_history_limit_counts_only_delivered_turns():
 async def test_evidence_bundle_outcome_delivers_as_artifact():
     # A workflow terminal result carrying an evidence-bundle outcome is
     # delivered as an Artifact, not a re-run of the model.
-    from openloop.tasks.outcomes import EvidenceBundle
     from openloop.sessions.runner import _deliverable_from_outcome_data
 
     data = {
@@ -1361,9 +1362,8 @@ async def test_evidence_bundle_outcome_delivers_end_to_end_without_model_rerun()
     never re-run, and the delivered payload is the Artifact built straight
     from the outcome data.
     """
-    from openloop.agents.schema import Agent, AgentMetadata, AgentSpec
+    from openloop.agents.schema import Agent, AgentMetadata, AgentSpec, ModelPolicy
     from openloop.agents.schema import Approvals as ApprovalsSpec
-    from openloop.agents.schema import ModelPolicy
     from openloop.agents.schema import Tool as AgentToolSpec
     from openloop.deliverable import Artifact
     from openloop.tools.base import ActionSpec

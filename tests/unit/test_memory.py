@@ -1,6 +1,7 @@
 """Tests for the in-memory store, scope isolation, and recall ranking."""
 
 from pathlib import Path
+
 import pytest
 
 from openloop.agents import load_agent

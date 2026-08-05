@@ -75,7 +75,7 @@ def _is_non_terminal_invocation(inv) -> bool:
     return data.get("status") in {"running", "waiting"}
 
 
-def _prose_of(result: "Deliverable | str") -> str:
+def _prose_of(result: Deliverable | str) -> str:
     """The replay-safe prose of a deliverable — what transcripts/history keep."""
     if isinstance(result, Artifact):
         return result.summary
@@ -84,7 +84,7 @@ def _prose_of(result: "Deliverable | str") -> str:
     return result
 
 
-def _deliverable_from_outcome_data(data) -> "Deliverable | None":
+def _deliverable_from_outcome_data(data) -> Deliverable | None:
     """Rebuild a DIRECT-DELIVER outcome from a terminal result's ``outcome``
     block, or ``None`` for anything that must fall back to the existing
     prose/model-continuation path.
@@ -181,7 +181,7 @@ class SessionRunner:
         runtime: Runtime,
         sessions: SurfaceSessionStore,
         delivery: SurfaceDelivery,
-        threads: "ThreadRecordStore | None" = None,
+        threads: ThreadRecordStore | None = None,
     ) -> None:
         self.runtime = runtime
         self.sessions = sessions
@@ -639,7 +639,7 @@ class SessionRunner:
             )
         return True
 
-    async def _final_deliverable(self, session: SurfaceSession) -> "Deliverable | str":
+    async def _final_deliverable(self, session: SurfaceSession) -> Deliverable | str:
         """What a (re-)delivery of this session's final answer should post."""
         return session.result_summary or "(no response)"
 
@@ -943,7 +943,7 @@ class SessionRunner:
         return out
 
     async def _post_final(
-        self, session: SurfaceSession, result: "Deliverable | str", *,
+        self, session: SurfaceSession, result: Deliverable | str, *,
         recover: bool = False,
     ) -> None:
         if session.final_message_id is not None:

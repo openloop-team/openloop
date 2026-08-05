@@ -1,6 +1,6 @@
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -39,7 +39,6 @@ from openloop.broker_runtime.contract import RuntimeDriver
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 
 from .broker_repository_contract import MutableClock, SequenceIds
-
 
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 

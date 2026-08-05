@@ -1,21 +1,21 @@
 """Integration: the runtime's model<->tool calling loop."""
 
-from pathlib import Path
 import json
+from pathlib import Path
 
 from openloop.agents import load_agent
 from openloop.models.gateway import ModelResponse
 from openloop.runtime import Runtime, Task
 from openloop.runtime.pipeline import TOOL_RESULT_MAX_CHARS
-from openloop.tools import ActionSpec, ToolGateway, ToolResult
-from openloop.tools.github import GitHubConnector
-from openloop.usage import InMemoryUsageStore
 from openloop.testing import (
     FakeGitHub,
     ScriptedGateway,
     in_memory_workflow_engine,
     tool_call_response,
 )
+from openloop.tools import ActionSpec, ToolGateway, ToolResult
+from openloop.tools.github import GitHubConnector
+from openloop.usage import InMemoryUsageStore
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 

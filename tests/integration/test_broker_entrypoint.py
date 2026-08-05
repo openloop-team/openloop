@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from contextlib import AsyncExitStack
 import json
 import os
-from pathlib import Path
 import signal
 import socket
 import subprocess
 import sys
 import time
+from contextlib import AsyncExitStack
+from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -27,13 +27,14 @@ from openloop.broker_main import healthcheck, run_broker
 from openloop.broker_rpc.client import BrokerRpcClientProblem
 from openloop.broker_rpc.server import SocketPathProblem, take_over_stale_socket
 from openloop.wiring.broker import _derive_receipt_key, build_broker_client
+from tests.support.postgres import postgres_dsn, require_postgres
 from tests.support.processes import cleanup_processes
 from tests.support.settings import (
     IsolatedBrokerSettings as Settings,
+)
+from tests.support.settings import (
     IsolatedSettings as RuntimeSettings,
 )
-from tests.support.postgres import require_postgres, postgres_dsn
-
 
 _IDENTITY_SEED = bytes(range(1, 33))
 _RECEIPT_ROOT = bytes([3]) * 32

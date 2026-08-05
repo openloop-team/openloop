@@ -71,11 +71,11 @@ from openloop.broker_config import BrokerClientConfig, BrokerServiceConfig
 from openloop.broker_control.coordinator import BrokerSegmentCoordinator
 from openloop.broker_control.development import local_durable_adapter_for_docker
 from openloop.broker_control.local_receipts import LocalCheckpointReceiptStore
-from openloop.broker_control.recovery import BrokerLifecycleReconciler
 from openloop.broker_control.receipts import (
     CheckpointReceiptIssuer,
     CheckpointReceiptVerifier,
 )
+from openloop.broker_control.recovery import BrokerLifecycleReconciler
 from openloop.broker_control.secrets import (
     RuntimeSecretAuthority,
     RuntimeSecretRootRing,

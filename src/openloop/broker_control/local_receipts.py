@@ -10,9 +10,9 @@ import os
 import secrets
 import stat
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 from openloop.broker.models import (
     SignedCheckpointReceipt,
@@ -30,7 +30,6 @@ from .receipts import (
     CheckpointReceiptKey,
     CheckpointReceiptVerifier,
 )
-
 
 _CHECKPOINT_KEY_DOMAIN = b"openloop-checkpoint-key-v1\0"
 _ARTIFACT_ID_DOMAIN = b"openloop-checkpoint-artifact-id-v1\0"

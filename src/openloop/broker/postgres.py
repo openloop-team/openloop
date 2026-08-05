@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
 import hashlib
-from importlib import resources
 import json
 import re
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
+from importlib import resources
 from typing import Any
 from uuid import UUID
 
@@ -65,7 +65,6 @@ from .repository import (
     require_generation_transition,
     require_job_transition,
 )
-
 
 # ASCII "BROKERLD" interpreted as a positive signed 64-bit advisory-lock key.
 BROKER_MIGRATION_LOCK_ID = 0x42524F4B45524C44
@@ -522,7 +521,7 @@ class Migration:
     checksum: str
 
     @classmethod
-    def from_bytes(cls, version: int, name: str, content: bytes) -> "Migration":
+    def from_bytes(cls, version: int, name: str, content: bytes) -> Migration:
         return cls(
             version=version,
             name=name,

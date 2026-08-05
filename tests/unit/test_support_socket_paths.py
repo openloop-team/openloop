@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from openloop.broker_rpc.server import MAX_UNIX_SOCKET_PATH_BYTES
 import tests.support.socket_paths as socket_paths
+from openloop.broker_rpc.server import MAX_UNIX_SOCKET_PATH_BYTES
 from tests.support.socket_paths import (
     LONGEST_BROKER_TEST_SOCKET_SUFFIX,
-    ShortSocketPathProblem,
     TEST_SOCKET_TMPDIR_ENV,
+    ShortSocketPathProblem,
     create_short_socket_root,
     select_short_socket_parent,
 )

@@ -16,7 +16,6 @@ from openloop.openhands.runtime_profile import (
     runtime_server_image,
 )
 from openloop.tools.openhands_relay import (
-    CONTAINER_RELAY_CAPABILITY_FILE,
     CONTAINER_RELAY_CONFIG_FILE,
     DEFAULT_HAPROXY_RELAY_IMAGE,
     CompiledOpenHandsRelay,
@@ -29,7 +28,6 @@ from .contract import (
     OpenHandsGenerationSpec,
     RuntimeUnavailable,
 )
-
 
 RUNTIME_SCHEMA = "v1"
 RUNTIME_PROFILE = "openhands"
@@ -311,7 +309,7 @@ class DockerGenerationPolicy:
         spec: OpenHandsGenerationSpec,
         *,
         mode: RelayMode = RelayMode.RUNNING,
-    ) -> "DockerGenerationPolicy":
+    ) -> DockerGenerationPolicy:
         if not isinstance(config, DockerRuntimeConfig):
             raise TypeError("config must be a DockerRuntimeConfig")
         if not isinstance(spec, OpenHandsGenerationSpec):

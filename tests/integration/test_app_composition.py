@@ -18,11 +18,12 @@ from openloop.coordination import InProcessLock, PostgresLock
 from openloop.postgres import BorrowedPostgresStore
 from openloop.tools import ToolGateway
 from openloop.tools.openhands_broker_workspace import BrokerWorkspaceAdapter
-from openloop.wiring import compose
-from openloop.wiring import builders
+from openloop.wiring import builders, compose
 from openloop.wiring.broker import _derive_receipt_key, build_broker_service
 from tests.support.settings import (
     IsolatedBrokerSettings,
+)
+from tests.support.settings import (
     IsolatedSettings as Settings,
 )
 

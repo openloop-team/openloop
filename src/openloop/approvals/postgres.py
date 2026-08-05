@@ -10,7 +10,7 @@ replicas.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from openloop.approvals.store import ApprovalRequest
 from openloop.postgres import BorrowedPostgresStore
@@ -200,5 +200,5 @@ def _row_to_request(row) -> ApprovalRequest:
         workflow_backed=row["workflow_backed"],
         workflow_instance_id=row["workflow_instance_id"],
         effect_at=row["effect_at"],
-        created_at=row["created_at"] or datetime.now(timezone.utc),
+        created_at=row["created_at"] or datetime.now(UTC),
     )

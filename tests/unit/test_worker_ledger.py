@@ -10,6 +10,7 @@ import pytest
 
 from openloop.agents.schema import Agent, Budget
 from openloop.credentials import EnvCredentialResolver
+from openloop.testing import FakeCodingWorker
 from openloop.tools.coding_worker import (
     GitWorkspaceOrchestrator,
     WorkerState,
@@ -20,7 +21,6 @@ from openloop.usage import (
     WorkerBudgetExceeded,
     WorkerSpendLedger,
 )
-from openloop.testing import FakeCodingWorker
 from tests.support.agents import make_agent
 
 # Deterministic identities, so scope keys stay expressible in assertions and

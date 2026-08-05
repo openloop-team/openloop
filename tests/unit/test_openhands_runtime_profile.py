@@ -14,7 +14,6 @@ from openloop.openhands.runtime_profile import (
 )
 from openloop.tools import openhands_relay
 
-
 AMD64_IMAGE = (
     "ghcr.io/openhands/agent-server@"
     "sha256:c21e0323cdc3691b54f9f6d980667a375a5df0e21e4c9c40ecb804f2455dd2ff"

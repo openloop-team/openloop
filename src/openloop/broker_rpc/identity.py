@@ -22,7 +22,6 @@ from openloop.broker.models import (
     validate_uuid,
 )
 
-
 MAX_IDENTITY_TOKEN_BYTES = 8192
 MAX_IDENTITY_INTENTS = 16
 MAX_IDENTITY_LIFETIME_SECONDS = 300

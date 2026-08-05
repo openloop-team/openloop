@@ -1,8 +1,8 @@
 import asyncio
-from datetime import UTC, datetime
 import os
-from pathlib import Path
 import struct
+from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -36,7 +36,6 @@ from openloop.broker_runtime.contract import (
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 from tests.support.broker_repository_contract import SequenceIds
 from tests.support.broker_rpc import broker_rpc_test_fixture
-
 
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 OWNER = BrokerOwner("tenant-start", "workload-start")

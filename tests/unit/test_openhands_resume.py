@@ -21,7 +21,6 @@ from openloop.tools.openhands_resume import (
     WorkspaceArtifactRef,
 )
 
-
 IMAGE = (
     "ghcr.io/openhands/agent-server@"
     "sha256:08d3994f9287f8d52b07907ac1575ecfaa48b972697ddae4f1cb5c2f03713fab"

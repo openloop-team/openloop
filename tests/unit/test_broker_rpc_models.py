@@ -7,7 +7,6 @@ import pytest
 from openloop.broker.models import (
     BrokerOwner,
     CommandKind,
-    IsolationMode,
     JobSnapshot,
     JobState,
     OperationTicket,
@@ -21,13 +20,12 @@ from openloop.broker_rpc.models import (
     CreateJobResult,
     InspectJobPayload,
     InspectJobResult,
-    RunningGenerationAccess,
     RpcRequest,
     RpcResponse,
+    RunningGenerationAccess,
     StartSegmentPayload,
     StartSegmentResult,
 )
-
 
 REQUEST_ID = UUID("00000000-0000-4000-8000-000000000301")
 JOB_ID = UUID("00000000-0000-4000-8000-000000000302")

@@ -4,9 +4,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from openloop.app import create_app
+from openloop.testing import FakeGitHub
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
-from openloop.testing import FakeGitHub
 
 
 @pytest.fixture

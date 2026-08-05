@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping
-from dataclasses import dataclass, field
 import hmac as stdlib_hmac
 import re
 import struct
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from uuid import UUID
 
 from cryptography.hazmat.primitives import hashes, hmac
@@ -21,7 +21,6 @@ from openloop.broker.models import (
     validate_sha256,
     validate_uuid,
 )
-
 
 _CONVERSATION_INFO = b"openloop.runtime-secrets.v1/conversation"
 _RELAY_INFO = b"openloop.runtime-secrets.v1/relay"

@@ -4,7 +4,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).parents[2]
 COMPOSE_FILES = tuple(sorted(ROOT.glob("docker-compose*.yml")))
 SOCKET = "/var/run/docker.sock"

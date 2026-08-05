@@ -9,11 +9,11 @@ recursively changes an existing tree.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import os
-from pathlib import Path
 import stat
 import sys
+from dataclasses import dataclass
+from pathlib import Path
 
 
 class ProvisioningProblem(RuntimeError):

@@ -6,7 +6,7 @@ import base64
 import io
 import os
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -19,7 +19,6 @@ from openloop.tools.openhands_artifacts import (
     WorkspaceArtifactVerificationError,
 )
 from openloop.tools.openhands_state import OpenHandsKeyDeriver, OpenHandsStateLayout
-
 
 BASE = "a" * 40
 
@@ -175,10 +174,10 @@ def test_list_orphans_returns_only_old_artifacts(tmp_path):
         "job-1", "conversation-1", "segment-2", "paused"
     )
     store.put_atomic(recent_identity, io.BytesIO(b"new"), _manifest())
-    old_time = datetime.now(timezone.utc) - timedelta(days=2)
+    old_time = datetime.now(UTC) - timedelta(days=2)
     os.utime(_path(store, old), (old_time.timestamp(), old_time.timestamp()))
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+    cutoff = datetime.now(UTC) - timedelta(days=1)
     assert store.list_orphans(cutoff) == [_identity()]
 
 

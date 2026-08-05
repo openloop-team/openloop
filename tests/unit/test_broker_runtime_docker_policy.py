@@ -1,16 +1,13 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
 import pytest
 
 from openloop.broker_runtime import OpenHandsGenerationSpec, RuntimeUnavailable
-from openloop.openhands.runtime_profile import runtime_server_image
 from openloop.broker_runtime.docker_policy import (
     AGENT_COMMAND,
     AGENT_MEMORY_BYTES,
-    DockerGenerationPolicy,
-    DockerRuntimeConfig,
     LABEL_DEADLINE,
     LABEL_GENERATION,
     LABEL_JOB,
@@ -21,16 +18,18 @@ from openloop.broker_runtime.docker_policy import (
     RELAY_COMMAND,
     RUNTIME_PROFILE,
     RUNTIME_SCHEMA,
+    DockerGenerationPolicy,
+    DockerRuntimeConfig,
     image_contract_commands,
 )
+from openloop.openhands.runtime_profile import runtime_server_image
 from openloop.tools.openhands_relay import (
     CONTAINER_RELAY_CAPABILITY_FILE,
     CONTAINER_RELAY_CONFIG_FILE,
     RelayMode,
 )
 
-
-NOW = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
 OPERATION_ID = UUID("11111111-1111-4111-8111-111111111111")
 JOB_ID = UUID("22222222-2222-4222-8222-222222222222")
 CONVERSATION_ID = UUID("33333333-3333-4333-8333-333333333333")

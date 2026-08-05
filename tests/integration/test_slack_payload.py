@@ -10,16 +10,15 @@ assumptions (where the user identity and button value live) are locked in, and
 the approver-matching behavior — including its failure mode — is explicit.
 """
 
-from pathlib import Path
 import copy
+from pathlib import Path
 
 from openloop.agents import load_agent
-from openloop.surfaces.approvals import APPROVE_ACTION, DENY_ACTION
+from openloop.surfaces.approvals import APPROVE_ACTION, DENY_ACTION, resolve_from_action
 from openloop.surfaces.slack import _approver_handle
-from openloop.surfaces.approvals import resolve_from_action
+from openloop.testing import FakeGitHub
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
-from openloop.testing import FakeGitHub
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 

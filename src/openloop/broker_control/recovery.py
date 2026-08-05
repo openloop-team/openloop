@@ -108,7 +108,7 @@ class RecoveryPassReport:
     @classmethod
     def from_items(
         cls, items: tuple[RecoveryItemReport, ...]
-    ) -> "RecoveryPassReport":
+    ) -> RecoveryPassReport:
         if not isinstance(items, tuple) or any(
             not isinstance(item, RecoveryItemReport) for item in items
         ):

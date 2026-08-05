@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from openloop.tools.openhands_relay import (
     RelayClientEndpoint,
@@ -39,7 +39,7 @@ class InMemoryRuntimeDriver(RuntimeDriver):
             or not 1 <= maximum_lifetime_seconds <= 86_400
         ):
             raise ValueError("maximum_lifetime_seconds must be in 1-86400")
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._maximum_lifetime_seconds = maximum_lifetime_seconds
         self._specs: dict[GenerationRuntimeIdentity, OpenHandsGenerationSpec] = {}
         self._modes: dict[GenerationRuntimeIdentity, RelayMode] = {}

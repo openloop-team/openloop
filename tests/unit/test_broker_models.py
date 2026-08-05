@@ -14,8 +14,8 @@ from openloop.broker.errors import (
     MigrationVersionError,
     OperationMismatch,
     OwnerMismatch,
-    ReceiptField,
     ReceiptBindingMismatch,
+    ReceiptField,
     StaleGeneration,
     TransitionEntity,
 )
@@ -49,7 +49,6 @@ from openloop.broker.models import (
     validate_sha256,
     validate_token,
 )
-
 
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 JOB_ID = UUID("00000000-0000-4000-8000-000000000001")

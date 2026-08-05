@@ -207,7 +207,7 @@ class Runtime:
         usage: UsageStore | None = None,
         tools: ToolGateway | None = None,
         *,
-        engine: "WorkflowEngine",
+        engine: WorkflowEngine,
         remember: bool = True,
         limiter: TaskLimiter | None = None,
     ) -> None:
@@ -414,7 +414,7 @@ class Runtime:
         )
         return self._response_from(instance)
 
-    async def _wf_prepare(self, ctx: "WorkflowContext") -> None:
+    async def _wf_prepare(self, ctx: WorkflowContext) -> None:
         s = ctx.state
         task = _task_from_dict(s["task"])
         if s.get("continuation"):
@@ -432,7 +432,7 @@ class Runtime:
         # Persisted turn state: messages (system+history+user), recall vector.
         s.update({"messages": messages, "query_embedding": query_embedding})
 
-    async def _wf_run(self, ctx: "WorkflowContext") -> None:
+    async def _wf_run(self, ctx: WorkflowContext) -> None:
         s = ctx.state
         if s.get("blocked"):
             return
@@ -442,7 +442,7 @@ class Runtime:
         # as it goes, so a re-drive of this step continues from the committed log.
         await self._run_tool_loop(s, task, checkpoint=ctx.checkpoint)
 
-    async def _wf_persist(self, ctx: "WorkflowContext") -> None:
+    async def _wf_persist(self, ctx: WorkflowContext) -> None:
         s = ctx.state
         task = _task_from_dict(s["task"])
         if s.get("blocked"):
@@ -470,7 +470,7 @@ class Runtime:
 
     async def recover_response(
         self, instance_id: str
-    ) -> tuple[bool, "ModelResponse | None"]:
+    ) -> tuple[bool, ModelResponse | None]:
         """For the Phase D session reconciler: recover a crashed turn's response
         from its persisted workflow, **without** re-running it.
 

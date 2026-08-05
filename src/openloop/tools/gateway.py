@@ -13,7 +13,7 @@ from openloop.approvals.store import (
     ApprovalStore,
     InMemoryApprovalStore,
 )
-from openloop.tools.aliases import ACTION_ALIASES, _canonical_action
+from openloop.tools.aliases import _canonical_action
 from openloop.tools.base import (
     Invocation,
     Tool,
@@ -62,7 +62,7 @@ class ToolGateway:
         self,
         tools: list[Tool] | None = None,
         approvals: ApprovalStore | None = None,
-        engine: "WorkflowEngine | None" = None,
+        engine: WorkflowEngine | None = None,
     ) -> None:
         self._tools: dict[str, Tool] = {}
         for tool in tools or []:
@@ -74,7 +74,7 @@ class ToolGateway:
         # Optional Phase B warm-workspace pool (set during app wiring). Held here
         # so the app can reach it to wire its durable sink + lifecycle without a
         # separate registry; the orchestrator uses it directly.
-        self.warm_pool: "WarmWorkspacePool | None" = None
+        self.warm_pool: WarmWorkspacePool | None = None
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool

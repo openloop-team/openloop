@@ -1,6 +1,7 @@
 """Tests for the Slack app build (HTTP vs Socket Mode) and the socket runner."""
 
 from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 from slack_bolt.async_app import AsyncApp

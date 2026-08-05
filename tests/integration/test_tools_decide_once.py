@@ -8,17 +8,16 @@ effect, the winner's identity everywhere, and crash-window healing.
 
 import asyncio
 import logging
+from datetime import UTC
 from pathlib import Path
-
-import pytest
 
 from openloop.agents import load_agent
 from openloop.approvals import ApprovalRequest, InMemoryApprovalStore
+from openloop.testing import FakeGitHub, FakeWorkerOrchestrator
 from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import CodingWorkerConnector
 from openloop.tools.gateway import _workflow_initial_state
 from openloop.tools.github import GitHubConnector
-from openloop.testing import FakeGitHub, FakeWorkerOrchestrator
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
@@ -518,9 +517,9 @@ async def test_reconcile_poison_head_pagination_heals_younger_rows():
     gw, engine, github, orchestrator = _workflow_gateway()
     # A batch of unavailable (unknown-tool, legacy) approved rows at the head,
     # then a healable direct row behind them. Small limit forces pagination.
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    base = datetime(2026, 7, 19, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 19, tzinfo=UTC)
     for i in range(5):
         await _seed_direct_request(
             gw, ["@a"], tool="ghost", workflow_backed=None,

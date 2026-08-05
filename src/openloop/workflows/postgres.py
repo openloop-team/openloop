@@ -10,7 +10,7 @@ instance payload.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from openloop.postgres import BorrowedPostgresStore
 from openloop.workflows.store import TERMINAL, WorkflowInstance
@@ -228,7 +228,7 @@ class PostgresWorkflowStore(BorrowedPostgresStore):
 
 
 def _row_to_instance(row) -> WorkflowInstance:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return WorkflowInstance(
         id=row["id"],
         workflow=row["workflow"],

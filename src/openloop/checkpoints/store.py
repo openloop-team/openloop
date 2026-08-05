@@ -18,7 +18,7 @@ workflow store.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 # Coarse lifecycle, for querying/observability. The fine-grained truth is
@@ -32,7 +32,7 @@ TERMINAL_OK = "opened"
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass(slots=True)

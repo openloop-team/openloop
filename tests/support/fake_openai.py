@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class _FakeOpenAIHandler(BaseHTTPRequestHandler):
-    server: "FakeOpenAIServer"
+    server: FakeOpenAIServer
 
     def log_message(self, *_args) -> None:
         return

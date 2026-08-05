@@ -7,19 +7,20 @@ idempotently.
 
 import inspect
 from pathlib import Path
+
 from openloop.agents import load_agent
 from openloop.memory import InMemoryStore, scope_key_for
 from openloop.models.gateway import ModelResponse
 from openloop.runtime import Runtime, Task
-from openloop.tools import ToolGateway
-from openloop.tools.github import GitHubConnector
-from openloop.usage import InMemoryUsageStore, UsageRecord, budget_scope_key
-from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowInstance
 from openloop.testing import (
     FakeGitHub,
     ScriptedGateway,
     tool_call_response,
 )
+from openloop.tools import ToolGateway
+from openloop.tools.github import GitHubConnector
+from openloop.usage import InMemoryUsageStore, UsageRecord, budget_scope_key
+from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowInstance
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 

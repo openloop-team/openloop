@@ -55,7 +55,6 @@ from uuid import UUID
 from openloop.broker.models import POSTGRES_BIGINT_MAX
 from openloop.broker_runtime.contract import GenerationRuntimeIdentity
 
-
 _COPY_CHUNK_BYTES = 1024 * 1024
 _MANIFEST = "manifest.json"
 _TREE = "tree"

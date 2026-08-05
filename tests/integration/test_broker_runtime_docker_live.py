@@ -18,7 +18,7 @@ import sys
 import tempfile
 import time
 from contextlib import suppress
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -32,7 +32,6 @@ from openloop.broker_runtime import (
     RuntimeResourceState,
 )
 from openloop.broker_runtime.docker_policy import derive_generation_names
-
 
 LIVE_ENABLED = os.environ.get("OPENLOOP_BROKER_RUNTIME_LIVE") == "1"
 
@@ -102,7 +101,7 @@ async def test_real_generation_is_private_healthy_and_self_expiring():
         reconciliation_grace_seconds=1,
     )
     driver = DockerOpenHandsRuntimeDriver(config)
-    deadline = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(
+    deadline = datetime.now(UTC).replace(microsecond=0) + timedelta(
         seconds=45
     )
     spec = OpenHandsGenerationSpec(
@@ -136,7 +135,7 @@ async def test_real_generation_is_private_healthy_and_self_expiring():
 
         stop = time.monotonic() + max(
             0.0,
-            (deadline - datetime.now(timezone.utc)).total_seconds(),
+            (deadline - datetime.now(UTC)).total_seconds(),
         ) + config.kill_after_seconds + 15
         statuses = ("running", "running")
         while time.monotonic() < stop:

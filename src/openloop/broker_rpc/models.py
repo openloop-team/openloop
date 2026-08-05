@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-import re
 from uuid import UUID
 
 from openloop.broker.models import (
     GenerationState,
-    JobState,
     JobSnapshot,
+    JobState,
     OperationTicket,
     ReleaseTarget,
     SignedCheckpointReceipt,
@@ -27,7 +27,6 @@ from openloop.broker.models import (
 from .capability import JobCapability
 from .errors import RpcFailure
 from .identity import WorkloadIdentityToken, WorkloadIntent
-
 
 RPC_VERSION = 2
 _ACCESS_TOKEN = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")

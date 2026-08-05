@@ -1,10 +1,9 @@
-from datetime import UTC, datetime
 import os
+from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from openloop.broker.ledger import BrokerLedger
 from openloop.broker.memory import InMemoryBrokerRepository
@@ -44,7 +43,6 @@ from openloop.broker_runtime.contract import (
 )
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 from tests.support.broker_repository_contract import MutableClock, SequenceIds
-
 
 NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
 OWNER = BrokerOwner("tenant-control", "workload-control")

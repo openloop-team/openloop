@@ -13,7 +13,6 @@ from openloop.broker_rpc.audit import (
 )
 from openloop.broker_rpc.identity import WorkloadIntent, WorkloadPrincipal
 
-
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 
 

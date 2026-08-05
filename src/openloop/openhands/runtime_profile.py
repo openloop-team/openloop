@@ -5,7 +5,6 @@ from __future__ import annotations
 import platform as host_platform
 import re
 
-
 PINNED_OPENHANDS_VERSION = "1.36.0"
 DEFAULT_OPENHANDS_SERVER_IMAGE = (
     "ghcr.io/openhands/agent-server@"

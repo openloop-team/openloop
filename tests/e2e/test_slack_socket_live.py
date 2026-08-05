@@ -35,10 +35,10 @@ bot token still owns the socket and the reply.
   E2E_SLACK_CHANNEL=C…         (a channel both the bot and that user are in)
 """
 
-from pathlib import Path
 import asyncio
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 

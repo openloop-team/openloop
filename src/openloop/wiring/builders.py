@@ -7,7 +7,6 @@ live in :mod:`openloop.wiring.compose`.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -18,12 +17,6 @@ from openloop.approvals.postgres import PostgresApprovalStore
 from openloop.checkpoints import CheckpointStore, InMemoryCheckpointStore
 from openloop.checkpoints.postgres import PostgresCheckpointStore
 from openloop.config import RuntimeSettings
-from openloop.credentials import (
-    CredentialResolver,
-    CredentialScope,
-    EnvCredentialResolver,
-    GitHubAppResolver,
-)
 from openloop.coordination import (
     DistributedLock,
     InProcessLock,
@@ -31,9 +24,19 @@ from openloop.coordination import (
     RedisLock,
     guard,
 )
+from openloop.credentials import (
+    CredentialResolver,
+    CredentialScope,
+    EnvCredentialResolver,
+    GitHubAppResolver,
+)
 from openloop.memory import Embedder, InMemoryStore, LiteLLMEmbedder, MemoryStore
 from openloop.memory.postgres import PostgresMemoryStore
 from openloop.models.gateway import ModelGateway
+from openloop.sandbox import (
+    HostSandbox,
+    Sandbox,
+)
 from openloop.sessions import (
     InMemorySurfaceSessionStore,
     InMemoryThreadRecordStore,
@@ -42,31 +45,27 @@ from openloop.sessions import (
 )
 from openloop.sessions.postgres import PostgresSurfaceSessionStore
 from openloop.sessions.threads import PostgresThreadRecordStore
+from openloop.tasks.investigation import RepoInvestigator
 from openloop.tools import ToolGateway
 from openloop.tools.aliases import _canonical_action
-from openloop.sandbox import (
-    HostSandbox,
-    Sandbox,
-)
-from openloop.tools.coding_worker import (
-    CodingWorker,
-    CodingWorkerConnector,
-    CODING_WORKER_CODE_WRITE,
-    BuiltinCodingWorker,
-    GitWorkspaceOrchestrator,
-)
-from openloop.tools.github import GitHubConnector, HttpGitHubClient
-from openloop.tools.mcp import HttpMCPClient, MCPConnector
 from openloop.tools.claude_worker import (
     ClaudeCodeCodingWorker,
     ClaudeCodeUnavailable,
 )
-from openloop.tools.workspace_pool import WarmWorkspacePool
+from openloop.tools.coding_worker import (
+    CODING_WORKER_CODE_WRITE,
+    BuiltinCodingWorker,
+    CodingWorker,
+    CodingWorkerConnector,
+    GitWorkspaceOrchestrator,
+)
+from openloop.tools.github import GitHubConnector, HttpGitHubClient
+from openloop.tools.mcp import HttpMCPClient, MCPConnector
 from openloop.tools.openhands_worker import (
     OpenHandsCodingWorker,
     OpenHandsUnavailable,
 )
-from openloop.tasks.investigation import RepoInvestigator
+from openloop.tools.workspace_pool import WarmWorkspacePool
 from openloop.usage import InMemoryUsageStore, UsageStore, WorkerSpendLedger
 from openloop.usage.postgres import PostgresUsageStore
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine, WorkflowStore
@@ -295,7 +294,7 @@ def _worker_workspace_root(settings: RuntimeSettings) -> Path | None:
     return None
 
 
-def build_worker_sandbox(settings: RuntimeSettings) -> "Sandbox | None":
+def build_worker_sandbox(settings: RuntimeSettings) -> Sandbox | None:
     """Build the builtin worker's host-only command executor.
 
     ``docker`` remains a marker for broker-hosted OpenHands, not an
@@ -316,7 +315,7 @@ def build_worker_sandbox(settings: RuntimeSettings) -> "Sandbox | None":
     return None
 
 
-def build_warm_workspace_pool(settings: RuntimeSettings) -> "WarmWorkspacePool | None":
+def build_warm_workspace_pool(settings: RuntimeSettings) -> WarmWorkspacePool | None:
     """The process-local warm-workspace pool (Phase B), or None when disabled.
 
     Off unless ``CODING_WORKER_WARM_CONTEXT`` is set. Shares the attempt-workspace
@@ -346,7 +345,7 @@ def _provider_key(settings: RuntimeSettings, model: str) -> str | None:
 
 def build_coding_worker(
     settings: RuntimeSettings, broker_handle: object | None = None
-) -> "CodingWorker | None":
+) -> CodingWorker | None:
     """Pick the worker backend behind ``CODING_WORKER_BACKEND`` — fail-closed.
 
     Returns ``None`` when the requested backend can't run safely (missing
@@ -591,7 +590,7 @@ def _build_worker_ledger(
 def _uncapped_worker_agents(
     agents: dict[str, Agent],
     ledger: WorkerSpendLedger,
-    exposes: "Callable[[Agent], bool]" = _exposes_coding_worker,
+    exposes: Callable[[Agent], bool] = _exposes_coding_worker,
 ) -> list[str]:
     """Agents whose worker attempts would run without a per-task cap.
 

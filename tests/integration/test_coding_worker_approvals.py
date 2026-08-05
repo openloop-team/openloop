@@ -5,18 +5,19 @@ Mirrors test_tools_approvals.py / test_tool_loop.py but for the multi-step
 """
 
 from pathlib import Path
+
 from openloop.agents import load_agent
 from openloop.runtime import Runtime, Task
-from openloop.tools import ToolGateway
-from openloop.tools.coding_worker import CodingWorkerConnector
-from openloop.tools.github import GitHubConnector
 from openloop.testing import (
-    FakeWorkerOrchestrator,
     FakeGitHub,
+    FakeWorkerOrchestrator,
     ScriptedGateway,
     in_memory_workflow_engine,
     tool_call_response,
 )
+from openloop.tools import ToolGateway
+from openloop.tools.coding_worker import CodingWorkerConnector
+from openloop.tools.github import GitHubConnector
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 

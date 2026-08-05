@@ -19,13 +19,13 @@ import uuid
 
 import pytest
 
+from openloop.credentials import EnvCredentialResolver
 from openloop.models.gateway import ModelResponse
 from openloop.tools.coding_worker import (
-    CodingWorkerConnector,
     BuiltinCodingWorker,
+    CodingWorkerConnector,
     GitWorkspaceOrchestrator,
 )
-from openloop.credentials import EnvCredentialResolver
 from openloop.tools.github import HttpGitHubClient
 
 

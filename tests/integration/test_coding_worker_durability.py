@@ -7,13 +7,13 @@ never duplicates them.
 
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.tasks import WorkspaceTask
+from openloop.testing import FakeGitHub
 from openloop.tools.coding_worker import (
     STEPS,
     CodingWorkerConnector,
     WorkerOutcome,
     WorkerState,
 )
-from openloop.testing import FakeGitHub
 
 
 class CountingRunner:

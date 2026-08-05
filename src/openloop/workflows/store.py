@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 # Terminal statuses never resume; "running" resumes on startup (crashed mid-step);
@@ -29,7 +29,7 @@ TERMINAL = ("completed", "failed", "cancelled", "abandoned")
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass(slots=True)

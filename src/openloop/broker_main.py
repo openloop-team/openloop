@@ -4,33 +4,32 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections.abc import Callable
-from contextlib import AsyncExitStack
 import fcntl
 import json
 import logging
 import os
-from pathlib import Path
 import signal
 import socket
 import stat
+from collections.abc import Callable
+from contextlib import AsyncExitStack
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
-from openloop.broker_control import (
-    BrokerLifecycleReconciler,
-    ReadOnlyCheckpointReceiptLocator,
-)
 from openloop.broker_config import (
     DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR,
     BrokerServiceConfig,
+)
+from openloop.broker_control import (
+    BrokerLifecycleReconciler,
+    ReadOnlyCheckpointReceiptLocator,
 )
 from openloop.broker_rpc.server import take_over_stale_socket
 from openloop.config import BrokerSettings
 from openloop.postgres import create_pool
 from openloop.wiring.broker import build_broker_service
-
 
 log = logging.getLogger("openloop.broker")
 

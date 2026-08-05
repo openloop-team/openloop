@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 from uuid import UUID
@@ -20,7 +19,6 @@ from openloop.broker.models import (
     validate_uuid,
 )
 from openloop.broker_rpc.keys import VerificationKeySet
-
 
 RECEIPT_FORMAT_VERSION = 1
 RECEIPT_AUDIENCE = "openloop:checkpoint-receipt"

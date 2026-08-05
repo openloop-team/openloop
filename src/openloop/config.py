@@ -14,7 +14,6 @@ from pydantic_settings import (
 
 from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
 
-
 DEFAULT_EXTERNAL_BROKER_CONTAINER_ROOT = Path("/var/lib/openloop/broker")
 DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR = (
     DEFAULT_EXTERNAL_BROKER_CONTAINER_ROOT / "control"

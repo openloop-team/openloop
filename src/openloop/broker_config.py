@@ -22,7 +22,6 @@ from openloop.config import (
     RuntimeSettings,
 )
 
-
 BrokerMode = Literal["coprocess", "external"]
 
 

@@ -10,10 +10,11 @@ import json
 import os
 import struct
 import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Iterator
+from typing import BinaryIO
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -24,7 +25,6 @@ from openloop.tools.openhands_state import (
     OpenHandsStateLayout,
     validate_state_identifier,
 )
-
 
 _MAGIC = b"OLWART01"
 _ENVELOPE_VERSION = 1
@@ -105,7 +105,7 @@ class WorkspaceArtifactManifest:
         if self.pr_body is not None and self.pr_title is None:
             raise WorkspaceArtifactError("artifact PR body requires a title")
 
-    def with_plaintext_sha256(self, digest: str) -> "WorkspaceArtifactManifest":
+    def with_plaintext_sha256(self, digest: str) -> WorkspaceArtifactManifest:
         return WorkspaceArtifactManifest(
             format=self.format,
             base_commit=self.base_commit,
@@ -154,7 +154,7 @@ class WorkspaceArtifact:
         }
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "WorkspaceArtifact":
+    def from_dict(cls, raw: dict) -> WorkspaceArtifact:
         if not isinstance(raw, dict):
             raise WorkspaceArtifactError("invalid artifact descriptor")
         identity = raw.get("identity")
@@ -193,7 +193,7 @@ class VerifiedWorkspaceArtifact:
             self.stream.close()
         self._scratch_path.unlink(missing_ok=True)
 
-    def __enter__(self) -> "VerifiedWorkspaceArtifact":
+    def __enter__(self) -> VerifiedWorkspaceArtifact:
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> None:

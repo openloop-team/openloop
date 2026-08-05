@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 import os
-from pathlib import Path
 import secrets
 import tempfile
+from collections.abc import Iterable
+from pathlib import Path
 
 from openloop.broker_rpc.server import MAX_UNIX_SOCKET_PATH_BYTES
-
 
 TEST_SOCKET_TMPDIR_ENV = "OPENLOOP_TEST_SOCKET_TMPDIR"
 _DIRECTORY_PREFIX = "ol-"

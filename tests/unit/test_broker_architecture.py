@@ -4,7 +4,6 @@ import ast
 import importlib.util
 from pathlib import Path
 
-
 SOURCE_ROOT = Path(__file__).parents[2] / "src"
 OPENLOOP_ROOT = SOURCE_ROOT / "openloop"
 BROKER_ROOT = OPENLOOP_ROOT / "broker"

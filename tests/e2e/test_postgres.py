@@ -9,11 +9,12 @@ falls back to the docker-compose default. Skips cleanly otherwise so the normal
 suite stays green without Docker.
 """
 
-from pathlib import Path
 import asyncio
 import contextlib
 import uuid
 from dataclasses import replace
+from datetime import UTC
+from pathlib import Path
 
 import pytest
 
@@ -22,19 +23,19 @@ from openloop.approvals.postgres import PostgresApprovalStore
 from openloop.memory.postgres import PostgresMemoryStore
 from openloop.memory.store import MemoryRecord, scope_key_for
 from openloop.runtime import Runtime, Task
-from openloop.tools import ToolGateway
-from openloop.tools.github import GitHubConnector
-from openloop.usage import UsageRecord, budget_scope_key
-from openloop.usage.postgres import PostgresUsageStore
-from openloop.workflows import WorkflowEngine
-from openloop.workflows.postgres import PostgresWorkflowStore
 from openloop.testing import (
     FakeEmbedder,
     FakeGitHub,
     ScriptedGateway,
     tool_call_response,
 )
-from tests.support.postgres import require_postgres, postgres_dsn
+from openloop.tools import ToolGateway
+from openloop.tools.github import GitHubConnector
+from openloop.usage import UsageRecord, budget_scope_key
+from openloop.usage.postgres import PostgresUsageStore
+from openloop.workflows import WorkflowEngine
+from openloop.workflows.postgres import PostgresWorkflowStore
+from tests.support.postgres import postgres_dsn, require_postgres
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 
@@ -606,11 +607,11 @@ async def test_thread_record_transcript_across_real_postgres(postgres_pool):
     """Phase A: the delivered-transcript lane round-trips and appends idempotently."""
     await require_postgres(DSN)
 
+    from openloop.sessions.store import SurfaceTarget
     from openloop.sessions.threads import (
         PostgresThreadRecordStore,
         TranscriptFragment,
     )
-    from openloop.sessions.store import SurfaceTarget
 
     thread = f"thr-{uuid.uuid4().hex[:8]}"
     scope = SurfaceTarget(
@@ -663,8 +664,8 @@ async def test_thread_context_ref_across_real_postgres(postgres_pool):
     """Phase B: the warm-context handle column round-trips and clears."""
     await require_postgres(DSN)
 
-    from openloop.sessions.threads import PostgresThreadRecordStore, thread_scope_key
     from openloop.sessions.store import SurfaceTarget
+    from openloop.sessions.threads import PostgresThreadRecordStore, thread_scope_key
 
     thread = f"thr-{uuid.uuid4().hex[:8]}"
     scope = SurfaceTarget(
@@ -705,8 +706,8 @@ async def test_thread_inbox_and_claim_across_real_postgres(postgres_pool):
     """Phase C: inbox dedup, ordered drain, and the atomic active-turn claim."""
     await require_postgres(DSN)
 
-    from openloop.sessions.threads import PostgresThreadRecordStore
     from openloop.sessions.store import SurfaceTarget
+    from openloop.sessions.threads import PostgresThreadRecordStore
 
     thread = f"thr-{uuid.uuid4().hex[:8]}"
     scope = SurfaceTarget(
@@ -1068,7 +1069,7 @@ async def test_workflow_cancel_during_drive_wins_over_writer(postgres_pool):
 
 
 def _approval(rid: str, *, created_at=None, **overrides):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from openloop.approvals import ApprovalRequest
 
@@ -1081,7 +1082,7 @@ def _approval(rid: str, *, created_at=None, **overrides):
         approvers=["@a", "@b"],
         summary="s",
         id=rid,
-        created_at=created_at or datetime.now(timezone.utc),
+        created_at=created_at or datetime.now(UTC),
         **overrides,
     )
 
@@ -1116,9 +1117,9 @@ async def test_approval_decided_unreconciled_keyset_and_mark(postgres_pool):
     """Keyset pagination + (created_at, id) ordering + mark_reconciled idempotency."""
     await require_postgres(DSN)
 
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    base = datetime(2026, 7, 19, tzinfo=timezone.utc)
+    base = datetime(2026, 7, 19, tzinfo=UTC)
     prefix = f"appr-{uuid.uuid4().hex[:8]}"
     ids = [f"{prefix}-{i}" for i in range(5)]
     store = PostgresApprovalStore()

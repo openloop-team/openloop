@@ -7,8 +7,8 @@ with a synthetic event and a :class:`FakeSurfaceDelivery` — the full glue from
 event → Task → target → delivery, without a live Slack connection.
 """
 
-from pathlib import Path
 import types
+from pathlib import Path
 
 import pytest
 
@@ -16,9 +16,9 @@ from openloop.agents import load_agent
 from openloop.models.gateway import ModelResponse
 from openloop.runtime import Task
 from openloop.sessions import InMemorySurfaceSessionStore, SessionRunner
-from openloop.surfaces.approvals import APPROVE_ACTION, approval_blocks
 from openloop.sessions.store import SurfaceSession, SurfaceTarget
-from openloop.surfaces.slack import _run_mention, handle_message, handle_mention
+from openloop.surfaces.approvals import APPROVE_ACTION, approval_blocks
+from openloop.surfaces.slack import _run_mention, handle_mention, handle_message
 from openloop.testing import FakeGitHub, FakeSurfaceDelivery
 from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector

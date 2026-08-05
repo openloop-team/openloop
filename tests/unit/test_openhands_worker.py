@@ -13,11 +13,10 @@ from openloop.tools.openhands_resume import ResumeDecision, WorkerPaused
 from openloop.tools.openhands_state import OpenHandsKeyDeriver, OpenHandsStateLayout
 from openloop.tools.openhands_worker import (
     PR_FILE,
-    _ColdRuntime,
     OpenHandsCodingWorker,
     OpenHandsUnavailable,
+    _ColdRuntime,
 )
-
 
 BASE = "a" * 40
 

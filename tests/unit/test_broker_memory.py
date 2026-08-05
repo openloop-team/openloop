@@ -30,8 +30,8 @@ from openloop.broker.models import (
 )
 from tests.support.broker_repository_contract import (
     CAPABILITY_DIGEST,
-    DURABLE_STATE_REF,
     DURABLE_DIGEST,
+    DURABLE_STATE_REF,
     OTHER_OWNER,
     OWNER,
     MutableClock,

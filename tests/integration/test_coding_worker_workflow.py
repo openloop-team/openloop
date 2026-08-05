@@ -10,6 +10,7 @@ from pathlib import Path
 from openloop.agents import load_agent
 from openloop.openhands.runtime_profile import DEFAULT_OPENHANDS_SERVER_IMAGE
 from openloop.tasks import WorkspaceTask
+from openloop.testing import FakeGitHub, FakeWorkerOrchestrator
 from openloop.tools import ToolGateway
 from openloop.tools.coding_worker import (
     STEPS,
@@ -17,6 +18,7 @@ from openloop.tools.coding_worker import (
     WorkerOutcome,
     WorkerState,
 )
+from openloop.tools.github import GitHubConnector
 from openloop.tools.openhands_artifacts import (
     WorkspaceArtifact,
     WorkspaceArtifactIdentity,
@@ -26,7 +28,6 @@ from openloop.tools.openhands_resume import (
     WorkerPaused,
     WorkspaceArtifactRef,
 )
-from openloop.tools.github import GitHubConnector
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from openloop.workflows.coding_worker import (
     WORKFLOW_NAME,
@@ -34,7 +35,6 @@ from openloop.workflows.coding_worker import (
     build_coding_worker_workflow,
 )
 from openloop.workflows.store import WorkflowInstance, _now
-from openloop.testing import FakeGitHub, FakeWorkerOrchestrator
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 

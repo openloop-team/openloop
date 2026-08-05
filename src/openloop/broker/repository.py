@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, is_dataclass
 import hashlib
 import json
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any, ClassVar, Protocol, runtime_checkable
 from uuid import UUID
 
@@ -21,8 +21,8 @@ from .models import (
     JobState,
     OperationResult,
     OperationTicket,
-    RecoverySnapshot,
     RecoveryCandidate,
+    RecoverySnapshot,
     ReleaseTarget,
     TerminalOutcome,
     VerifiedCheckpointReceipt,
@@ -36,7 +36,6 @@ from .models import (
     validate_token,
     validate_uuid,
 )
-
 
 _NO_DIGEST = {"digest": False}
 _OMIT_NONE_DIGEST = {"omit_none": True}

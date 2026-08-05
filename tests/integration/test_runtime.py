@@ -8,15 +8,13 @@ without network, provider credentials, or Docker.
 """
 
 from pathlib import Path
+
 import pytest
 
 from openloop.agents import load_agent
 from openloop.approvals import InMemoryApprovalStore
 from openloop.memory import InMemoryStore, MemoryRecord, scope_key_for
 from openloop.runtime import Runtime, Task
-from openloop.tools import ToolGateway
-from openloop.tools.github import GitHubConnector
-from openloop.usage import InMemoryUsageStore, budget_scope_key
 from openloop.testing import (
     FakeEmbedder,
     FakeGitHub,
@@ -24,6 +22,9 @@ from openloop.testing import (
     in_memory_workflow_engine,
     tool_call_response,
 )
+from openloop.tools import ToolGateway
+from openloop.tools.github import GitHubConnector
+from openloop.usage import InMemoryUsageStore, budget_scope_key
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 

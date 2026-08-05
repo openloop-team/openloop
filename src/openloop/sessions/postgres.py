@@ -9,7 +9,7 @@ status without deserializing JSON.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from openloop.postgres import BorrowedPostgresStore
 from openloop.sessions.store import SurfaceSession, SurfaceTarget
@@ -236,7 +236,7 @@ class PostgresSurfaceSessionStore(BorrowedPostgresStore):
 
 
 def _row_to_session(row) -> SurfaceSession:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return SurfaceSession(
         id=row["id"],
         target=SurfaceTarget(

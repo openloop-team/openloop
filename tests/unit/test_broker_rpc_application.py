@@ -2,8 +2,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from openloop.broker.ledger import BrokerLedger
 from openloop.broker.memory import InMemoryBrokerRepository
@@ -50,13 +50,12 @@ from openloop.broker_rpc.models import (
     QuiesceSegmentResult,
     ReleaseSegmentPayload,
     ReleaseSegmentResult,
-    RunningGenerationAccess,
     RpcRequest,
+    RunningGenerationAccess,
     StartSegmentPayload,
     StartSegmentResult,
 )
 from tests.support.broker_repository_contract import MutableClock, SequenceIds
-
 
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 OWNER = BrokerOwner("tenant-a", "workload-a")

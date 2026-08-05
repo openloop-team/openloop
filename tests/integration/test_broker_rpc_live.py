@@ -3,20 +3,20 @@
 from __future__ import annotations
 
 import base64
-from datetime import UTC, datetime
 import hashlib
 import json
 import os
-from pathlib import Path
 import secrets
 import shutil
 import subprocess
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-import pytest
 
 from openloop.broker.models import (
     BrokerOwner,
@@ -29,7 +29,6 @@ from openloop.broker_rpc.capability import (
 )
 from openloop.broker_rpc.identity import WorkloadIdentityIssuer, WorkloadIntent
 from tests.support.socket_paths import create_short_socket_root
-
 
 pytestmark = [
     pytest.mark.integration,

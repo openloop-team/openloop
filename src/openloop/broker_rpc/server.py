@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
-from dataclasses import dataclass
 import errno
 import math
 import os
-from pathlib import Path
 import socket
 import stat
 import struct
 import time
+from collections.abc import Awaitable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TypeVar
 
 from .application import BrokerRpcApplication
@@ -21,7 +21,6 @@ from .errors import RpcErrorCode, RpcFailure, RpcProtocolProblem
 from .limits import BrokerRpcLimits, InFlightLimiter, TokenBucketLimiter
 from .models import RPC_VERSION, RpcRequest, RpcResponse
 from .peer import PeerCredentialProblem, PeerCredentialProvider
-
 
 _T = TypeVar("_T")
 MAX_UNIX_SOCKET_PATH_BYTES = 100
@@ -437,7 +436,7 @@ class BrokerRpcServer:
         self._unlink_owned_socket()
         self._socket_identity = None
 
-    async def __aenter__(self) -> "BrokerRpcServer":
+    async def __aenter__(self) -> BrokerRpcServer:
         await self.start()
         return self
 

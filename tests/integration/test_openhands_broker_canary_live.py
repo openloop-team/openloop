@@ -19,7 +19,6 @@ import pytest
 from openloop.tools.openhands_relay_profile import DEFAULT_HAPROXY_RELAY_IMAGE
 from tests.support.fake_openai import fake_openai
 
-
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.live,

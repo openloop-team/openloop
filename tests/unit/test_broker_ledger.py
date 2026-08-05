@@ -1,6 +1,5 @@
-from dataclasses import replace
-from datetime import UTC, datetime
 import inspect
+from dataclasses import replace
 from uuid import UUID
 
 import pytest
@@ -34,7 +33,6 @@ from openloop.broker.repository import (
     require_generation_transition,
     require_job_transition,
 )
-
 
 OWNER = BrokerOwner("tenant-a", "workload-a")
 OTHER_OWNER = BrokerOwner("tenant-b", "workload-b")

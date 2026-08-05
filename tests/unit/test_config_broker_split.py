@@ -6,13 +6,13 @@ import pytest
 from pydantic import SecretStr, ValidationError, field_validator
 
 from openloop.broker_config import (
-    BrokerClientConfig,
-    BrokerServiceConfig,
     DEFAULT_EXTERNAL_BROKER_CHECKPOINT_RECEIPT_ROOT,
     DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR,
     DEFAULT_EXTERNAL_BROKER_INGRESS_ROOT,
     DEFAULT_EXTERNAL_BROKER_RUNTIME_ROOT,
     DEFAULT_EXTERNAL_BROKER_STATE_ROOT,
+    BrokerClientConfig,
+    BrokerServiceConfig,
 )
 from openloop.config import BrokerSettings, RuntimeSettings
 from tests.support.settings import (

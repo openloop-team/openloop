@@ -4,7 +4,6 @@ from pathlib import Path
 
 from openloop.config import RuntimeSettings
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 RETIRED_PATHS = (

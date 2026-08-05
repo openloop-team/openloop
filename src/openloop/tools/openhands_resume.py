@@ -10,7 +10,6 @@ from typing import Literal
 from openloop.tools.openhands_artifacts import WorkspaceArtifact
 from openloop.tools.openhands_state import validate_state_identifier
 
-
 OPENHANDS_RESUME_SCHEMA_VERSION = 1
 OPENHANDS_RESUME_READER_VERSION = 1
 OPENHANDS_REJECTION_REASON = "User rejected the pending action in Slack"
@@ -97,7 +96,7 @@ class WorkspaceArtifactRef:
         }
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "WorkspaceArtifactRef":
+    def from_dict(cls, raw: dict) -> WorkspaceArtifactRef:
         if not isinstance(raw, dict):
             raise OpenHandsResumeError("invalid OpenHands workspace artifact")
         return cls(
@@ -130,7 +129,7 @@ class ResumeDecision:
         }
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "ResumeDecision":
+    def from_dict(cls, raw: dict) -> ResumeDecision:
         if not isinstance(raw, dict):
             raise OpenHandsResumeError("invalid OpenHands resume decision")
         return cls(
@@ -383,7 +382,7 @@ class OpenHandsResumeState:
         }
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "OpenHandsResumeState":
+    def from_dict(cls, raw: dict) -> OpenHandsResumeState:
         if not isinstance(raw, dict):
             raise OpenHandsResumeError("invalid OpenHands resume state")
         allowed = set(cls.__dataclass_fields__)

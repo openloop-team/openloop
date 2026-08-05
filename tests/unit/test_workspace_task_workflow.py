@@ -1,11 +1,11 @@
 """Unit tests for the workspace_task workflow's profile-dispatched steps."""
 
+from openloop.testing import FakeGitHub, FakeWorkerOrchestrator
 from openloop.workflows.coding_worker import (
     WORKFLOW_NAME,
     build_workspace_task_workflow,
 )
 from openloop.workflows.store import WorkflowInstance
-from openloop.testing import FakeWorkerOrchestrator, FakeGitHub
 
 
 def test_workflow_name_is_workspace_task():

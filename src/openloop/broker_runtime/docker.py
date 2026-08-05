@@ -10,7 +10,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -67,7 +67,6 @@ from .filesystem import (
     relay_artifact_mode,
     release_generation_filesystem,
 )
-
 
 _OUTPUT_LIMIT = 256 * 1024
 _DOCKER_OBJECT_ID = re.compile(r"[0-9a-f]{64}\Z")
@@ -358,7 +357,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
             raise TypeError("config must be a DockerRuntimeConfig")
         self.config = config
         self._runner = runner or _default_command_runner
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._health_checker = health_checker or self._default_health_check
         self._workspace_materializer = workspace_materializer
         self._socket_hardener = socket_hardener or (
@@ -407,7 +406,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
             raise RuntimeUnavailable("runtime clock failed") from exc
         if not isinstance(value, datetime) or value.tzinfo is None:
             raise RuntimeUnavailable("runtime clock did not return timezone-aware time")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @asynccontextmanager
     async def _locked(
@@ -1215,7 +1214,7 @@ class DockerOpenHandsRuntimeDriver(RuntimeDriver):
                 operation_id=UUID(labels["openloop.runtime.operation"]),
                 job_id=UUID(labels["openloop.runtime.job"]),
                 generation=int(labels["openloop.runtime.generation"]),
-                deadline=datetime.fromtimestamp(deadline_epoch, timezone.utc),
+                deadline=datetime.fromtimestamp(deadline_epoch, UTC),
             )
             runtime_actual = {
                 name: value

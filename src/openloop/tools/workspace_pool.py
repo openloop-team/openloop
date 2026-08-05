@@ -69,7 +69,7 @@ class WarmHandle:
         )
 
     @classmethod
-    def from_json(cls, raw: str) -> "WarmHandle":
+    def from_json(cls, raw: str) -> WarmHandle:
         d = json.loads(raw)
         return cls(workspace_id=d["workspace_id"], repo=d["repo"], replica=d["replica"])
 
@@ -105,7 +105,7 @@ class WarmLease:
     """
 
     def __init__(
-        self, pool: "WarmWorkspacePool", entry: _Entry, *, warm: bool, ephemeral: bool
+        self, pool: WarmWorkspacePool, entry: _Entry, *, warm: bool, ephemeral: bool
     ) -> None:
         self._pool = pool
         self._entry = entry

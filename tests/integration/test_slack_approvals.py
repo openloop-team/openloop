@@ -1,6 +1,7 @@
 """Tests for the Slack approval blocks and button resolution (no Bolt app)."""
 
 from pathlib import Path
+
 from openloop.agents import load_agent
 from openloop.runtime import Runtime, Task
 from openloop.surfaces.approvals import (
@@ -12,14 +13,14 @@ from openloop.surfaces.approvals import (
     openhands_decision_blocks,
     resolve_from_action,
 )
-from openloop.tools import ToolGateway
-from openloop.tools.github import GitHubConnector
 from openloop.testing import (
     FakeGitHub,
     ScriptedGateway,
     in_memory_workflow_engine,
     tool_call_response,
 )
+from openloop.tools import ToolGateway
+from openloop.tools.github import GitHubConnector
 
 AGENT_YAML = Path(__file__).parent / "data" / "agent.yaml"
 

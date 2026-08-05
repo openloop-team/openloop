@@ -3,8 +3,6 @@
 import asyncio
 from datetime import timedelta
 
-import pytest
-
 from openloop.workflows import (
     InMemoryWorkflowStore,
     Step,

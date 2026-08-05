@@ -57,7 +57,7 @@ class WorkspaceTask:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "WorkspaceTask":
+    def from_dict(cls, data: dict) -> WorkspaceTask:
         """Rehydrate from either the current nested layout or the
         pre-convergence flat coding-worker checkpoint layout (compat shim).
 
@@ -138,6 +138,6 @@ WORKSPACE_TASK_PROFILES: dict[str, TaskProfile] = {
 }
 
 
-def profile_for(permission: str) -> "TaskProfile | None":
+def profile_for(permission: str) -> TaskProfile | None:
     """Look up a profile by permission string."""
     return WORKSPACE_TASK_PROFILES.get(permission)

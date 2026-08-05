@@ -15,7 +15,6 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _CONVERSATION_DOMAIN = b"openhands-state\0"
 _ARTIFACT_DOMAIN = b"workspace-artifact\0"
@@ -110,7 +109,7 @@ class OpenHandsKeyDeriver:
     @classmethod
     def from_base64(
         cls, encoded: str, *, master_key_id: str
-    ) -> "OpenHandsKeyDeriver":
+    ) -> OpenHandsKeyDeriver:
         if not isinstance(encoded, str) or not encoded:
             raise OpenHandsStateError(
                 "OpenHands state master key must be base64-encoded"

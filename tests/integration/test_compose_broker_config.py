@@ -10,7 +10,6 @@ import yaml
 
 from openloop.tools.openhands_relay_profile import DEFAULT_HAPROXY_RELAY_IMAGE
 
-
 ROOT = Path(__file__).parents[2]
 OVERRIDE = ROOT / "docker-compose.broker.yml"
 DEPLOY = ROOT / "docker-compose.deploy.yml"

@@ -35,8 +35,6 @@ from .models import (
     OperationStatus,
     OperationTicket,
     RecoveryCandidate,
-    ReleaseTarget,
-    TerminalOutcome,
     project_job_snapshot,
     project_recovery_snapshot,
     validate_timestamp,

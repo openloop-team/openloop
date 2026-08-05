@@ -19,7 +19,6 @@ from openloop.config import (
     RuntimeSettings,
 )
 
-
 TEST_AGENTS_DIR = Path(__file__).parents[1] / "integration" / "data"
 
 _PROFILES: Mapping[str, Mapping[str, Any]] = {

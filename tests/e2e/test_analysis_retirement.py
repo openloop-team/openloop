@@ -8,8 +8,8 @@ from uuid import uuid4
 
 import asyncpg
 import pytest
-from tests.support.postgres import require_postgres, postgres_dsn
 
+from tests.support.postgres import postgres_dsn, require_postgres
 
 DSN = postgres_dsn()
 RETIREMENT_SQL = (

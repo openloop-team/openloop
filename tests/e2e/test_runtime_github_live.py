@@ -19,11 +19,11 @@ import pytest
 
 from openloop.agents.schema import Agent
 from openloop.approvals import InMemoryApprovalStore
+from openloop.credentials import EnvCredentialResolver
 from openloop.memory import InMemoryStore
 from openloop.models.gateway import ModelGateway
 from openloop.runtime import Runtime, Task
 from openloop.tools import ToolGateway
-from openloop.credentials import EnvCredentialResolver
 from openloop.tools.github import GitHubConnector, HttpGitHubClient
 from openloop.usage import InMemoryUsageStore, budget_scope_key
 from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine

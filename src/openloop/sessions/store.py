@@ -19,7 +19,7 @@ default and a Postgres implementation (``surface_sessions`` table).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 # Lifecycle of a session. Mirrors the workflow statuses where it makes sense but
@@ -35,10 +35,10 @@ TERMINAL = ("completed", "failed", "abandoned")
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
-def _same_thread_scope(a: "SurfaceTarget", b: "SurfaceTarget") -> bool:
+def _same_thread_scope(a: SurfaceTarget, b: SurfaceTarget) -> bool:
     """Whether two targets address the same thread for the same bot.
 
     Thread ownership is keyed on the full scope — surface + workspace + agent +
@@ -54,7 +54,7 @@ def _same_thread_scope(a: "SurfaceTarget", b: "SurfaceTarget") -> bool:
     )
 
 
-def _is_replayable_turn(s: "SurfaceSession") -> bool:
+def _is_replayable_turn(s: SurfaceSession) -> bool:
     """Whether a session is a delivered request→answer exchange worth replaying.
 
     A turn only belongs in conversation history if the user actually saw it: it
@@ -126,12 +126,12 @@ class SurfaceSessionStore(Protocol):
     async def get_by_approval(self, approval_id: str) -> SurfaceSession | None: ...
 
     async def get_by_thread(
-        self, target: "SurfaceTarget"
+        self, target: SurfaceTarget
     ) -> SurfaceSession | None: ...
 
     async def thread_history(
         self,
-        target: "SurfaceTarget",
+        target: SurfaceTarget,
         *,
         exclude_id: str | None = None,
         limit: int = 20,
