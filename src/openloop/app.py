@@ -191,6 +191,9 @@ def create_app(
         actions = ctx.tools.available_actions(primary) if primary else []
         return {
             "status": "ok",
+            # None outside a recorded deployment; a deployed process names the
+            # release record that selected its image and configuration.
+            "release": settings.release_id or None,
             "agents": list(ctx.agents.loaded),
             "providers": settings.configured_providers,
             "memory": type(ctx.memory).__name__,

@@ -286,6 +286,25 @@ The grants are:
 See
 [`ops/compose-secrets.md`](ops/compose-secrets.md) for the complete inventory.
 
+### Releases
+
+A production deployment runs a recorded release: one image digest, one deploy
+bundle revision, one runtime-configuration revision (agent definitions and
+tracked settings), and the Doppler configs that injected its secrets. Each is
+versioned and rolled back independently, the image is never a mutable tag, and
+the record names revisions only — never secret values.
+
+```bash
+openloop release record --image <repo>@sha256:<digest> \
+  --doppler openloop-deploy=prd --doppler openloop-runtime=prd \
+  --doppler openloop-broker=prd -o /var/lib/openloop/releases/<record>.json
+openloop release select /var/lib/openloop/releases/<record>.json \
+  --root /opt/openloop -o /etc/openloop/release.env
+```
+
+Local stacks keep building mutable tags; this path is for deployments. See
+[`docs/operations/releases.md`](docs/operations/releases.md).
+
 ### Local development *(preliminary)*
 
 The runtime is a Python/FastAPI app. Local dev uses [mise](https://mise.jdx.dev)

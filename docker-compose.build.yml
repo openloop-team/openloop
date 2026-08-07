@@ -1,0 +1,28 @@
+# Image production, kept out of the deploy bundle on purpose.
+#
+# A production deployment selects an image by digest and never builds one, so
+# `build:` lives here rather than in docker-compose.deploy.yml or
+# docker-compose.broker.yml: a bundle that cannot build cannot quietly bind the
+# stack to a locally tagged image. Docker also cannot tag a build with a digest
+# reference, so building always uses a tag and the digest comes from the push:
+#
+#   docker compose -f docker-compose.build.yml build runtime
+#   docker tag openloop:local <registry>/openloop:<tag>
+#   docker push <registry>/openloop:<tag>
+#   docker buildx imagetools inspect <registry>/openloop:<tag> \
+#     --format '{{println .Manifest.Digest}}'
+#
+# Then record that digest as a release — see docs/operations/releases.md.
+#
+# The uid/gid build args must match the values the broker composition runs
+# with; the image's passwd/group entries are what make the shared-gid mounts
+# work.
+
+services:
+  runtime:
+    image: ${OPENLOOP_IMAGE:-openloop:local}
+    build:
+      context: .
+      args:
+        OPENLOOP_BROKER_UID: ${OPENLOOP_BROKER_UID:-10002}
+        OPENLOOP_DATA_GID: ${OPENLOOP_DATA_GID:-10777}

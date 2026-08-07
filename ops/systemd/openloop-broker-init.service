@@ -11,9 +11,12 @@ PartOf=openloop.target
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/openloop
+EnvironmentFile=/etc/openloop/release.env
 ExecStartPre=/usr/bin/test -r /opt/openloop/docker-compose.deploy.yml
 ExecStartPre=/usr/bin/test -r /opt/openloop/docker-compose.broker.yml
 ExecStartPre=/usr/bin/test -r /opt/openloop/.env
+ExecStartPre=/usr/bin/test -r /etc/openloop/release.env
+ExecStartPre=/usr/bin/grep -Exq "OPENLOOP_IMAGE=[^[:space:]]+@sha256:[0-9a-f]{64}" /etc/openloop/release.env
 ExecStartPre=/usr/bin/test -r /opt/openloop/configs/prd/runtime.env
 ExecStartPre=/usr/bin/test -r /opt/openloop/configs/prd/broker.env
 ExecStartPre=/usr/bin/docker compose --project-name openloop --file docker-compose.deploy.yml --file docker-compose.broker.yml config --quiet
