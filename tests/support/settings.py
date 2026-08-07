@@ -15,7 +15,7 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 
 from openloop.config import (
     BrokerSettings,
-    CoprocessBrokerSettings,
+    EmbeddedBrokerSettings,
     RuntimeSettings,
 )
 
@@ -62,11 +62,11 @@ class IsolatedBrokerSettings(_IsolatedSources, BrokerSettings):
     """A ``BrokerSettings`` variant whose only source is ``__init__``."""
 
 
-class IsolatedCoprocessBrokerSettings(
+class IsolatedEmbeddedBrokerSettings(
     _IsolatedSources,
-    CoprocessBrokerSettings,
+    EmbeddedBrokerSettings,
 ):
-    """A ``CoprocessBrokerSettings`` variant using constructor inputs only."""
+    """An ``EmbeddedBrokerSettings`` variant using constructor inputs only."""
 
 
 def build_test_settings(profile: str = "memory", **overrides: Any) -> IsolatedSettings:

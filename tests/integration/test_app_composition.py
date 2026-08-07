@@ -76,7 +76,7 @@ async def test_broker_handle_is_a_recognized_override():
         assert ctx is not None
 
 
-async def test_app_composition_refuses_coprocess_broker_mode(monkeypatch, caplog):
+async def test_app_composition_refuses_embedded_broker_mode(monkeypatch, caplog):
     calls = 0
 
     async def forbidden_build(*args, **kwargs):
@@ -90,7 +90,7 @@ async def test_app_composition_refuses_coprocess_broker_mode(monkeypatch, caplog
             Settings(
                 storage_mode="memory",
                 coding_worker_openhands_broker_enabled=True,
-                broker_mode="coprocess",
+                broker_mode="embedded",
             ),
             {},
         ):

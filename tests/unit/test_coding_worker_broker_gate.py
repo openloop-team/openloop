@@ -45,7 +45,7 @@ def test_broker_flag_requires_docker_sandbox():
     assert build_coding_worker(settings) is None
 
 
-@pytest.mark.parametrize("broker_mode", ["coprocess", "external"])
+@pytest.mark.parametrize("broker_mode", ["embedded", "external"])
 def test_broker_flag_on_without_handle_disables_worker(broker_mode):
     settings = Settings(
         broker_mode=broker_mode,

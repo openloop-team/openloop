@@ -5,7 +5,7 @@
 configured ``broker_mode`` and returns a ready :class:`BrokerClientHandle` (plus
 the resources the coding-worker adapter needs), or ``None`` fail-closed:
 
-- ``coprocess`` (default, unchanged): the whole broker graph lives in this
+- ``embedded`` (default, unchanged): the whole broker graph lives in this
   process. The dispatcher generates the ephemeral identity keypair, splits it
   into the client's issuer (private) and the service's verifier (public), builds
   the service (unbound) and the client against its socket, then binds the socket
@@ -26,7 +26,7 @@ process-split spec):
 
 - **Real UDS only** — the client reaches the graph solely over the
   ``BrokerRpcServer`` Unix socket; there is no in-process shortcut into the
-  application/coordinator, coprocess or external.
+  application/coordinator, embedded or external.
 - **Separated versioned key rings, one per trust domain.** Capability, runtime,
   and receipt roots are independent version→secret maps (rotatable); a root
   reused within or across domains is rejected (fake rotation / shared trust
@@ -111,11 +111,11 @@ from openloop.broker_rpc.server import BrokerRpcServer, UnixSocketPolicy
 from openloop.broker_runtime.contract import RuntimeDriver
 from openloop.broker_runtime.docker import DockerOpenHandsRuntimeDriver
 from openloop.broker_runtime.docker_policy import DockerRuntimeConfig
-from openloop.config import CoprocessBrokerSettings, RuntimeSettings
+from openloop.config import EmbeddedBrokerSettings, RuntimeSettings
 
 log = logging.getLogger("openloop")
 
-# Fixed control-plane identifiers for the single co-process workload principal.
+# Fixed control-plane identifiers for the single embedded workload principal.
 _OWNER_TENANT = "openloop"
 _OWNER_SUBJECT = "coding-worker"
 # The checkpoint store is the receipt signer; the broker only ever verifies.
@@ -127,7 +127,7 @@ _RUNTIME_DRIVER = "docker"
 _DURABLE_DRIVER = "local"
 # START_SEGMENT performs the bounded Docker probe, creation, and 15-second
 # readiness gate inside one authenticated RPC. The transport's generic 5-second
-# application limit cannot represent that operation, so the co-process profile
+# application limit cannot represent that operation, so the embedded profile
 # pins a longer but still finite envelope across server, client, and sync bridge.
 BROKER_RPC_APPLICATION_TIMEOUT_SECONDS = 120.0
 BROKER_RPC_TOTAL_TIMEOUT_SECONDS = 130.0
@@ -140,7 +140,7 @@ class BrokerClientHandle:
     ``receipt_issuer`` (current-version PRIVATE key) is deliberately kept out of
     the broker graph — it belongs to the checkpoint store the worker adapter
     signs with. ``reconciler`` is filled by :meth:`bind_checkpoint_store` when a
-    local checkpoint store (its receipt locator) is wired, but only in coprocess
+    local checkpoint store (its receipt locator) is wired, but only in embedded
     mode: in external mode the broker owns lifecycle recovery, so ``_ledger``/
     ``_coordinator`` stay ``None`` and no reconciler is built. ``loop`` is the app
     event loop the broker client runs on, captured so the synchronous
@@ -148,7 +148,7 @@ class BrokerClientHandle:
     ``run_coroutine_threadsafe``.
 
     ``shared_data_gid``/``receipt_root`` describe the dedicated receipt tree
-    (required in external mode, optional in coprocess); binding the checkpoint
+    (required in external mode, optional in embedded); binding the checkpoint
     store hands both to :class:`LocalCheckpointReceiptStore` without another
     settings read. Explicitly configuring a receipt root always requires the
     shared GID.
@@ -403,12 +403,12 @@ async def build_broker_service(
     """Assemble the broker service graph with an **unbound** listener.
 
     The identity verifier comes from ``identity_public_keys`` when injected
-    (coprocess passes the ephemeral public) else from
+    (embedded passes the ephemeral public) else from
     ``config.identity_public_keys`` (external). The receipt verifier is
-    injected (coprocess) else built from ``config.receipt_public_keys``
+    injected (embedded) else built from ``config.receipt_public_keys``
     (external). External config additionally runs the decision-11 cross-boundary
     reuse gate. **Raises** on any invalid config — the entrypoint is the
-    fail-fast caller; the coprocess dispatcher wraps this in its fail-closed try.
+    fail-fast caller; the embedded dispatcher wraps this in its fail-closed try.
     """
     if not isinstance(config, BrokerServiceConfig):
         raise TypeError("config must be BrokerServiceConfig")
@@ -425,7 +425,7 @@ async def build_broker_service(
         config.runtime_current_version,
     )
     # Within-broker-domain reuse (cap vs runtime) is rejected in every mode; the
-    # coprocess dispatcher additionally checks receipt roots (which live here in
+    # embedded dispatcher additionally checks receipt roots (which live here in
     # one process), and external adds the cross-boundary gate below.
     _reject_reused_roots(capability_roots, runtime_roots)
 
@@ -510,7 +510,7 @@ async def build_broker_service(
             marker_root=config.runtime_root / ".ingress-markers",
         )
     else:
-        # Co-process: one shared instance, unchanged owner-only construction.
+        # Embedded: one shared instance, unchanged owner-only construction.
         workspace_ingress = LocalWorkspaceIngress(config.ingress_root)
     # Share the whole-second clock so the driver and ledger agree on time.
     runtime = runtime_driver or DockerOpenHandsRuntimeDriver(
@@ -545,7 +545,7 @@ async def build_broker_service(
     # --- server (not yet bound) ------------------------------------------
     socket_path = config.control_socket_dir / "control.sock"
     # A group-readable socket + shared gid lets a separate broker container's
-    # relay reach the control UDS; owner-only otherwise (unchanged coprocess).
+    # relay reach the control UDS; owner-only otherwise (unchanged embedded).
     server = BrokerRpcServer(
         application=application,
         socket_policy=UnixSocketPolicy(
@@ -583,10 +583,10 @@ async def build_broker_client(
 ) -> BrokerClientHandle:
     """Assemble the app-side broker client (issuer + RPC client + handle).
 
-    The identity issuer signs with the injected ephemeral private key (coprocess)
+    The identity issuer signs with the injected ephemeral private key (embedded)
     or the decoded ``config.identity_private_key`` (external). Receipt
     issuer+verifier are derived app-side from ``receipt_roots`` (unchanged
-    derivation). The stage-side ingress is the injected instance (coprocess — one
+    derivation). The stage-side ingress is the injected instance (embedded — one
     shared instance with the service, so their per-job lock maps stay unified) or
     a plain handle on ``config.ingress_root`` (external). Role-specific
     requiredness and defaults are resolved before construction. **Raises** on
@@ -640,7 +640,7 @@ async def build_broker_client(
     )
 
     # --- stage-side workspace ingress ------------------------------------
-    # Injected (co-process) → the service's shared instance, unchanged. Not
+    # Injected (embedded) → the service's shared instance, unchanged. Not
     # injected (external) → a stage-side handle on the required sibling root that
     # writes group-shared modes for the broker to read across the boundary.
     if workspace_ingress is None:
@@ -687,7 +687,7 @@ async def build_broker(
     settings: RuntimeSettings,
     stack: Any,
     *,
-    coprocess_settings: CoprocessBrokerSettings | None = None,
+    embedded_settings: EmbeddedBrokerSettings | None = None,
     pool: Any | None = None,
     runtime_driver: RuntimeDriver | None = None,
     clock: Callable[[], datetime] | None = None,
@@ -695,7 +695,7 @@ async def build_broker(
     """Compose the broker for the configured mode behind the flag; fail-closed.
 
     Returns ``None`` (with a specific log) on any missing/invalid setting so the
-    caller disables the coding worker loudly. In coprocess mode all owned
+    caller disables the coding worker loudly. In embedded mode all owned
     resources register their teardown on ``stack`` and the socket binds last, so
     a returned ``None`` never leaves a listener bound.
     """
@@ -712,7 +712,7 @@ async def build_broker(
             log.error("broker DISABLED: %s", exc)
             return None
 
-    # --- coprocess: the whole graph in this process ----------------------
+    # --- embedded: the whole graph in this process -----------------------
     # Everything below is fail-closed: any construction or setup failure logs a
     # specific reason and returns None so the caller disables the coding worker
     # loudly, never crashing app startup. The socket binds last (second try), so
@@ -720,11 +720,11 @@ async def build_broker(
     try:
         client_config = BrokerClientConfig.from_runtime_settings(
             settings,
-            coprocess_settings=coprocess_settings,
+            embedded_settings=embedded_settings,
         )
-        if coprocess_settings is None:
-            raise ValueError("coprocess broker mode requires CoprocessBrokerSettings")
-        service_config = BrokerServiceConfig.from_coprocess_settings(coprocess_settings)
+        if embedded_settings is None:
+            raise ValueError("embedded broker mode requires EmbeddedBrokerSettings")
+        service_config = BrokerServiceConfig.from_embedded_settings(embedded_settings)
         # The full within-process reuse check across all three root rings — the
         # single-process invariant the split otherwise scatters. build_broker_service
         # re-decodes capability/runtime for authority construction; this decode

@@ -177,7 +177,7 @@ async def run_broker(
                 "broker startup: building receipt locator and lifecycle reconciler"
             )
             # External mode is the only mode this entrypoint runs, and
-            # BrokerConfig already requires all three there — coprocess mode is
+            # BrokerConfig already requires all three there — embedded mode is
             # what leaves them None. Restated here because the config type keeps
             # them Optional across both modes, and a silent None would surface
             # much later as an unverifiable receipt path.

@@ -1,6 +1,6 @@
 """BrokerWorkspaceAdapter forward path (phase 3a).
 
-`create` runs against a real in-memory co-process broker (real create_job +
+`create` runs against a real in-memory embedded broker (real create_job +
 start_segment, real generation semantics) with only the SDK workspace
 construction faked. `stream_git_delta`/`attach_conversation`/`probe` are covered
 with fakes so no OpenHands SDK, Docker, or relay is needed.
@@ -37,7 +37,7 @@ from openloop.tools.openhands_worker import (
 )
 from openloop.wiring.broker import build_broker
 from tests.support.settings import (
-    IsolatedCoprocessBrokerSettings,
+    IsolatedEmbeddedBrokerSettings,
 )
 from tests.support.settings import (
     IsolatedSettings as Settings,
@@ -70,7 +70,7 @@ def _settings(tmp_path, sock_dir, **overrides):
         broker_execution_lease_seconds=300,
     )
     base.update(overrides)
-    return Settings(**base), IsolatedCoprocessBrokerSettings(**base)
+    return Settings(**base), IsolatedEmbeddedBrokerSettings(**base)
 
 
 class _FakeWorkspace:
@@ -79,11 +79,11 @@ class _FakeWorkspace:
 
 
 async def _build_test_broker(stack, tmp_path, sock_dir):
-    settings, coprocess = _settings(tmp_path, sock_dir)
+    settings, embedded = _settings(tmp_path, sock_dir)
     return await build_broker(
         settings,
         stack,
-        coprocess_settings=coprocess,
+        embedded_settings=embedded,
         runtime_driver=InMemoryRuntimeDriver(),
     )
 

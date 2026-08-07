@@ -274,14 +274,14 @@ async def compose(
         limiter = _override_or(selected, "limiter", InMemoryTaskLimiter)
         engine = WorkflowEngine(stores.workflows)
         # Application composition accepts only the external client topology.
-        # The co-process graph remains constructible for isolated broker tests,
+        # The embedded graph remains constructible for isolated broker tests,
         # but privileged lifecycle ownership must never return to the app.
         broker_handle = selected.get("broker_handle")
         if settings.coding_worker_openhands_broker_enabled:
             if settings.broker_mode != "external":
                 log.error(
                     "containerized OpenHands requires BROKER_MODE=external; "
-                    "the app will not compose a co-process broker"
+                    "the app will not compose an embedded broker"
                 )
                 broker_handle = None
             elif broker_handle is None:

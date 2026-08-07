@@ -114,9 +114,7 @@ def test_openhands_docker_requires_external_broker(monkeypatch, tmp_path, caplog
     assert "external broker" in caplog.text
 
 
-def test_openhands_docker_rejects_coprocess_broker_handle(
-    monkeypatch, tmp_path, caplog
-):
+def test_openhands_docker_rejects_embedded_broker_handle(monkeypatch, tmp_path, caplog):
     monkeypatch.setattr(OpenHandsCodingWorker, "probe", lambda self: None)
     with caplog.at_level("ERROR"):
         gateway = _gateway(
@@ -124,7 +122,7 @@ def test_openhands_docker_rejects_coprocess_broker_handle(
                 coding_worker_backend="openhands",
                 coding_worker_sandbox="docker",
                 coding_worker_openhands_broker_enabled=True,
-                broker_mode="coprocess",
+                broker_mode="embedded",
                 coding_worker_openhands_state_dir=str(tmp_path / "openhands-state"),
                 coding_worker_openhands_state_master_key=_state_master_key(),
             ),

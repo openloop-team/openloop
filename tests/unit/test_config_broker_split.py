@@ -17,7 +17,7 @@ from openloop.broker_config import (
 from openloop.config import BrokerSettings, RuntimeSettings
 from tests.support.settings import (
     IsolatedBrokerSettings,
-    IsolatedCoprocessBrokerSettings,
+    IsolatedEmbeddedBrokerSettings,
     IsolatedSettings,
 )
 
@@ -38,7 +38,7 @@ def test_runtime_loads_runtime_dotenv_without_legacy_fallback(monkeypatch, tmp_p
 def test_runtime_defaults_only_external_client_mount_targets():
     settings = IsolatedSettings()
 
-    assert settings.broker_mode == "coprocess"
+    assert settings.broker_mode == "embedded"
     assert Path(settings.broker_control_socket_dir) == (
         DEFAULT_EXTERNAL_BROKER_CONTROL_SOCKET_DIR
     )
@@ -119,12 +119,12 @@ def test_role_configs_expose_only_their_process_trust_material():
     assert not hasattr(service, "receipt_roots")
 
 
-def test_coprocess_service_authority_is_explicit_and_separate(tmp_path):
+def test_embedded_service_authority_is_explicit_and_separate(tmp_path):
     runtime_root = tmp_path / "runtime"
     runtime = IsolatedSettings(
         broker_receipt_roots={"receipt-key-v1": SecretStr("receipt-root")}
     )
-    broker = IsolatedCoprocessBrokerSettings(
+    broker = IsolatedEmbeddedBrokerSettings(
         broker_control_socket_dir=str(tmp_path / "control"),
         broker_state_root=str(tmp_path / "state"),
         broker_runtime_root=str(runtime_root),
@@ -134,19 +134,19 @@ def test_coprocess_service_authority_is_explicit_and_separate(tmp_path):
 
     client = BrokerClientConfig.from_runtime_settings(
         runtime,
-        coprocess_settings=broker,
+        embedded_settings=broker,
     )
-    service = BrokerServiceConfig.from_coprocess_settings(broker)
+    service = BrokerServiceConfig.from_embedded_settings(broker)
 
     assert client.control_socket_dir == tmp_path / "control"
     assert client.ingress_root == runtime_root / ".workspace-ingress"
     assert client.checkpoint_receipt_root is None
-    assert service.mode == "coprocess"
+    assert service.mode == "embedded"
     assert service.state_root == tmp_path / "state"
 
 
-def test_coprocess_client_requires_coprocess_settings():
-    with pytest.raises(ValueError, match="CoprocessBrokerSettings"):
+def test_embedded_client_requires_embedded_settings():
+    with pytest.raises(ValueError, match="EmbeddedBrokerSettings"):
         BrokerClientConfig.from_runtime_settings(IsolatedSettings())
 
 

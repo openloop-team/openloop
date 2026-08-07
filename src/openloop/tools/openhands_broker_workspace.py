@@ -173,7 +173,7 @@ class BrokerWorkspaceAdapter:
         """Fail loudly before approval if the relay workspace SDK is missing.
 
         Skipped when a custom ``workspace_factory`` is injected (tests) — the
-        broker client itself needs no probe (it is co-process and reachable).
+        broker client itself needs no probe (it is embedded and reachable).
         """
         if self._workspace_factory is create_relay_workspace:
             try:

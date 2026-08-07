@@ -1,4 +1,4 @@
-"""build_broker stands up a working co-process broker over a real UDS.
+"""build_broker stands up a working embedded broker over a real UDS.
 
 Hermetic: an in-memory broker repository and an injected in-memory runtime
 driver, so no Postgres or Docker is needed. Exercises the plan's phase-2 gate —
@@ -32,7 +32,7 @@ from openloop.wiring.broker import (
 from tests.support.postgres import postgres_dsn, require_postgres
 from tests.support.settings import (
     IsolatedBrokerSettings,
-    IsolatedCoprocessBrokerSettings,
+    IsolatedEmbeddedBrokerSettings,
 )
 from tests.support.settings import (
     IsolatedSettings as Settings,
@@ -75,18 +75,18 @@ def _settings(tmp_path, sock_dir, **overrides):
     base.update(overrides)
     return (
         Settings(**base),
-        IsolatedCoprocessBrokerSettings(**base),
+        IsolatedEmbeddedBrokerSettings(**base),
         IsolatedBrokerSettings(**base),
     )
 
 
 async def test_build_broker_create_job_round_trip(tmp_path, sock_dir):
-    settings, coprocess, _broker = _settings(tmp_path, sock_dir)
+    settings, embedded, _broker = _settings(tmp_path, sock_dir)
     async with AsyncExitStack() as stack:
         handle = await build_broker(
             settings,
             stack,
-            coprocess_settings=coprocess,
+            embedded_settings=embedded,
             runtime_driver=InMemoryRuntimeDriver(),
         )
         assert isinstance(handle, BrokerClientHandle)
@@ -116,7 +116,7 @@ async def test_build_broker_create_job_round_trip(tmp_path, sock_dir):
 
 
 async def test_build_broker_returns_none_when_flag_off(tmp_path, sock_dir):
-    settings, coprocess, _broker = _settings(
+    settings, embedded, _broker = _settings(
         tmp_path, sock_dir, coding_worker_openhands_broker_enabled=False
     )
     async with AsyncExitStack() as stack:
@@ -124,7 +124,7 @@ async def test_build_broker_returns_none_when_flag_off(tmp_path, sock_dir):
             await build_broker(
                 settings,
                 stack,
-                coprocess_settings=coprocess,
+                embedded_settings=embedded,
             )
             is None
         )
@@ -132,7 +132,7 @@ async def test_build_broker_returns_none_when_flag_off(tmp_path, sock_dir):
 
 async def test_build_broker_fails_closed_on_reused_root(tmp_path, sock_dir):
     # Same bytes under two domains = a shared trust line; build must refuse.
-    settings, coprocess, _broker = _settings(
+    settings, embedded, _broker = _settings(
         tmp_path, sock_dir, broker_runtime_roots={"runtime-key-v1": _root(1)}
     )
     async with AsyncExitStack() as stack:
@@ -140,7 +140,7 @@ async def test_build_broker_fails_closed_on_reused_root(tmp_path, sock_dir):
             await build_broker(
                 settings,
                 stack,
-                coprocess_settings=coprocess,
+                embedded_settings=embedded,
                 runtime_driver=InMemoryRuntimeDriver(),
             )
             is None
@@ -148,7 +148,7 @@ async def test_build_broker_fails_closed_on_reused_root(tmp_path, sock_dir):
 
 
 async def test_build_broker_fails_closed_on_missing_root(tmp_path, sock_dir):
-    settings, coprocess, _broker = _settings(
+    settings, embedded, _broker = _settings(
         tmp_path, sock_dir, broker_capability_roots={}
     )
     async with AsyncExitStack() as stack:
@@ -156,7 +156,7 @@ async def test_build_broker_fails_closed_on_missing_root(tmp_path, sock_dir):
             await build_broker(
                 settings,
                 stack,
-                coprocess_settings=coprocess,
+                embedded_settings=embedded,
                 runtime_driver=InMemoryRuntimeDriver(),
             )
             is None
@@ -168,7 +168,7 @@ async def test_generation_deadline_caps_the_real_runtime(tmp_path, sock_dir):
     # lifetime comes from broker_generation_deadline_seconds. A lease within the
     # deadline builds; a lease longer than the deadline is rejected by the
     # coordinator — proving the deadline is wired, not silently the 86400 default.
-    within, within_coprocess, _broker = _settings(
+    within, within_embedded, _broker = _settings(
         tmp_path,
         sock_dir,
         broker_execution_lease_seconds=300,
@@ -179,14 +179,14 @@ async def test_generation_deadline_caps_the_real_runtime(tmp_path, sock_dir):
             await build_broker(
                 within,
                 stack,
-                coprocess_settings=within_coprocess,
+                embedded_settings=within_embedded,
             )
             is not None
         )
 
 
 async def test_lease_longer_than_generation_deadline_fails_closed(tmp_path, sock_dir):
-    over, over_coprocess, _broker = _settings(
+    over, over_embedded, _broker = _settings(
         tmp_path,
         sock_dir,
         broker_execution_lease_seconds=1000,
@@ -197,7 +197,7 @@ async def test_lease_longer_than_generation_deadline_fails_closed(tmp_path, sock
             await build_broker(
                 over,
                 stack,
-                coprocess_settings=over_coprocess,
+                embedded_settings=over_embedded,
             )
             is None
         )
@@ -210,7 +210,7 @@ async def test_bad_permission_state_root_fails_closed(tmp_path, sock_dir):
     loose = tmp_path / "loose-state"
     loose.mkdir()
     loose.chmod(0o755)
-    settings, coprocess, _broker = _settings(
+    settings, embedded, _broker = _settings(
         tmp_path,
         sock_dir,
         broker_state_root=str(loose),
@@ -220,7 +220,7 @@ async def test_bad_permission_state_root_fails_closed(tmp_path, sock_dir):
             await build_broker(
                 settings,
                 stack,
-                coprocess_settings=coprocess,
+                embedded_settings=embedded,
                 runtime_driver=InMemoryRuntimeDriver(),
             )
             is None
@@ -236,14 +236,14 @@ async def test_build_broker_uses_durable_audit_with_postgres(tmp_path, sock_dir)
     await require_postgres(_DSN)
     import asyncpg
 
-    settings, coprocess, _broker = _settings(tmp_path, sock_dir)
+    settings, embedded, _broker = _settings(tmp_path, sock_dir)
     pool = await asyncpg.create_pool(_DSN, min_size=1, max_size=2)
     try:
         async with AsyncExitStack() as stack:
             handle = await build_broker(
                 settings,
                 stack,
-                coprocess_settings=coprocess,
+                embedded_settings=embedded,
                 pool=pool,
                 runtime_driver=InMemoryRuntimeDriver(),
             )
@@ -309,7 +309,7 @@ def _external_settings(tmp_path, sock_dir, **overrides):
 
 
 async def test_external_client_round_trips_against_built_service(tmp_path, sock_dir):
-    settings, _coprocess, broker_settings = _external_settings(tmp_path, sock_dir)
+    settings, _embedded, broker_settings = _external_settings(tmp_path, sock_dir)
     async with AsyncExitStack() as stack:
         # Build + bind the service half separately (the openloop-broker process
         # in production); the caller registers stop after a successful bind.
@@ -342,7 +342,7 @@ async def test_external_client_round_trips_against_built_service(tmp_path, sock_
 async def test_external_service_threads_shared_gid_into_docker_runtime(
     tmp_path, sock_dir
 ):
-    settings, _coprocess, broker_settings = _external_settings(tmp_path, sock_dir)
+    settings, _embedded, broker_settings = _external_settings(tmp_path, sock_dir)
 
     async with AsyncExitStack() as stack:
         service = await build_broker_service(
@@ -364,7 +364,7 @@ async def test_external_service_threads_shared_gid_into_docker_runtime(
 async def test_external_missing_required_client_field_fails_closed(
     tmp_path, sock_dir, caplog, missing_field
 ):
-    settings, _coprocess, _broker = _external_settings(
+    settings, _embedded, _broker = _external_settings(
         tmp_path,
         sock_dir,
         **{missing_field: None},
@@ -381,7 +381,7 @@ async def test_external_missing_required_client_field_fails_closed(
 
 async def test_external_reused_receipt_root_fails_closed(tmp_path, sock_dir, caplog):
     reused = base64.b64encode(_EXTERNAL_RECEIPT_ROOT).decode()
-    settings, _coprocess, _broker = _external_settings(
+    settings, _embedded, _broker = _external_settings(
         tmp_path,
         sock_dir,
         broker_receipt_roots={
@@ -402,7 +402,7 @@ async def test_external_reused_receipt_root_fails_closed(tmp_path, sock_dir, cap
 async def test_external_bind_checkpoint_store_leaves_reconciler_none(
     tmp_path, sock_dir
 ):
-    settings, _coprocess, _broker = _external_settings(tmp_path, sock_dir)
+    settings, _embedded, _broker = _external_settings(tmp_path, sock_dir)
     async with AsyncExitStack() as stack:
         handle = await build_broker_client(
             BrokerClientConfig.from_runtime_settings(settings),
@@ -423,10 +423,10 @@ async def test_external_bind_checkpoint_store_leaves_reconciler_none(
     assert handle.reconciler is None
 
 
-async def test_coprocess_ignores_external_receipt_mount_target(tmp_path, sock_dir):
+async def test_embedded_ignores_external_receipt_mount_target(tmp_path, sock_dir):
     receipt_root = tmp_path / "misconfigured-receipts"
     receipt_root.mkdir()
-    settings, coprocess, _broker = _settings(
+    settings, embedded, _broker = _settings(
         tmp_path,
         sock_dir,
         broker_checkpoint_receipt_root=str(receipt_root),
@@ -437,20 +437,20 @@ async def test_coprocess_ignores_external_receipt_mount_target(tmp_path, sock_di
         handle = await build_broker(
             settings,
             stack,
-            coprocess_settings=coprocess,
+            embedded_settings=embedded,
             runtime_driver=InMemoryRuntimeDriver(),
         )
         assert handle is not None
         assert handle.receipt_root is None
 
 
-async def test_coprocess_client_failure_returns_none_and_no_listener(
+async def test_embedded_client_failure_returns_none_and_no_listener(
     tmp_path, sock_dir, monkeypatch
 ):
     # Force the client half to fail AFTER the service is constructed. Bind is the
     # last fallible act and happens only after client construction, so the socket
     # must never be bound: build_broker returns None and no inode exists.
-    settings, coprocess, _broker = _settings(tmp_path, sock_dir)
+    settings, embedded, _broker = _settings(tmp_path, sock_dir)
     import openloop.wiring.broker as broker_mod
 
     async def _boom(*args, **kwargs):
@@ -462,7 +462,7 @@ async def test_coprocess_client_failure_returns_none_and_no_listener(
         handle = await build_broker(
             settings,
             stack,
-            coprocess_settings=coprocess,
+            embedded_settings=embedded,
             runtime_driver=InMemoryRuntimeDriver(),
         )
     assert handle is None

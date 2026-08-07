@@ -199,7 +199,7 @@ class RuntimeSettings(_OpenLoopSettings):
         DEFAULT_EXTERNAL_BROKER_CHECKPOINT_RECEIPT_ROOT
     )
     # Master switch for the client topology. A typo must fail validation.
-    broker_mode: str = "coprocess"  # "coprocess" | "external"
+    broker_mode: str = "embedded"  # "embedded" | "external"
     # External mode: the runtime signs short-lived workload identity tokens.
     broker_identity_issuer: str = "openloop-app"
     broker_identity_audience: str = "openloop-broker"
@@ -283,7 +283,7 @@ class RuntimeSettings(_OpenLoopSettings):
     @field_validator("broker_mode")
     @classmethod
     def _validate_broker_mode(cls, value: str) -> str:
-        allowed = {"coprocess", "external"}
+        allowed = {"embedded", "external"}
         if value not in allowed:
             raise ValueError(
                 f"broker_mode must be one of {sorted(allowed)}, got {value!r}"
@@ -405,10 +405,10 @@ class BrokerSettings(_OpenLoopSettings):
         return self
 
 
-class CoprocessBrokerSettings(_OpenLoopSettings):
-    """Broker-service authority loaded only for an explicit coprocess topology.
+class EmbeddedBrokerSettings(_OpenLoopSettings):
+    """Broker-service authority loaded only for an explicit embedded topology.
 
-    Coprocess paths remain explicit so a local runtime cannot accidentally
+    Embedded paths remain explicit so a local runtime cannot accidentally
     claim the external container's fixed ``/var/lib/openloop/broker`` targets.
     """
 

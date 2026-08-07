@@ -68,7 +68,7 @@ def _settings(
     topology = os.environ.get("OPENLOOP_CANARY_BROKER_MODE", "subprocess")
     if topology not in _BROKER_TOPOLOGIES:
         raise RuntimeError(f"unsupported canary broker topology: {topology}")
-    external = topology != "coprocess"
+    external = topology != "embedded"
     identity_seed = _IDENTITY_SEED
     receipt_root_bytes = _RECEIPT_ROOT
     if topology == "managed":

@@ -1,7 +1,7 @@
 """Bounded local workspace staging for broker-owned Docker generations.
 
 The control RPC intentionally carries no host paths or large workspace payloads.
-For the co-process canary, the unprivileged worker stages a prepared checkout in
+For the embedded canary, the unprivileged worker stages a prepared checkout in
 this private store under the broker-minted ``(job_id, generation)`` identity.
 The Docker runtime consumes that immutable snapshot before it creates any
 network or container.
@@ -16,7 +16,7 @@ still-containerless workspace to be rebuilt from the immutable snapshot.
 
 When the broker runs as a *separate process* (external mode) the app stages and
 the broker materializes across a uid boundary.  Three keyword knobs carry that
-split without changing the co-process default (all unset → byte-for-byte today):
+split without changing the embedded default (all unset → byte-for-byte today):
 
 - ``shared_gid`` (stage side): directories are setgid group-mode ``0o2750`` owned
   by the shared gid so children inherit the group; files ``0o640``/``0o750`` and
@@ -1027,7 +1027,7 @@ class LocalWorkspaceIngress:
         """Materialize side: confirm a staged path is owned by the app identity.
 
         Active only when ``expected_stage_uid`` is set (external broker).  In the
-        co-process default (unset) this is a no-op, preserving today's checks.
+        embedded default (unset) this is a no-op, preserving today's checks.
         """
         if self.expected_stage_uid is None:
             return
@@ -1432,7 +1432,7 @@ class LocalWorkspaceIngress:
                         "workspace seed manifest identity does not match its path"
                     )
                 if self.marker_root is None:
-                    # Default (co-process): manifest-then-marker, in-tree marker.
+                    # Default (embedded): manifest-then-marker, in-tree marker.
                     consumed = target / _CONSUMED
                     if consumed.exists():
                         try:

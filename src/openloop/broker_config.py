@@ -18,11 +18,11 @@ from openloop.config import (
     DEFAULT_EXTERNAL_BROKER_RUNTIME_ROOT,
     DEFAULT_EXTERNAL_BROKER_STATE_ROOT,
     BrokerSettings,
-    CoprocessBrokerSettings,
+    EmbeddedBrokerSettings,
     RuntimeSettings,
 )
 
-BrokerMode = Literal["coprocess", "external"]
+BrokerMode = Literal["embedded", "external"]
 
 
 __all__ = [
@@ -69,7 +69,7 @@ class BrokerClientConfig:
         cls,
         settings: RuntimeSettings,
         *,
-        coprocess_settings: CoprocessBrokerSettings | None = None,
+        embedded_settings: EmbeddedBrokerSettings | None = None,
     ) -> BrokerClientConfig:
         if not isinstance(settings, RuntimeSettings):
             raise TypeError("settings must be RuntimeSettings")
@@ -104,33 +104,31 @@ class BrokerClientConfig:
                     f"external broker mode requires {', '.join(missing)} to be set"
                 )
         else:
-            if not isinstance(coprocess_settings, CoprocessBrokerSettings):
-                raise ValueError(
-                    "coprocess broker mode requires CoprocessBrokerSettings"
-                )
+            if not isinstance(embedded_settings, EmbeddedBrokerSettings):
+                raise ValueError("embedded broker mode requires EmbeddedBrokerSettings")
             control_socket_dir = _required_path(
                 "broker_control_socket_dir",
-                coprocess_settings.broker_control_socket_dir,
+                embedded_settings.broker_control_socket_dir,
             )
             ingress_root = (
                 _required_path(
                     "broker_runtime_root",
-                    coprocess_settings.broker_runtime_root,
+                    embedded_settings.broker_runtime_root,
                 )
                 / ".workspace-ingress"
             )
             checkpoint_receipt_root = None
-            shared_data_gid = coprocess_settings.broker_shared_data_gid
+            shared_data_gid = embedded_settings.broker_shared_data_gid
             if (
-                coprocess_settings.broker_identity_issuer
+                embedded_settings.broker_identity_issuer
                 != settings.broker_identity_issuer
-                or coprocess_settings.broker_identity_audience
+                or embedded_settings.broker_identity_audience
                 != settings.broker_identity_audience
-                or coprocess_settings.broker_receipt_domain
+                or embedded_settings.broker_receipt_domain
                 != settings.broker_receipt_domain
             ):
                 raise ValueError(
-                    "coprocess runtime and broker trust-domain settings must match"
+                    "embedded runtime and broker trust-domain settings must match"
                 )
 
         if checkpoint_receipt_root is not None and shared_data_gid is None:
@@ -143,7 +141,7 @@ class BrokerClientConfig:
             # `external` above is this same comparison; restating it as a
             # conditional is what produces the BrokerMode literal the field
             # declares, rather than the bare str the setting carries.
-            mode="external" if external else "coprocess",
+            mode="external" if external else "embedded",
             control_socket_dir=control_socket_dir,
             ingress_root=ingress_root,
             checkpoint_receipt_root=checkpoint_receipt_root,
@@ -247,17 +245,17 @@ class BrokerServiceConfig:
         )
 
     @classmethod
-    def from_coprocess_settings(
-        cls, settings: CoprocessBrokerSettings
+    def from_embedded_settings(
+        cls, settings: EmbeddedBrokerSettings
     ) -> BrokerServiceConfig:
-        if not isinstance(settings, CoprocessBrokerSettings):
-            raise TypeError("settings must be CoprocessBrokerSettings")
+        if not isinstance(settings, EmbeddedBrokerSettings):
+            raise TypeError("settings must be EmbeddedBrokerSettings")
         runtime_root = _required_path(
             "broker_runtime_root",
             settings.broker_runtime_root,
         )
         return cls(
-            mode="coprocess",
+            mode="embedded",
             control_socket_dir=_required_path(
                 "broker_control_socket_dir",
                 settings.broker_control_socket_dir,
