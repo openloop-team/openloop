@@ -42,9 +42,12 @@ depends = ["lint", "format-check", "typecheck", "test"]
 
 [tasks.compose-build]
 description = "Fetch the pinned Docker adapter and build the shared OpenLoop image"
+# The deploy and broker files only consume an image. Building goes through
+# docker-compose.build.yml, which tags the local artifact; a production
+# deployment selects a pushed digest instead (docs/operations/releases.md).
 run = """
 docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml pull docker-socket-adapter
-docker compose -f docker-compose.deploy.yml -f docker-compose.broker.yml build runtime
+docker compose -f docker-compose.build.yml build runtime
 """
 
 [tasks.compose-up]

@@ -264,6 +264,12 @@ class RuntimeSettings(_OpenLoopSettings):
     # Runtime
     log_level: str = "info"
 
+    # Which recorded release deployed this process, injected by the release
+    # selection rather than authored: it identifies an image digest, both
+    # configuration revisions, and the secret-manager environments in one id.
+    # Empty outside a recorded deployment (local runs, tests).
+    release_id: str = ""
+
     # Where agent config-as-code lives
     agents_dir: str = "agents"
 

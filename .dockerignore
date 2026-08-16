@@ -10,3 +10,9 @@
 .env.runtime.bkp
 .env.broker.bkp
 secrets/
+# Configuration is a separately versioned bundle the deployment mounts, never
+# image content (docs/operations/releases.md). Keeping it out of the build
+# context makes a reintroduced COPY fail loudly instead of shipping a second,
+# divergent copy of the agents and settings.
+agents/
+configs/

@@ -53,7 +53,13 @@ COPY src ./src
 # App private key read-only and point GITHUB_APP_PRIVATE_KEY_PATH at it.
 RUN pip install --upgrade pip && pip install ".[redis,githubapp,mcp,openhands]"
 
-COPY agents ./agents
+# Agent definitions and runtime settings are deliberately NOT copied here. They
+# are a separately versioned configuration bundle the deployment mounts at
+# /app/agents and injects through env_file, so editing an agent or a setting is
+# a configuration revision against the same image digest — never a rebuild, and
+# never a reason for two hosts running one digest to behave differently. Create
+# the mount point so a composition that grants no agents still starts.
+RUN mkdir -p /app/agents
 
 # Everything under /app was copied as root; hand it to the runtime user so the
 # coding worker can write scratch state next to the app if it needs to.

@@ -13,11 +13,12 @@ from openloop.tools.openhands_relay_profile import DEFAULT_HAPROXY_RELAY_IMAGE
 ROOT = Path(__file__).parents[2]
 OVERRIDE = ROOT / "docker-compose.broker.yml"
 DEPLOY = ROOT / "docker-compose.deploy.yml"
+BUILD_FILE = ROOT / "docker-compose.build.yml"
 RUNTIME_COMPOSITIONS = (
     ROOT / "docker-compose.yml",
     DEPLOY,
 )
-COMPOSITIONS = (*RUNTIME_COMPOSITIONS, OVERRIDE)
+COMPOSITIONS = (*RUNTIME_COMPOSITIONS, OVERRIDE, BUILD_FILE)
 BROKER_ROOT = "${OPENLOOP_BROKER_ROOT:?}"
 BROKER_CONTAINER_ROOT = "/var/lib/openloop/broker"
 BROKER_CONTROL = f"{BROKER_CONTAINER_ROOT}/control"
@@ -88,15 +89,28 @@ def test_init_service_runs_as_root_and_provisions_the_same_host_root():
     assert root_mount["bind"] == {"create_host_path": True}
 
 
-def test_services_share_one_image_and_only_runtime_builds_it():
+def test_services_share_one_image_and_the_deploy_bundle_never_builds_it():
+    """The production pair only consumes an image.
+
+    Building belongs to `docker-compose.build.yml`: a release selects a pushed
+    digest, and Docker cannot even tag a build with a digest reference, so a
+    `build:` reachable from the deploy bundle could only ever bind production
+    to a locally tagged image.
+    """
     services = _compose()["services"]
 
     for service in ("broker-init", "broker", "runtime"):
         assert services[service]["image"] == OPENLOOP_IMAGE
+        assert "build" not in services[service]
 
-    assert services["runtime"]["build"] == BUILD
-    assert "build" not in services["broker"]
-    assert "build" not in services["broker-init"]
+    build = yaml.safe_load(BUILD_FILE.read_text())["services"]
+    assert build["runtime"]["build"] == BUILD
+    assert build["runtime"]["image"] == OPENLOOP_IMAGE
+    assert set(build) == {"runtime"}
+
+    for path in (OVERRIDE, DEPLOY):
+        deployed = yaml.safe_load(path.read_text())["services"].values()
+        assert all("build" not in service for service in deployed)
 
     for path in RUNTIME_COMPOSITIONS:
         runtime = yaml.safe_load(path.read_text())["services"]["runtime"]

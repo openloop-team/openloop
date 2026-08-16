@@ -19,18 +19,11 @@
 #
 # This override keeps Docker authority inside the adapter/broker trust boundary.
 
-x-openloop-build: &openloop-build
-  context: .
-  args:
-    OPENLOOP_BROKER_UID: ${OPENLOOP_BROKER_UID:-10002}
-    OPENLOOP_DATA_GID: ${OPENLOOP_DATA_GID:-10777}
-
+# One image serves all three OpenLoop services. It is selected, never built
+# here: `docker-compose.build.yml` owns image production so this bundle can
+# only consume a digest a release already recorded.
 x-openloop-image: &openloop-image
   image: ${OPENLOOP_IMAGE:-openloop:local}
-
-x-openloop-runtime-image: &openloop-runtime-image
-  <<: *openloop-image
-  build: *openloop-build
 
 services:
   # This is a permission shim, not a Docker API policy boundary. Any process
@@ -159,7 +152,7 @@ services:
           create_host_path: true
 
   runtime:
-    <<: *openloop-runtime-image
+    <<: *openloop-image
     group_add:
       - ${OPENLOOP_DATA_GID:-10777}
     environment:
