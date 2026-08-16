@@ -2,7 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-22
-- **Implementation:** repository cut complete 2026-07-22
 
 ## Context
 
