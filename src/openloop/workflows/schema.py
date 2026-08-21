@@ -16,7 +16,9 @@ workflow_instances = Table(
     Column("completed_steps", JSONB, nullable=False),
     Column("state", JSONB, nullable=False),
     Column("waiting_on", Text),
-    Column("result", JSONB),
+    # `none_as_null`: a workflow with no result stores SQL NULL, not the
+    # JSON value `null`, which is what SQLAlchemy writes by default.
+    Column("result", JSONB(none_as_null=True)),
     Column("error", Text),
     # Store-owned: never written from an instance payload.
     Column("leased_until", DateTime(timezone=True)),

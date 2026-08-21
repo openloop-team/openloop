@@ -116,7 +116,10 @@ broker_operations = Table(
     Column("generation", BigInteger),
     Column("status", Text, nullable=False),
     Column("intent_ticket", JSONB, nullable=False),
-    Column("completion_result", JSONB),
+    # `none_as_null`: without it SQLAlchemy writes Python None as JSON
+    # `null`, which is a JSON value and not SQL NULL — and the table's
+    # CHECK requires a completion result to be an object or absent.
+    Column("completion_result", JSONB(none_as_null=True)),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )

@@ -16,7 +16,12 @@ from sqlalchemy import bindparam, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from openloop.broker.schema import broker_generations, broker_jobs
+from openloop.broker.schema import (
+    broker_audit,
+    broker_generations,
+    broker_jobs,
+    broker_operations,
+)
 from openloop.db import BorrowedEngineStore
 
 from .errors import (
@@ -184,24 +189,26 @@ def _json_object(value: str | dict[str, Any]) -> dict[str, Any]:
     return decoded
 
 
-def _encode_ticket(ticket: OperationTicket) -> str:
-    return json.dumps(
-        {
-            "operation_id": str(ticket.operation_id),
-            "command": ticket.command.value,
-            "job_id": str(ticket.job_id) if ticket.job_id else None,
-            "conversation_id": (
-                str(ticket.conversation_id) if ticket.conversation_id else None
-            ),
-            "generation": ticket.generation,
-            "job_state": ticket.job_state.value if ticket.job_state else None,
-            "generation_state": (
-                ticket.generation_state.value if ticket.generation_state else None
-            ),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+def _encode_ticket(ticket: OperationTicket) -> dict[str, Any]:
+    """The ticket as a JSON object.
+
+    A mapping, not JSON text: the column is JSONB and the type does the
+    encoding, so neither a `json.dumps` here nor a cast in the statement is
+    needed. `_decode_ticket` already accepted either form.
+    """
+    return {
+        "operation_id": str(ticket.operation_id),
+        "command": ticket.command.value,
+        "job_id": str(ticket.job_id) if ticket.job_id else None,
+        "conversation_id": (
+            str(ticket.conversation_id) if ticket.conversation_id else None
+        ),
+        "generation": ticket.generation,
+        "job_state": ticket.job_state.value if ticket.job_state else None,
+        "generation_state": (
+            ticket.generation_state.value if ticket.generation_state else None
+        ),
+    }
 
 
 def _decode_ticket(value: str | dict[str, Any]) -> OperationTicket:
@@ -223,21 +230,18 @@ def _decode_ticket(value: str | dict[str, Any]) -> OperationTicket:
     )
 
 
-def _encode_result(result: OperationResult) -> str:
-    return json.dumps(
-        {
-            "operation_id": str(result.operation_id),
-            "command": result.command.value,
-            "job_id": str(result.job_id),
-            "generation": result.generation,
-            "job_state": result.job_state.value,
-            "generation_state": (
-                result.generation_state.value if result.generation_state else None
-            ),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+def _encode_result(result: OperationResult) -> dict[str, Any]:
+    """The result as a JSON object — a mapping, for the reason above."""
+    return {
+        "operation_id": str(result.operation_id),
+        "command": result.command.value,
+        "job_id": str(result.job_id),
+        "generation": result.generation,
+        "job_state": result.job_state.value,
+        "generation_state": (
+            result.generation_state.value if result.generation_state else None
+        ),
+    }
 
 
 def _decode_result(value: str | dict[str, Any]) -> OperationResult:
@@ -380,64 +384,121 @@ def _operation_from_row(row: Any) -> OperationRecord:
     )
 
 
-_INSERT_OPERATION = """
-INSERT INTO broker_operations (
-    operation_id, tenant_id, workload_subject, source, idempotency_key,
-    command_kind, request_digest, job_id, generation, status, intent_ticket,
-    completion_result, created_at, updated_at
-)
-VALUES (
-    :operation_id, :tenant_id, :workload_subject, :source, :idempotency_key,
-    :command_kind, :request_digest, :job_id, :generation, :status,
-    CAST(:intent_ticket AS jsonb), NULL, :now, :now
-)
-ON CONFLICT DO NOTHING
-RETURNING *
-"""
+def _insert_operation_statement() -> Any:
+    return (
+        insert(broker_operations)
+        .values(
+            operation_id=bindparam("operation_id"),
+            tenant_id=bindparam("tenant_id"),
+            workload_subject=bindparam("workload_subject"),
+            source=bindparam("source"),
+            idempotency_key=bindparam("idempotency_key"),
+            command_kind=bindparam("command_kind"),
+            request_digest=bindparam("request_digest"),
+            job_id=bindparam("job_id"),
+            generation=bindparam("generation"),
+            status=bindparam("status"),
+            # Was `$11::jsonb`. The column's JSONB type does the encoding, so
+            # neither a cast nor a json.dumps at the call site survives.
+            intent_ticket=bindparam("intent_ticket"),
+            completion_result=None,
+            created_at=bindparam("now"),
+            updated_at=bindparam("now"),
+        )
+        .on_conflict_do_nothing()
+        .returning(*broker_operations.c)
+    )
 
-_SELECT_CALLER_OPERATION = """
-SELECT * FROM broker_operations
-WHERE tenant_id = :tenant_id
-  AND workload_subject = :workload_subject
-  AND idempotency_key = :idempotency_key
-FOR UPDATE
-"""
 
-_SELECT_OPERATION = """
-SELECT * FROM broker_operations WHERE operation_id = :operation_id FOR UPDATE
-"""
+def _select_caller_operation() -> Any:
+    return (
+        select(broker_operations)
+        .where(
+            broker_operations.c.tenant_id == bindparam("tenant_id"),
+            broker_operations.c.workload_subject == bindparam("workload_subject"),
+            broker_operations.c.idempotency_key == bindparam("idempotency_key"),
+        )
+        .with_for_update()
+    )
 
-_UPDATE_OPERATION_TICKET = """
-UPDATE broker_operations
-SET intent_ticket = CAST(:intent_ticket AS jsonb),
-    generation = :generation,
-    updated_at = :updated_at
-WHERE operation_id = :operation_id
-RETURNING *
-"""
 
-_COMPLETE_OPERATION = """
-UPDATE broker_operations
-SET status = 'completed',
-    completion_result = CAST(:completion_result AS jsonb),
-    updated_at = :updated_at
-WHERE operation_id = :operation_id AND status = 'pending'
-RETURNING *
-"""
+def _select_operation() -> Any:
+    return (
+        select(broker_operations)
+        .where(broker_operations.c.operation_id == bindparam("operation_id"))
+        .with_for_update()
+    )
 
-_COMPLETE_OPERATION_WITHOUT_RESULT = """
-UPDATE broker_operations
-SET status = 'completed', updated_at = :updated_at
-WHERE operation_id = :operation_id AND status = 'pending'
-RETURNING *
-"""
 
-_FAIL_OPERATION = """
-UPDATE broker_operations
-SET status = 'failed', updated_at = :updated_at
-WHERE operation_id = :operation_id AND status = 'pending'
-RETURNING *
-"""
+def _update_operation_ticket_statement() -> Any:
+    return (
+        broker_operations.update()
+        .where(broker_operations.c.operation_id == bindparam("key_operation_id"))
+        .values(
+            intent_ticket=bindparam("intent_ticket"),
+            generation=bindparam("generation"),
+            updated_at=bindparam("updated_at"),
+        )
+        .returning(*broker_operations.c)
+    )
+
+
+def _complete_operation_statement() -> Any:
+    return (
+        broker_operations.update()
+        .where(
+            broker_operations.c.operation_id == bindparam("key_operation_id"),
+            # Single-winner guard: a second completion matches no row.
+            broker_operations.c.status == "pending",
+        )
+        .values(
+            status="completed",
+            completion_result=bindparam("completion_result"),
+            updated_at=bindparam("updated_at"),
+        )
+        .returning(*broker_operations.c)
+    )
+
+
+def _complete_operation_without_result_statement() -> Any:
+    return (
+        broker_operations.update()
+        .where(
+            broker_operations.c.operation_id == bindparam("key_operation_id"),
+            broker_operations.c.status == "pending",
+        )
+        .values(status="completed", updated_at=bindparam("updated_at"))
+        .returning(*broker_operations.c)
+    )
+
+
+def _fail_operation_statement() -> Any:
+    return (
+        broker_operations.update()
+        .where(
+            broker_operations.c.operation_id == bindparam("key_operation_id"),
+            broker_operations.c.status == "pending",
+        )
+        .values(status="failed", updated_at=bindparam("updated_at"))
+        .returning(*broker_operations.c)
+    )
+
+
+def _insert_audit_statement() -> Any:
+    return broker_audit.insert().values(
+        command_kind=bindparam("command_kind"),
+        tenant_id=bindparam("tenant_id"),
+        workload_subject=bindparam("workload_subject"),
+        job_id=bindparam("job_id"),
+        generation=bindparam("generation"),
+        operation_id=bindparam("operation_id"),
+        before_job_state=bindparam("before_job_state"),
+        after_job_state=bindparam("after_job_state"),
+        before_generation_state=bindparam("before_generation_state"),
+        after_generation_state=bindparam("after_generation_state"),
+        reason_code=bindparam("reason_code"),
+        created_at=bindparam("created_at"),
+    )
 
 
 def _select_job(*, lock: bool) -> Any:
@@ -539,28 +600,13 @@ def _update_generation_statement() -> Any:
     )
 
 
-_INSERT_AUDIT = """
-INSERT INTO broker_audit (
-    command_kind, tenant_id, workload_subject, job_id, generation, operation_id,
-    before_job_state, after_job_state, before_generation_state,
-    after_generation_state, reason_code, created_at
-)
-VALUES (
-    :command_kind, :tenant_id, :workload_subject, :job_id, :generation,
-    :operation_id, :before_job_state, :after_job_state,
-    :before_generation_state, :after_generation_state, :reason_code, :now
-)
-"""
-
-
-async def _first(connection: AsyncConnection, statement: str, **parameters: Any) -> Any:
+async def _first(connection: AsyncConnection, statement: Any, **parameters: Any) -> Any:
     """Run *statement* and return its first row as a mapping, or None.
 
-    Every statement in this module is text (Tasks 13 and 14 move the job,
-    generation, operation, and audit statements to the expression language);
-    `.mappings()` is what keeps `row["column"]` working across the change.
+    `.mappings()` is what keeps the `_*_from_row` helpers reading
+    `row["column"]` unchanged.
     """
-    result = await connection.execute(text(statement), parameters)
+    result = await connection.execute(statement, parameters)
     return result.mappings().first()
 
 
@@ -727,6 +773,9 @@ class PostgresBrokerRepository(BorrowedEngineStore):
 
     @staticmethod
     async def _database_now(connection: AsyncConnection) -> datetime:
+        # sql-text: a bare clock read with no table behind it. The truncation
+        # is load-bearing — RunningGenerationAccess rejects a sub-second
+        # deadline.
         return await connection.scalar(
             text("SELECT date_trunc('second', clock_timestamp())")
         )
@@ -771,7 +820,7 @@ class PostgresBrokerRepository(BorrowedEngineStore):
     ) -> tuple[OperationRecord, OperationTicket | None]:
         row = await _first(
             connection,
-            _INSERT_OPERATION,
+            _insert_operation_statement(),
             operation_id=command.operation_id,
             tenant_id=command.owner.tenant_id,
             workload_subject=command.owner.workload_subject,
@@ -789,7 +838,7 @@ class PostgresBrokerRepository(BorrowedEngineStore):
             return _operation_from_row(row), None
         row = await _first(
             connection,
-            _SELECT_CALLER_OPERATION,
+            _select_caller_operation(),
             tenant_id=command.owner.tenant_id,
             workload_subject=command.owner.workload_subject,
             idempotency_key=command.idempotency_key,
@@ -812,7 +861,7 @@ class PostgresBrokerRepository(BorrowedEngineStore):
         now: datetime,
     ) -> tuple[OperationRecord, OperationResult | None]:
         row = await _first(
-            connection, _SELECT_OPERATION, operation_id=command.operation_id
+            connection, _select_operation(), operation_id=command.operation_id
         )
         if row is not None:
             operation = _operation_from_row(row)
@@ -832,7 +881,7 @@ class PostgresBrokerRepository(BorrowedEngineStore):
             raise OperationMismatch(command.operation_id)
         row = await _first(
             connection,
-            _INSERT_OPERATION,
+            _insert_operation_statement(),
             operation_id=command.operation_id,
             tenant_id=command.owner.tenant_id,
             workload_subject=command.owner.workload_subject,
@@ -859,7 +908,7 @@ class PostgresBrokerRepository(BorrowedEngineStore):
     ) -> OperationRecord:
         row = await _first(
             connection,
-            _INSERT_OPERATION,
+            _insert_operation_statement(),
             operation_id=command.operation_id,
             tenant_id=command.owner.tenant_id,
             workload_subject=command.owner.workload_subject,
@@ -1138,8 +1187,8 @@ class PostgresBrokerRepository(BorrowedEngineStore):
     ) -> OperationRecord:
         row = await _first(
             connection,
-            _UPDATE_OPERATION_TICKET,
-            operation_id=operation_id,
+            _update_operation_ticket_statement(),
+            key_operation_id=operation_id,
             intent_ticket=_encode_ticket(ticket),
             generation=ticket.generation,
             updated_at=now,
@@ -1154,8 +1203,8 @@ class PostgresBrokerRepository(BorrowedEngineStore):
     ) -> None:
         row = await _first(
             connection,
-            _COMPLETE_OPERATION,
-            operation_id=result.operation_id,
+            _complete_operation_statement(),
+            key_operation_id=result.operation_id,
             completion_result=_encode_result(result),
             updated_at=now,
         )
@@ -1168,8 +1217,8 @@ class PostgresBrokerRepository(BorrowedEngineStore):
     ) -> None:
         row = await _first(
             connection,
-            _COMPLETE_OPERATION_WITHOUT_RESULT,
-            operation_id=operation_id,
+            _complete_operation_without_result_statement(),
+            key_operation_id=operation_id,
             updated_at=now,
         )
         if row is None:
@@ -1180,7 +1229,10 @@ class PostgresBrokerRepository(BorrowedEngineStore):
         connection: Any, operation_id: UUID, now: datetime
     ) -> None:
         row = await _first(
-            connection, _FAIL_OPERATION, operation_id=operation_id, updated_at=now
+            connection,
+            _fail_operation_statement(),
+            key_operation_id=operation_id,
+            updated_at=now,
         )
         if row is None:
             raise OperationMismatch(operation_id)
@@ -1202,7 +1254,7 @@ class PostgresBrokerRepository(BorrowedEngineStore):
         now: datetime,
     ) -> None:
         await connection.execute(
-            text(_INSERT_AUDIT),
+            _insert_audit_statement(),
             {
                 "command_kind": command.value,
                 "tenant_id": owner.tenant_id,
@@ -1221,7 +1273,7 @@ class PostgresBrokerRepository(BorrowedEngineStore):
                     after_generation_state.value if after_generation_state else None
                 ),
                 "reason_code": reason_code,
-                "now": now,
+                "created_at": now,
             },
         )
 
@@ -1235,7 +1287,7 @@ class PostgresBrokerRepository(BorrowedEngineStore):
         generation: int | None,
         expected_command: CommandKind,
     ) -> tuple[OperationRecord, OperationResult | None]:
-        row = await _first(connection, _SELECT_OPERATION, operation_id=operation_id)
+        row = await _first(connection, _select_operation(), operation_id=operation_id)
         if row is None:
             raise OperationMismatch(operation_id)
         operation = _operation_from_row(row)
@@ -2147,7 +2199,7 @@ class PostgresBrokerRepository(BorrowedEngineStore):
         engine = self._require_engine()
         async with engine.begin() as connection:
             row = await _first(
-                connection, _SELECT_OPERATION, operation_id=command.operation_id
+                connection, _select_operation(), operation_id=command.operation_id
             )
             if row is None:
                 raise OperationMismatch(command.operation_id)
