@@ -6,6 +6,7 @@ import asyncio
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import text
 
 from openloop.broker.errors import (
     IdempotencyConflict,
@@ -575,7 +576,7 @@ async def test_postgres_concurrent_repeated_setup_is_idempotent(
     second = PostgresBrokerRepository()
     third = PostgresBrokerRepository()
     try:
-        await asyncio.gather(second.setup(pool), third.setup(pool))
+        await asyncio.gather(second.setup(engine), third.setup(engine))
         async with pool.acquire() as connection:
             assert (
                 await connection.fetchval(
@@ -602,10 +603,18 @@ async def test_postgres_concurrent_fresh_setup_serializes_bootstrap():
         max_size=4,
         server_settings={"search_path": schema},
     )
+    # Two engines on the same fresh schema: the advisory lock in setup() is
+    # what has to serialize them, not a shared connection.
+    engine = await create_engine(
+        DSN,
+        min_size=2,
+        max_size=4,
+        server_settings={"search_path": schema},
+    )
     first = PostgresBrokerRepository()
     second = PostgresBrokerRepository()
     try:
-        await asyncio.gather(first.setup(pool), second.setup(pool))
+        await asyncio.gather(first.setup(engine), second.setup(engine))
         async with pool.acquire() as connection:
             assert (
                 await connection.fetchval(
@@ -625,6 +634,7 @@ async def test_postgres_concurrent_fresh_setup_serializes_bootstrap():
     finally:
         await first.close()
         await second.close()
+        await engine.dispose()
         await pool.close()
         admin = await asyncpg.connect(DSN)
         try:
@@ -649,7 +659,7 @@ async def test_postgres_append_only_upgrade_records_checksum(
         lambda: (*packaged, upgrade),
     )
     upgraded = PostgresBrokerRepository()
-    await upgraded.setup(pool)
+    await upgraded.setup(engine)
     try:
         async with pool.acquire() as connection:
             row = await connection.fetchrow(
@@ -687,9 +697,9 @@ async def test_postgres_setup_fails_closed_on_drift_or_future_version(
         await connection.execute(mutation)
     candidate = PostgresBrokerRepository()
     with pytest.raises(MigrationVersionError) as caught:
-        await candidate.setup(pool)
+        await candidate.setup(engine)
     assert caught.value.problem is problem
-    assert candidate._pool is None
+    assert candidate._engine is None
     async with pool.acquire() as connection:
         assert await connection.fetchval("SELECT 1") == 1
 
@@ -714,8 +724,8 @@ async def test_postgres_failed_pending_migration_rolls_back_and_detaches(
     )
     candidate = PostgresBrokerRepository()
     with pytest.raises(Exception, match="broker_missing_relation"):
-        await candidate.setup(pool)
-    assert candidate._pool is None
+        await candidate.setup(engine)
+    assert candidate._engine is None
     async with pool.acquire() as connection:
         assert (
             await connection.fetchval("SELECT to_regclass('broker_should_rollback')")
@@ -727,3 +737,48 @@ async def test_postgres_failed_pending_migration_rolls_back_and_detaches(
             )
             == 4
         )
+
+
+async def test_migrations_apply_to_an_empty_schema_through_sqlalchemy(
+    postgres_repository,
+):
+    """Every migration file holds several statements; they must all land.
+
+    The fixture already hands back a schema created for this test alone and a
+    repository whose `setup()` ran against it, so there is nothing to tear down
+    first — which matters, because `execute(text(...))` takes asyncpg's
+    prepared-statement path and cannot run `DROP SCHEMA …; CREATE SCHEMA …` as
+    one statement.
+    """
+    _repository, _pool, engine = postgres_repository
+
+    async with engine.connect() as conn:
+        applied = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT version FROM broker_schema_migrations ORDER BY version"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        tables = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT tablename FROM pg_tables "
+                        "WHERE schemaname = current_schema() ORDER BY tablename"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert applied == [1, 2, 3, 4]
+    # 0001 alone holds ten statements; a runner that stopped at the first would
+    # still record the version.
+    assert "broker_audit" in tables
+    assert "broker_rpc_audit" in tables
