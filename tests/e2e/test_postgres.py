@@ -1398,3 +1398,26 @@ async def _delete_approvals(store, ids):
             await conn.execute("DELETE FROM approvals WHERE id = ANY($1)", ids)
     except Exception:
         pass
+
+
+async def test_recall_ranks_by_vector_distance(memory_store):
+    # EMBED_DIM, not the store's 1536 default: this suite's fixture builds the
+    # store at 26 to match FakeEmbedder, and `memories.embedding` is vector(26)
+    # in the test database. A 1536-wide value is rejected by Postgres.
+    near = [1.0] + [0.0] * (EMBED_DIM - 1)
+    far = [0.0, 1.0] + [0.0] * (EMBED_DIM - 2)
+    # The suite shares tables across runs, so scopes are made unique per run —
+    # a fixed key would rank against rows an earlier run left behind.
+    scope = f"vec:{uuid.uuid4().hex[:8]}"
+
+    await memory_store.remember(
+        MemoryRecord(scope_key=scope, text="near", embedding=near, metadata={"k": 1})
+    )
+    await memory_store.remember(
+        MemoryRecord(scope_key=scope, text="far", embedding=far, metadata={})
+    )
+
+    hits = await memory_store.recall(scope, query_embedding=near, limit=2)
+
+    assert [h.text for h in hits] == ["near", "far"]
+    assert hits[0].metadata == {"k": 1}
