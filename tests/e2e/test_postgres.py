@@ -17,9 +17,12 @@ from datetime import UTC
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 
 from openloop.agents import load_agent
+from openloop.approvals import ApprovalRequest
 from openloop.approvals.postgres import PostgresApprovalStore
+from openloop.approvals.schema import approvals
 from openloop.checkpoints.postgres import PostgresCheckpointStore
 from openloop.db import BorrowedEngineStore, create_engine
 from openloop.memory.postgres import PostgresMemoryStore
@@ -1356,22 +1359,29 @@ async def test_approval_decide_once_migration_idempotent_on_populated_table(
     store = PostgresApprovalStore()
     await _settle(store, postgres_pool, postgres_engine)
     try:
-        pool = store._require_pool()
-        async with pool.acquire() as conn:
+        engine = store._require_engine()
+        async with engine.begin() as conn:
             # Rewind to the pre-migration schema with a live decided row.
+            # sql-text: DDL that deliberately un-does a migration, and an INSERT
+            # against the pre-migration column set the metadata no longer
+            # describes.
             await conn.execute(
-                "ALTER TABLE approvals DROP COLUMN IF EXISTS workflow_backed"
+                text("ALTER TABLE approvals DROP COLUMN IF EXISTS workflow_backed")
             )
             await conn.execute(
-                "ALTER TABLE approvals DROP COLUMN IF EXISTS workflow_instance_id"
+                text("ALTER TABLE approvals DROP COLUMN IF EXISTS workflow_instance_id")
             )
-            await conn.execute("ALTER TABLE approvals DROP COLUMN IF EXISTS effect_at")
             await conn.execute(
-                "INSERT INTO approvals "
-                "(id, agent, action, tool, permission, status, decided_by) "
-                "VALUES ($1, 'a', 'github.issues:write', 'github', "
-                "'issues:write', 'approved', '@a')",
-                rid,
+                text("ALTER TABLE approvals DROP COLUMN IF EXISTS effect_at")
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO approvals "
+                    "(id, agent, action, tool, permission, status, decided_by) "
+                    "VALUES (:rid, 'a', 'github.issues:write', 'github', "
+                    "'issues:write', 'approved', '@a')"
+                ),
+                {"rid": rid},
             )
         await _settle(store, postgres_pool, postgres_engine)  # migrate
         await _settle(
@@ -1393,9 +1403,9 @@ async def test_approval_decide_once_migration_idempotent_on_populated_table(
 
 async def _delete_approvals(store, ids):
     try:
-        pool = store._require_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM approvals WHERE id = ANY($1)", ids)
+        engine = store._require_engine()
+        async with engine.begin() as conn:
+            await conn.execute(approvals.delete().where(approvals.c.id.in_(ids)))
     except Exception:
         pass
 
@@ -1433,3 +1443,24 @@ async def test_record_reports_the_duplicate_as_not_written(usage_store):
     )
     assert await usage_store.record(record) is True
     assert await usage_store.record(record) is False
+
+
+async def test_claim_decision_is_won_exactly_once(approval_store):
+    request_id = f"a-{uuid.uuid4().hex[:8]}"
+    request = ApprovalRequest(
+        id=request_id,
+        agent="a",
+        action="act",
+        tool="t",
+        permission="p",
+        args={},
+        approvers=["alice", "bob"],
+        summary="",
+    )
+    await approval_store.create(request)
+
+    first = await approval_store.claim_decision(request_id, "alice", approve=True)
+    second = await approval_store.claim_decision(request_id, "bob", approve=False)
+
+    assert first is not None and first.decided_by == "alice"
+    assert second is None
