@@ -62,3 +62,4 @@ Bullets between the title and `## Context`, in this order.
 - [0004 — Gate OpenHands generation release on a durable checkpoint receipt](0004-receipt-gated-openhands-generation-lifecycle.md)
 - [0005 — Make a capability-scoped workspace agent the execution context of a durable thread task](0005-workspace-agent-as-thread-task-execution-context.md)
 - [0006 — Retire the dedicated analysis worker](0006-retire-dedicated-analysis-worker.md)
+- [0007 — Make SQLAlchemy the only PostgreSQL interface](0007-sqlalchemy-postgresql-interface.md)
