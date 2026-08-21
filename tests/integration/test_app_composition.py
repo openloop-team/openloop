@@ -16,8 +16,8 @@ from openloop.broker_config import BrokerServiceConfig
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.coordination import InProcessLock, PostgresLock
+from openloop.db import BorrowedEngineStore
 from openloop.memory import InMemoryStore
-from openloop.postgres import BorrowedPostgresStore
 from openloop.sessions import (
     InMemorySurfaceSessionStore,
     InMemoryThreadRecordStore,
@@ -205,7 +205,7 @@ async def test_external_broker_mode_wires_adapter_without_app_reconciler(
 
 
 async def test_auto_fallback_settles_every_capture_before_wiring(monkeypatch):
-    async def unavailable_pool(*args, **kwargs):
+    async def unavailable_engine(*args, **kwargs):
         raise RuntimeError("postgres unavailable")
 
     agent = load_agent(AGENT_YAML)
@@ -223,7 +223,7 @@ async def test_auto_fallback_settles_every_capture_before_wiring(monkeypatch):
     async with compose(
         settings,
         {agent.metadata.name: agent},
-        overrides={"pool_factory": unavailable_pool},
+        overrides={"engine_factory": unavailable_engine},
     ) as ctx:
         runtime = ctx.agents.slack_runtime()
         assert runtime is not None
@@ -245,14 +245,6 @@ async def test_auto_fallback_settles_every_capture_before_wiring(monkeypatch):
         assert runner.threads is ctx.threads
 
 
-class _ClosingPool:
-    def __init__(self):
-        self.close_calls = 0
-
-    async def close(self):
-        self.close_calls += 1
-
-
 class _DisposingEngine:
     """Stands in for an AsyncEngine — released through dispose(), not close()."""
 
@@ -263,17 +255,13 @@ class _DisposingEngine:
         self.dispose_calls += 1
 
 
-class _FailingPostgresStore(BorrowedPostgresStore):
-    async def setup(self, pool):
+class _FailingPostgresStore(BorrowedEngineStore):
+    async def setup(self, engine):
         raise RuntimeError("schema setup failed")
 
 
-async def test_postgres_store_setup_failure_unwinds_pool_once():
-    pool = _ClosingPool()
+async def test_postgres_store_setup_failure_unwinds_the_engine_once():
     engine = _DisposingEngine()
-
-    async def pool_factory(*args, **kwargs):
-        return pool
 
     async def engine_factory(*args, **kwargs):
         return engine
@@ -287,14 +275,12 @@ async def test_postgres_store_setup_failure_unwinds_pool_once():
             ),
             {},
             overrides={
-                "pool_factory": pool_factory,
                 "engine_factory": engine_factory,
                 "memory": _FailingPostgresStore(),
             },
         ):
             pass
 
-    assert pool.close_calls == 1
     assert engine.dispose_calls == 1
 
 
@@ -331,9 +317,6 @@ async def test_engine_backed_stores_bind_to_the_engine_not_the_pool():
     async def engine_factory(*args, **kwargs):
         return _Engine()
 
-    async def pool_factory(*args, **kwargs):
-        return _ClosingPool()
-
     settings = Settings(
         storage_mode="postgres",
         embeddings_enabled=False,
@@ -343,10 +326,9 @@ async def test_engine_backed_stores_bind_to_the_engine_not_the_pool():
         settings,
         agents={},
         overrides={
-            "pool_factory": pool_factory,
             "engine_factory": engine_factory,
             "usage": _EngineStore(),
-            # Only `usage` is durable here: the stub pool has no acquire(), so
+            # Only `usage` is durable here: the stub engine answers nothing, so
             # every other store has to stay process-local.
             "memory": InMemoryStore(),
             "approvals": InMemoryApprovalStore(),

@@ -1,4 +1,4 @@
-"""Integration coverage for the application-owned PostgreSQL pool."""
+"""Integration coverage for the application-owned PostgreSQL engine."""
 
 import importlib
 
@@ -27,34 +27,6 @@ class _Acquire:
 
     async def __aexit__(self, exc_type, exc, traceback):
         return False
-
-
-class _Connection:
-    async def execute(self, query, *args):
-        if query.lstrip().startswith("UPDATE"):
-            return "UPDATE 0"
-        return "OK"
-
-    async def fetch(self, query, *args):
-        return []
-
-    async def fetchrow(self, query, *args):
-        return None
-
-    async def fetchval(self, query, *args):
-        return 0
-
-
-class _Pool:
-    def __init__(self):
-        self.connection = _Connection()
-        self.close_calls = 0
-
-    def acquire(self):
-        return _Acquire(self.connection)
-
-    async def close(self):
-        self.close_calls += 1
 
 
 class _EngineResult:
@@ -100,14 +72,9 @@ class _Engine:
 
 
 def _handle_of(store):
-    """The handle a settled store is bound to, whichever kind it borrows.
-
-    Transitional (ADR 0007): a store answers to `_engine` once converted and to
-    `_pool` until then, so this test does not move with each conversion.
-    """
-    if isinstance(store, BorrowedEngineStore):
-        return store._engine
-    return store._pool
+    """The engine a settled store is bound to."""
+    assert isinstance(store, BorrowedEngineStore)
+    return store._engine
 
 
 def _settings(tmp_path, **overrides) -> Settings:
@@ -124,31 +91,23 @@ def _settings(tmp_path, **overrides) -> Settings:
     return Settings(**values)
 
 
-def test_lifespan_creates_and_closes_one_shared_pool(monkeypatch, tmp_path):
+def test_lifespan_creates_and_disposes_one_shared_engine(monkeypatch, tmp_path):
     settings = _settings(tmp_path)
-    pool = _Pool()
     engine = _Engine()
-    create_calls = []
     engine_calls = []
-
-    async def create_pool(dsn, *, min_size, max_size):
-        create_calls.append((dsn, min_size, max_size))
-        return pool
 
     async def create_engine(dsn, *, min_size, max_size):
         engine_calls.append((dsn, min_size, max_size))
         return engine
 
-    monkeypatch.setattr(composemod, "create_pool", create_pool)
     monkeypatch.setattr(composemod, "create_engine", create_engine)
 
     app = appmod.create_app(settings=settings)
     with pytest.raises(RuntimeError, match="exceptional shutdown"):
         with TestClient(app):
-            assert create_calls == [(settings.database_url, 2, 7)]
             assert engine_calls == [(settings.database_url, 2, 7)]
             ctx = app.state.ctx
-            assert ctx.postgres_pool is pool
+            assert ctx.postgres_engine is engine
             ordinary_stores = [
                 ctx.memory,
                 ctx.usage,
@@ -159,39 +118,32 @@ def test_lifespan_creates_and_closes_one_shared_pool(monkeypatch, tmp_path):
                 ctx.engine.store,
             ]
             for store in ordinary_stores:
-                expected = engine if isinstance(store, BorrowedEngineStore) else pool
-                assert _handle_of(store) is expected
-            assert pool.close_calls == 0
+                assert _handle_of(store) is engine
             assert engine.dispose_calls == 0
             raise RuntimeError("exceptional shutdown")
 
-    assert pool.close_calls == 1
     assert engine.dispose_calls == 1
     assert all(_handle_of(store) is None for store in ordinary_stores)
 
 
-def test_pool_creation_failure_uses_fallbacks_without_store_pool_attempts(
+def test_engine_creation_failure_uses_fallbacks_without_store_setup_attempts(
     monkeypatch, tmp_path
 ):
     settings = _settings(tmp_path)
     calls = 0
 
-    async def create_pool(dsn, *, min_size, max_size):
+    async def create_engine(dsn, *, min_size, max_size):
         nonlocal calls
         calls += 1
         raise RuntimeError("database unavailable")
 
-    async def create_engine(dsn, *, min_size, max_size):
-        raise RuntimeError("database unavailable")
-
-    monkeypatch.setattr(composemod, "create_pool", create_pool)
     monkeypatch.setattr(composemod, "create_engine", create_engine)
 
     app = appmod.create_app(settings=settings)
     with TestClient(app):
         assert calls == 1
         ctx = app.state.ctx
-        assert ctx.postgres_pool is None
+        assert ctx.postgres_engine is None
         assert isinstance(ctx.memory, InMemoryStore)
         assert isinstance(ctx.usage, InMemoryUsageStore)
         assert isinstance(ctx.approvals, InMemoryApprovalStore)
@@ -203,24 +155,17 @@ def test_pool_creation_failure_uses_fallbacks_without_store_pool_attempts(
 
 def test_lifespan_passes_the_mounted_postgres_password(monkeypatch, tmp_path):
     settings = _settings(tmp_path, postgres_password="mounted-db-secret")
-    pool = _Pool()
-    create_calls = []
     engine_calls = []
-
-    async def create_pool(dsn, *, min_size, max_size, password):
-        create_calls.append((dsn, min_size, max_size, password))
-        return pool
 
     async def create_engine(dsn, *, min_size, max_size, password):
         engine_calls.append((dsn, min_size, max_size, password))
         return _Engine()
 
-    monkeypatch.setattr(composemod, "create_pool", create_pool)
     monkeypatch.setattr(composemod, "create_engine", create_engine)
 
     app = appmod.create_app(settings=settings)
     with TestClient(app):
-        expected = [
+        assert engine_calls == [
             (
                 settings.database_url,
                 2,
@@ -228,5 +173,3 @@ def test_lifespan_passes_the_mounted_postgres_password(monkeypatch, tmp_path):
                 "mounted-db-secret",
             )
         ]
-        assert create_calls == expected
-        assert engine_calls == expected

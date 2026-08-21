@@ -34,10 +34,16 @@ def postgres_dsn() -> str:
 async def require_postgres(dsn: str) -> None:
     """Skip the calling test unless Postgres answers — or fail if CI demands it."""
     try:
-        import asyncpg
+        from sqlalchemy import text
 
-        connection = await asyncpg.connect(dsn, timeout=3)
-        await connection.close()
+        from openloop.db import create_engine
+
+        engine = await create_engine(dsn, min_size=1, max_size=1)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(text("SELECT 1"))
+        finally:
+            await engine.dispose()
         return
     except Exception as exc:  # noqa: BLE001 — any failure to connect gates alike
         reason = f"no Postgres reachable at {dsn}: {exc}"

@@ -1,30 +1,14 @@
-"""Unit coverage for shared PostgreSQL pool ownership and sizing."""
+"""Unit coverage for the shared PostgreSQL connection pool's sizing.
+
+Ownership and binding moved to `test_db_engine.py` with the engine seam
+(ADR 0007); the pool bounds are still configuration, and still validated here.
+"""
 
 import pytest
 from pydantic import ValidationError
 
-from openloop.postgres import BorrowedPostgresStore
 from openloop.usage.postgres import PostgresUsageStore
 from tests.support.settings import IsolatedSettings as Settings
-
-
-class _Pool:
-    def __init__(self):
-        self.closed = False
-
-    async def close(self):
-        self.closed = True
-
-
-async def test_store_close_detaches_without_closing_borrowed_pool():
-    store = BorrowedPostgresStore()
-    pool = _Pool()
-    store._pool = pool
-
-    await store.close()
-
-    assert store._pool is None
-    assert not pool.closed
 
 
 def test_stores_no_longer_accept_a_dsn():

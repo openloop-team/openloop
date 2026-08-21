@@ -54,6 +54,22 @@ socket. The broker must retain
 `0660` UDS through its read-only volume mount. Do not add `DOCKER_GID` or a TCP
 Docker endpoint; the adapter does not filter the root-equivalent Docker API.
 
+### PostgreSQL access
+
+Per [ADR 0007](docs/adr/0007-sqlalchemy-postgresql-interface.md), SQLAlchemy is
+the only interface to PostgreSQL. Statements are written in the expression
+language. A statement kept as SQL text — `text()` or `exec_driver_sql()` — needs
+a comment on the line above it beginning `# sql-text:` and saying why the
+expression language would obscure what the statement does. Reviewers reject text
+without one; nothing enforces it automatically.
+
+Two dialect behaviours to know before writing any statement text. A cast is
+written `CAST(:name AS type)`, never `:name::type` — a bind name followed by a
+colon is not a bind parameter, so the postfix form compiles to a statement with
+no parameters and fails only when it runs. And every statement goes over as a
+prepared statement, which carries exactly one command, so a multi-statement
+script is split on statement boundaries and applied one execute at a time.
+
 ## Pull requests
 
 - **Keep PRs small and focused.** One logical change per PR is easiest to

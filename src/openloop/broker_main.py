@@ -29,7 +29,6 @@ from openloop.broker_control import (
 from openloop.broker_rpc.server import take_over_stale_socket
 from openloop.config import BrokerSettings
 from openloop.db import create_engine
-from openloop.postgres import create_pool
 from openloop.wiring.broker import build_broker_service
 
 log = logging.getLogger("openloop.broker")
@@ -152,28 +151,10 @@ async def run_broker(
             stack.callback(os.close, lock_descriptor)
             log.info("broker startup: exclusive lifecycle lock acquired")
 
-            pool = None
-            # Transitional (ADR 0007): both handles, one database. Task 16
-            # removes the pool.
             engine = None
             if settings.broker_dev_in_memory:
                 log.warning("broker startup: DEVELOPMENT in-memory state enabled")
             else:
-                log.info("broker startup: opening Postgres pool")
-                pool_kwargs: dict[str, Any] = {
-                    "min_size": settings.postgres_pool_min_size,
-                    "max_size": settings.postgres_pool_max_size,
-                }
-                if settings.postgres_password is not None:
-                    pool_kwargs["password"] = (
-                        settings.postgres_password.get_secret_value()
-                    )
-                pool = await create_pool(
-                    settings.database_url,
-                    **pool_kwargs,
-                )
-                stack.push_async_callback(pool.close)
-
                 log.info("broker startup: opening Postgres engine")
                 engine_kwargs: dict[str, Any] = {
                     "min_size": settings.postgres_pool_min_size,
@@ -190,9 +171,7 @@ async def run_broker(
                 stack.push_async_callback(engine.dispose)
 
             log.info("broker startup: building unbound service graph")
-            service = await build_broker_service(
-                config, stack, pool=pool, engine=engine
-            )
+            service = await build_broker_service(config, stack, engine=engine)
 
             log.info(
                 "broker startup: building receipt locator and lifecycle reconciler"

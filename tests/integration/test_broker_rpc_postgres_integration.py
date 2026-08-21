@@ -9,6 +9,8 @@ from uuid import UUID, uuid4
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from openloop.broker.ledger import BrokerLedger
 from openloop.broker.models import (
@@ -47,11 +49,24 @@ from openloop.broker_rpc.models import (
     RpcRequest,
     StartSegmentPayload,
 )
-from openloop.db import BorrowedEngineStore, create_engine
+from openloop.db import create_engine
 from tests.support.broker_repository_contract import SequenceIds
 from tests.support.postgres import postgres_dsn, require_postgres
 
 DSN = postgres_dsn()
+
+
+async def _admin(statement: str) -> None:
+    """Run one statement outside the per-test schema, to create or drop it."""
+    engine = await create_engine(DSN, min_size=1, max_size=1)
+    try:
+        async with engine.begin() as connection:
+            # sql-text: DDL naming a schema this suite creates for itself.
+            await connection.execute(text(statement))
+    finally:
+        await engine.dispose()
+
+
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 
 
@@ -86,8 +101,6 @@ class RpcPostgresFixture:
     ledger: BrokerLedger
     capability: JobCapabilityAuthority
     audit: PostgresRpcAuditSink
-    pool: object
-    # Same schema, the other bind. Task 16 removes the pool.
     engine: object
 
     def token(
@@ -121,18 +134,9 @@ class RpcPostgresFixture:
 @pytest.fixture
 async def rpc_postgres():
     await require_postgres(DSN)
-    import asyncpg
 
     schema = f"broker_rpc_test_{uuid4().hex}"
-    admin = await asyncpg.connect(DSN)
-    await admin.execute(f'CREATE SCHEMA "{schema}"')
-    await admin.close()
-    pool = await asyncpg.create_pool(
-        DSN,
-        min_size=2,
-        max_size=10,
-        server_settings={"search_path": schema},
-    )
+    await _admin(f'CREATE SCHEMA "{schema}"')
     engine = await create_engine(
         DSN,
         min_size=2,
@@ -142,10 +146,8 @@ async def rpc_postgres():
     repository = PostgresBrokerRepository()
     audit = PostgresRpcAuditSink()
     try:
-        await repository.setup(
-            engine if isinstance(repository, BorrowedEngineStore) else pool
-        )
-        await audit.setup(engine if isinstance(audit, BorrowedEngineStore) else pool)
+        await repository.setup(engine)
+        await audit.setup(engine)
         private_key = Ed25519PrivateKey.generate()
         issuer = WorkloadIdentityIssuer(
             private_key=private_key,
@@ -172,17 +174,12 @@ async def rpc_postgres():
             policy=BrokerRpcPolicy("default", "docker", "postgres", 300),
             segment_coordinator=DisabledSegmentCoordinator(),
         )
-        yield RpcPostgresFixture(app, issuer, ledger, capability, audit, pool, engine)
+        yield RpcPostgresFixture(app, issuer, ledger, capability, audit, engine)
     finally:
         await audit.close()
         await repository.close()
         await engine.dispose()
-        await pool.close()
-        admin = await asyncpg.connect(DSN)
-        try:
-            await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-        finally:
-            await admin.close()
+        await _admin(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
 
 
 async def test_concurrent_exact_create_persists_one_capability_digest_and_two_audits(
@@ -202,21 +199,35 @@ async def test_concurrent_exact_create_persists_one_capability_digest_and_two_au
     assert first.result.ticket.job_id == second.result.ticket.job_id
     assert first.result.capability == second.result.capability
 
-    async with fixture.pool.acquire() as connection:
-        job = await connection.fetchrow(
-            """
-            SELECT minimum_isolation, control_key_version, control_epoch,
-                   control_capability_digest
-            FROM broker_jobs WHERE job_id = $1
-            """,
-            first.result.ticket.job_id,
+    async with fixture.engine.connect() as connection:
+        # sql-text: reads the authorization columns back, then the whole row as
+        # JSON to prove no secret landed in any of them.
+        job = (
+            (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT minimum_isolation, control_key_version,
+                               control_epoch, control_capability_digest
+                        FROM broker_jobs WHERE job_id = :job_id
+                        """
+                    ),
+                    {"job_id": first.result.ticket.job_id},
+                )
+            )
+            .mappings()
+            .first()
         )
-        encoded_job = await connection.fetchval(
-            "SELECT row_to_json(j)::text FROM broker_jobs j WHERE job_id = $1",
-            first.result.ticket.job_id,
+        encoded_job = await connection.scalar(
+            text(
+                "SELECT row_to_json(j)::text FROM broker_jobs j WHERE job_id = :job_id"
+            ),
+            {"job_id": first.result.ticket.job_id},
         )
-        assert await connection.fetchval("SELECT count(*) FROM broker_audit") == 1
-        assert await connection.fetchval("SELECT count(*) FROM broker_rpc_audit") == 2
+        assert await connection.scalar(text("SELECT count(*) FROM broker_audit")) == 1
+        assert (
+            await connection.scalar(text("SELECT count(*) FROM broker_rpc_audit")) == 2
+        )
     assert dict(job) == {
         "minimum_isolation": "shared",
         "control_key_version": "cap-v1",
@@ -285,9 +296,16 @@ async def test_postgres_audit_accepts_every_reviewed_lifecycle_method(
         )
         assert response.failure.code is RpcErrorCode.INTERNAL
 
-    async with fixture.pool.acquire() as connection:
-        methods = await connection.fetch(
-            "SELECT method FROM broker_rpc_audit ORDER BY sequence"
+    async with fixture.engine.connect() as connection:
+        # sql-text: reads the audit trail the sink appended, in order.
+        methods = (
+            (
+                await connection.execute(
+                    text("SELECT method FROM broker_rpc_audit ORDER BY sequence")
+                )
+            )
+            .mappings()
+            .all()
         )
     assert [row["method"] for row in methods] == [
         "CREATE_JOB",
@@ -335,12 +353,21 @@ async def test_persisted_authorization_survives_restart_and_denials_are_generic(
         response = await fixture.app.handle(request, PEER)
         assert response.failure.code is RpcErrorCode.NOT_FOUND_OR_UNAUTHORIZED
 
-    async with fixture.pool.acquire() as connection:
-        decisions = await connection.fetch(
-            """
-            SELECT decision, reason_code FROM broker_rpc_audit
-            ORDER BY sequence
-            """
+    async with fixture.engine.connect() as connection:
+        # sql-text: as above — the audit trail, in order.
+        decisions = (
+            (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT decision, reason_code FROM broker_rpc_audit
+                        ORDER BY sequence
+                        """
+                    )
+                )
+            )
+            .mappings()
+            .all()
         )
     assert [tuple(row.values()) for row in decisions] == [
         ("allowed", "allowed"),
@@ -371,11 +398,14 @@ async def test_legacy_rows_fail_closed_and_partial_authorization_is_rejected(
     response = await fixture.app.handle(request, PEER)
     assert response.failure.code is RpcErrorCode.NOT_FOUND_OR_UNAUTHORIZED
 
-    import asyncpg
-
-    async with fixture.pool.acquire() as connection:
-        with pytest.raises(asyncpg.CheckViolationError):
+    async with fixture.engine.begin() as connection:
+        # sql-text: sets one column on purpose to prove the table's
+        # all-or-none authorization CHECK rejects a partial row.
+        with pytest.raises(IntegrityError):
             await connection.execute(
-                "UPDATE broker_jobs SET minimum_isolation = 'shared' WHERE job_id = $1",
-                legacy.job_id,
+                text(
+                    "UPDATE broker_jobs SET minimum_isolation = 'shared' "
+                    "WHERE job_id = :job_id"
+                ),
+                {"job_id": legacy.job_id},
             )

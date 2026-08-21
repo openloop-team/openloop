@@ -25,7 +25,7 @@ from openloop.approvals.postgres import PostgresApprovalStore
 from openloop.approvals.schema import approvals
 from openloop.checkpoints.postgres import PostgresCheckpointStore
 from openloop.coordination import PostgresLock
-from openloop.db import BorrowedEngineStore, create_engine
+from openloop.db import create_engine
 from openloop.memory.postgres import PostgresMemoryStore
 from openloop.memory.store import MemoryRecord, scope_key_for
 from openloop.runtime import Runtime, Task
@@ -57,18 +57,6 @@ pytestmark = [pytest.mark.e2e, pytest.mark.postgres]
 
 
 @pytest.fixture
-async def postgres_pool():
-    await require_postgres(DSN)
-    import asyncpg
-
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=10)
-    try:
-        yield pool
-    finally:
-        await pool.close()
-
-
-@pytest.fixture
 async def postgres_engine():
     await require_postgres(DSN)
 
@@ -89,20 +77,11 @@ async def _sql(engine, statement, **parameters):
         await conn.execute(text(statement), parameters)
 
 
-async def _settle(store, pool, engine):
-    """Bind a store to whichever handle it takes.
-
-    Mirrors `compose._settle_store` for the length of the ADR 0007 transition;
-    Task 16 collapses both to `await store.setup(engine)`.
-    """
-    await store.setup(engine if isinstance(store, BorrowedEngineStore) else pool)
-    return store
-
-
 def _store_fixture(build):
     @pytest.fixture
-    async def fixture(postgres_pool, postgres_engine):
-        store = await _settle(build(), postgres_pool, postgres_engine)
+    async def fixture(postgres_engine):
+        store = build()
+        await store.setup(postgres_engine)
         try:
             yield store
         finally:
@@ -280,9 +259,7 @@ async def test_happy_path_end_to_end(stores):
     assert any("open an issue to track" in t for t in texts)
 
 
-async def test_worker_checkpoint_resume_across_real_postgres(
-    postgres_pool, postgres_engine
-):
+async def test_worker_checkpoint_resume_across_real_postgres(postgres_engine):
     """A worker job persisted to Postgres resumes on a fresh store instance."""
     await require_postgres(DSN)
 
@@ -321,7 +298,7 @@ async def test_worker_checkpoint_resume_across_real_postgres(
             return await super().create_pull(*a, **k)
 
     store = PostgresCheckpointStore()
-    await _settle(store, postgres_pool, postgres_engine)
+    await store.setup(postgres_engine)
     try:
         args = {"repo": "acme/x", "instruction": "do x", "job_id": job_id}
 
@@ -339,7 +316,7 @@ async def test_worker_checkpoint_resume_across_real_postgres(
         # A *fresh* store + connector (simulating a restart) resumes from PG:
         # the worker is not re-run and exactly one PR is opened.
         store2 = PostgresCheckpointStore()
-        await _settle(store2, postgres_pool, postgres_engine)
+        await store2.setup(postgres_engine)
         try:
             runner2, github2 = _Runner(), FakeGitHub()
             conn2 = CodingWorkerConnector(runner2, github2, checkpoints=store2)
@@ -363,7 +340,7 @@ async def test_worker_checkpoint_resume_across_real_postgres(
         await store.close()
 
 
-async def test_workflow_resume_across_real_postgres(postgres_pool, postgres_engine):
+async def test_workflow_resume_across_real_postgres(postgres_engine):
     """A workflow parked at a wait node resumes from Postgres on a fresh engine."""
     await require_postgres(DSN)
 
@@ -380,7 +357,7 @@ async def test_workflow_resume_across_real_postgres(postgres_pool, postgres_engi
         return Workflow("t", [Step("gate", wait=True), Step("finish", finish)])
 
     store = PostgresWorkflowStore()
-    await _settle(store, postgres_pool, postgres_engine)
+    await store.setup(postgres_engine)
     try:
         engine1 = WorkflowEngine(store, {"t": _wf()})
         parked = await engine1.start("t", instance_id, {"seed": 1})
@@ -388,7 +365,7 @@ async def test_workflow_resume_across_real_postgres(postgres_pool, postgres_engi
 
         # Fresh store + engine (a restart) delivers the event and completes.
         store2 = PostgresWorkflowStore()
-        await _settle(store2, postgres_pool, postgres_engine)
+        await store2.setup(postgres_engine)
         try:
             engine2 = WorkflowEngine(store2, {"t": _wf()})
             done = await engine2.send_event(instance_id, "gate", {"by": "x"})
@@ -410,9 +387,7 @@ async def test_workflow_resume_across_real_postgres(postgres_pool, postgres_engi
         await store.close()
 
 
-async def test_surface_session_roundtrip_across_real_postgres(
-    postgres_pool, postgres_engine
-):
+async def test_surface_session_roundtrip_across_real_postgres(postgres_engine):
     """Persist a surface session and look it up by event + approval id (Phase D)."""
     await require_postgres(DSN)
 
@@ -424,7 +399,7 @@ async def test_surface_session_roundtrip_across_real_postgres(
     approval_id = f"appr-{uuid.uuid4().hex[:8]}"
 
     store = PostgresSurfaceSessionStore()
-    await _settle(store, postgres_pool, postgres_engine)
+    await store.setup(postgres_engine)
     try:
         await store.upsert(
             SurfaceSession(
@@ -448,7 +423,7 @@ async def test_surface_session_roundtrip_across_real_postgres(
 
         # A fresh store (a restart) reads it back by all three keys.
         store2 = PostgresSurfaceSessionStore()
-        await _settle(store2, postgres_pool, postgres_engine)
+        await store2.setup(postgres_engine)
         try:
             by_id = await store2.get(session_id)
             assert by_id is not None and by_id.status == "waiting"
@@ -491,7 +466,7 @@ async def test_surface_session_roundtrip_across_real_postgres(
         await store.close()
 
 
-async def test_thread_history_across_real_postgres(postgres_pool, postgres_engine):
+async def test_thread_history_across_real_postgres(postgres_engine):
     """Rebuild conversation history from prior thread sessions (oldest-first)."""
     await require_postgres(DSN)
 
@@ -512,7 +487,7 @@ async def test_thread_history_across_real_postgres(postgres_pool, postgres_engin
         )
 
     store = PostgresSurfaceSessionStore()
-    await _settle(store, postgres_pool, postgres_engine)
+    await store.setup(postgres_engine)
     try:
         # Two delivered turns + one still-running, plus an undelivered completed
         # turn (answer never reached the user) and a same-thread session for a
@@ -569,7 +544,7 @@ async def test_thread_history_across_real_postgres(postgres_pool, postgres_engin
         )
 
         store2 = PostgresSurfaceSessionStore()
-        await _settle(store2, postgres_pool, postgres_engine)
+        await store2.setup(postgres_engine)
         try:
             # Oldest-first, scoped to this agent's thread, excluding the in-flight
             # turn — exactly the two *delivered* exchanges in order (the running,
@@ -659,7 +634,7 @@ async def test_postgres_advisory_lock_frees_when_holder_goes_away():
             await a.close()
 
 
-async def test_session_reconcile_across_real_postgres(postgres_pool, postgres_engine):
+async def test_session_reconcile_across_real_postgres(postgres_engine):
     """A session that crashed before delivery is recovered + delivered on a fresh
     runner reading both the session and workflow state from Postgres (Phase D)."""
     await require_postgres(DSN)
@@ -678,8 +653,8 @@ async def test_session_reconcile_across_real_postgres(postgres_pool, postgres_en
 
     sessions = PostgresSurfaceSessionStore()
     workflows = PostgresWorkflowStore()
-    await _settle(sessions, postgres_pool, postgres_engine)
-    await _settle(workflows, postgres_pool, postgres_engine)
+    await sessions.setup(postgres_engine)
+    await workflows.setup(postgres_engine)
     try:
         # The turn's workflow completed, but the session crashed before delivery.
         await workflows.create(
@@ -719,8 +694,8 @@ async def test_session_reconcile_across_real_postgres(postgres_pool, postgres_en
         # Fresh stores + runner (a restart) reconcile and deliver the answer.
         sessions2 = PostgresSurfaceSessionStore()
         workflows2 = PostgresWorkflowStore()
-        await _settle(sessions2, postgres_pool, postgres_engine)
-        await _settle(workflows2, postgres_pool, postgres_engine)
+        await sessions2.setup(postgres_engine)
+        await workflows2.setup(postgres_engine)
         try:
             engine = WorkflowEngine(workflows2)
             runtime = Runtime(agent, gateway=FakeGateway(), engine=engine)
@@ -752,9 +727,7 @@ async def test_session_reconcile_across_real_postgres(postgres_pool, postgres_en
         await workflows.close()
 
 
-async def test_thread_record_transcript_across_real_postgres(
-    postgres_pool, postgres_engine
-):
+async def test_thread_record_transcript_across_real_postgres(postgres_engine):
     """Phase A: the delivered-transcript lane round-trips and appends idempotently."""
     await require_postgres(DSN)
 
@@ -775,7 +748,7 @@ async def test_thread_record_transcript_across_real_postgres(
     )
 
     store = PostgresThreadRecordStore()
-    await _settle(store, postgres_pool, postgres_engine)
+    await store.setup(postgres_engine)
     try:
         await store.get_or_create(scope)
         await store.append_delivered_fragment(
@@ -791,7 +764,7 @@ async def test_thread_record_transcript_across_real_postgres(
 
         # A fresh store (a restart) reads the transcript back, oldest-first.
         store2 = PostgresThreadRecordStore()
-        await _settle(store2, postgres_pool, postgres_engine)
+        await store2.setup(postgres_engine)
         try:
             out = await store2.replayable_transcript(scope)
             assert [(f.request, f.answer) for f in out] == [("q1", "a1"), ("q2", "a2")]
@@ -823,7 +796,7 @@ async def test_thread_record_transcript_across_real_postgres(
         await store.close()
 
 
-async def test_thread_context_ref_across_real_postgres(postgres_pool, postgres_engine):
+async def test_thread_context_ref_across_real_postgres(postgres_engine):
     """Phase B: the warm-context handle column round-trips and clears."""
     await require_postgres(DSN)
 
@@ -842,7 +815,7 @@ async def test_thread_context_ref_across_real_postgres(postgres_pool, postgres_e
     key = thread_scope_key(scope)
 
     store = PostgresThreadRecordStore()
-    await _settle(store, postgres_pool, postgres_engine)
+    await store.setup(postgres_engine)
     try:
         # The row must exist first — set_context_ref is UPDATE-only (the caller,
         # the warm pool, holds only the scope_key, not the full target).
@@ -851,7 +824,7 @@ async def test_thread_context_ref_across_real_postgres(postgres_pool, postgres_e
 
         # A fresh store (a restart) reads the persisted handle back, then clears it.
         store2 = PostgresThreadRecordStore()
-        await _settle(store2, postgres_pool, postgres_engine)
+        await store2.setup(postgres_engine)
         try:
             assert await store2.get_context_ref(key) == "handle-1"
             await store2.set_context_ref(key, None)
@@ -870,9 +843,7 @@ async def test_thread_context_ref_across_real_postgres(postgres_pool, postgres_e
         await store.close()
 
 
-async def test_thread_inbox_and_claim_across_real_postgres(
-    postgres_pool, postgres_engine
-):
+async def test_thread_inbox_and_claim_across_real_postgres(postgres_engine):
     """Phase C: inbox dedup, ordered drain, and the atomic active-turn claim."""
     await require_postgres(DSN)
 
@@ -891,7 +862,7 @@ async def test_thread_inbox_and_claim_across_real_postgres(
     key = "\x1f".join(("slack", "acme", "dev-platform", "C1", thread))
 
     store = PostgresThreadRecordStore()
-    await _settle(store, postgres_pool, postgres_engine)
+    await store.setup(postgres_engine)
     try:
         assert await store.append_inbox(scope, "e1", {"text": "one"}) is True
         assert await store.append_inbox(scope, "e2", {"text": "two"}) is True
@@ -900,7 +871,7 @@ async def test_thread_inbox_and_claim_across_real_postgres(
         # A fresh store (restart) claims and drains, oldest-first; the claim is
         # exclusive against a concurrent second claimant.
         store2 = PostgresThreadRecordStore()
-        await _settle(store2, postgres_pool, postgres_engine)
+        await store2.setup(postgres_engine)
         try:
             assert await store.try_begin_turn(scope) is True
             assert await store2.try_begin_turn(scope) is False  # exclusive CAS
@@ -941,7 +912,7 @@ async def test_thread_inbox_and_claim_across_real_postgres(
         await store.close()
 
 
-async def test_workflow_drive_arbitration_sql_semantics(postgres_pool, postgres_engine):
+async def test_workflow_drive_arbitration_sql_semantics(postgres_engine):
     """The claim/fence/release/evict predicates against real server-side SQL."""
     await require_postgres(DSN)
 
@@ -950,7 +921,7 @@ async def test_workflow_drive_arbitration_sql_semantics(postgres_pool, postgres_
 
     instance_id = f"wf-{uuid.uuid4().hex[:8]}"
     store = PostgresWorkflowStore()
-    await _settle(store, postgres_pool, postgres_engine)
+    await store.setup(postgres_engine)
     try:
         # create: inserts once, conflict loses without overwriting.
         assert await store.create(
@@ -1031,9 +1002,7 @@ async def test_workflow_drive_arbitration_sql_semantics(postgres_pool, postgres_
 
 
 @pytest.mark.serial
-async def test_workflow_drive_gen_migration_is_idempotent(
-    postgres_pool, postgres_engine
-):
+async def test_workflow_drive_gen_migration_is_idempotent(postgres_engine):
     """setup() adds drive_gen to a pre-existing populated table, once.
 
     HAZARD: this DROPs a column on the shared `workflow_instances` table and
@@ -1047,7 +1016,7 @@ async def test_workflow_drive_gen_migration_is_idempotent(
 
     instance_id = f"wf-{uuid.uuid4().hex[:8]}"
     store = PostgresWorkflowStore()
-    await _settle(store, postgres_pool, postgres_engine)
+    await store.setup(postgres_engine)
     try:
         # Rewind to the pre-migration schema with a live row in place.
         await _sql(
@@ -1060,10 +1029,8 @@ async def test_workflow_drive_gen_migration_is_idempotent(
             "VALUES (:id, 't', 'waiting')",
             id=instance_id,
         )
-        await _settle(store, postgres_pool, postgres_engine)  # migrate
-        await _settle(
-            store, postgres_pool, postgres_engine
-        )  # and prove it re-runs cleanly
+        await store.setup(postgres_engine)  # migrate
+        await store.setup(postgres_engine)  # and prove it re-runs cleanly
         migrated = await store.get(instance_id)
         assert migrated.status == "waiting"
         assert migrated.drive_gen == 0
@@ -1079,9 +1046,7 @@ async def test_workflow_drive_gen_migration_is_idempotent(
         await store.close()
 
 
-async def test_workflow_concurrent_drives_run_steps_once(
-    postgres_pool, postgres_engine
-):
+async def test_workflow_concurrent_drives_run_steps_once(postgres_engine):
     """Two engines over one real store: exactly one claims and runs the step."""
     await require_postgres(DSN)
 
@@ -1100,9 +1065,9 @@ async def test_workflow_concurrent_drives_run_steps_once(
         return Workflow("t", [Step("gate", wait=True), Step("work", work)])
 
     store = PostgresWorkflowStore()
-    await _settle(store, postgres_pool, postgres_engine)
+    await store.setup(postgres_engine)
     store2 = PostgresWorkflowStore()
-    await _settle(store2, postgres_pool, postgres_engine)
+    await store2.setup(postgres_engine)
     try:
         first = WorkflowEngine(store, {"t": _wf()})
         second = WorkflowEngine(store2, {"t": _wf()})
@@ -1129,9 +1094,7 @@ async def test_workflow_concurrent_drives_run_steps_once(
         await store.close()
 
 
-async def test_workflow_lease_takeover_evicts_stale_drive(
-    postgres_pool, postgres_engine
-):
+async def test_workflow_lease_takeover_evicts_stale_drive(postgres_engine):
     """Forced lease expiry: a rival claims, the stale drive is cancelled and
     cannot clobber — asserting the public contract, not internal exceptions."""
     await require_postgres(DSN)
@@ -1155,9 +1118,9 @@ async def test_workflow_lease_takeover_evicts_stale_drive(
         return Workflow("t", [Step("gate", wait=True), Step("hang", hang)])
 
     store = PostgresWorkflowStore()
-    await _settle(store, postgres_pool, postgres_engine)
+    await store.setup(postgres_engine)
     store2 = PostgresWorkflowStore()
-    await _settle(store2, postgres_pool, postgres_engine)
+    await store2.setup(postgres_engine)
     try:
         # Lease 3s → the stale drive's ticker checks every 1s; the takeover
         # happens well inside the first tick.
@@ -1196,9 +1159,7 @@ async def test_workflow_lease_takeover_evicts_stale_drive(
         await store.close()
 
 
-async def test_workflow_cancel_during_drive_wins_over_writer(
-    postgres_pool, postgres_engine
-):
+async def test_workflow_cancel_during_drive_wins_over_writer(postgres_engine):
     """cancel_instance evicts a live drive mid-step; the terminal state and
     at-most-once callbacks survive the driver's losing write."""
     await require_postgres(DSN)
@@ -1219,9 +1180,9 @@ async def test_workflow_cancel_during_drive_wins_over_writer(
         return Workflow("t", [Step("gate", wait=True), Step("work", work)])
 
     store = PostgresWorkflowStore()
-    await _settle(store, postgres_pool, postgres_engine)
+    await store.setup(postgres_engine)
     store2 = PostgresWorkflowStore()
-    await _settle(store2, postgres_pool, postgres_engine)
+    await store2.setup(postgres_engine)
     try:
         driver = WorkflowEngine(store, {"t": _wf()})
         canceller = WorkflowEngine(store2, {"t": _wf()})
@@ -1280,15 +1241,13 @@ def _approval(rid: str, *, created_at=None, **overrides):
     )
 
 
-async def test_approval_claim_decision_sql_guard_under_concurrency(
-    postgres_pool, postgres_engine
-):
+async def test_approval_claim_decision_sql_guard_under_concurrency(postgres_engine):
     """The WHERE status='pending' guard makes claim_decision win once server-side."""
     await require_postgres(DSN)
 
     rid = f"appr-{uuid.uuid4().hex[:8]}"
     store = PostgresApprovalStore()
-    await _settle(store, postgres_pool, postgres_engine)
+    await store.setup(postgres_engine)
     try:
         await store.create(_approval(rid))
         results = await asyncio.gather(
@@ -1308,9 +1267,7 @@ async def test_approval_claim_decision_sql_guard_under_concurrency(
         await store.close()
 
 
-async def test_approval_decided_unreconciled_keyset_and_mark(
-    postgres_pool, postgres_engine
-):
+async def test_approval_decided_unreconciled_keyset_and_mark(postgres_engine):
     """Keyset pagination + (created_at, id) ordering + mark_reconciled idempotency."""
     await require_postgres(DSN)
 
@@ -1320,7 +1277,7 @@ async def test_approval_decided_unreconciled_keyset_and_mark(
     prefix = f"appr-{uuid.uuid4().hex[:8]}"
     ids = [f"{prefix}-{i}" for i in range(5)]
     store = PostgresApprovalStore()
-    await _settle(store, postgres_pool, postgres_engine)
+    await store.setup(postgres_engine)
     try:
         for i, rid in enumerate(ids):
             await store.create(_approval(rid, created_at=base + timedelta(minutes=i)))
@@ -1357,7 +1314,6 @@ async def test_approval_decided_unreconciled_keyset_and_mark(
 
 @pytest.mark.serial
 async def test_approval_decide_once_migration_idempotent_on_populated_table(
-    postgres_pool,
     postgres_engine,
 ):
     """setup() adds the three decide-once columns to a populated pre-migration
@@ -1372,7 +1328,7 @@ async def test_approval_decide_once_migration_idempotent_on_populated_table(
 
     rid = f"appr-{uuid.uuid4().hex[:8]}"
     store = PostgresApprovalStore()
-    await _settle(store, postgres_pool, postgres_engine)
+    await store.setup(postgres_engine)
     try:
         engine = store._require_engine()
         async with engine.begin() as conn:
@@ -1398,10 +1354,8 @@ async def test_approval_decide_once_migration_idempotent_on_populated_table(
                 ),
                 {"rid": rid},
             )
-        await _settle(store, postgres_pool, postgres_engine)  # migrate
-        await _settle(
-            store, postgres_pool, postgres_engine
-        )  # and prove it re-runs cleanly
+        await store.setup(postgres_engine)  # migrate
+        await store.setup(postgres_engine)  # and prove it re-runs cleanly
 
         migrated = await store.get(rid)
         assert migrated.status == "approved"

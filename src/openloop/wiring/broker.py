@@ -112,7 +112,6 @@ from openloop.broker_runtime.contract import RuntimeDriver
 from openloop.broker_runtime.docker import DockerOpenHandsRuntimeDriver
 from openloop.broker_runtime.docker_policy import DockerRuntimeConfig
 from openloop.config import EmbeddedBrokerSettings, RuntimeSettings
-from openloop.db import BorrowedEngineStore
 
 log = logging.getLogger("openloop")
 
@@ -395,7 +394,6 @@ async def build_broker_service(
     config: BrokerServiceConfig,
     stack: Any,
     *,
-    pool: Any | None = None,
     engine: Any | None = None,
     runtime_driver: RuntimeDriver | None = None,
     clock: Callable[[], datetime] | None = None,
@@ -486,21 +484,15 @@ async def build_broker_service(
     )
 
     # --- ledger / durable audit / runtime / coordinator ------------------
-    if pool is not None or engine is not None:
+    if engine is not None:
         repository: Any = PostgresBrokerRepository()
-        # Transitional (ADR 0007): each of the two takes whichever handle it
-        # has been converted to. Task 16 removes the pool and the isinstance.
-        repo_handle = engine if isinstance(repository, BorrowedEngineStore) else pool
-        if repo_handle is not None:
-            await repository.setup(repo_handle)
+        await repository.setup(engine)
         # Durable broker state demands a durable RPC audit trail: the in-memory
         # sink would drop authenticated security decisions on restart while their
         # effects survive. The broker migrations (run by the repository setup
         # above) own the broker_rpc_audit table.
         audit_sink: Any = PostgresRpcAuditSink()
-        audit_handle = engine if isinstance(audit_sink, BorrowedEngineStore) else pool
-        if audit_handle is not None:
-            await audit_sink.setup(audit_handle)
+        await audit_sink.setup(engine)
     else:
         repository = InMemoryBrokerRepository(clock=now)
         audit_sink = InMemoryRpcAuditSink(clock=now)
@@ -696,7 +688,6 @@ async def build_broker(
     stack: Any,
     *,
     embedded_settings: EmbeddedBrokerSettings | None = None,
-    pool: Any | None = None,
     engine: Any | None = None,
     runtime_driver: RuntimeDriver | None = None,
     clock: Callable[[], datetime] | None = None,
@@ -776,7 +767,6 @@ async def build_broker(
         service = await build_broker_service(
             service_config,
             stack,
-            pool=pool,
             engine=engine,
             runtime_driver=runtime_driver,
             clock=clock,
