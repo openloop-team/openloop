@@ -18,7 +18,12 @@ dependencies = [
     "slack-bolt>=1.18",
     # chat_postMessage(markdown_text=...) — standard-Markdown rendering — needs 3.33+.
     "slack-sdk>=3.33",
+    # The dialect's driver. Per ADR 0007 no project module imports it —
+    # SQLAlchemy is the only thing that calls into it.
     "asyncpg>=0.29",
+    # [asyncio] is greenlet, which SQLAlchemy's async layer runs on and does
+    # not install unconditionally.
+    "sqlalchemy[asyncio]>=2.0.51",
     "httpx>=0.27",
 ]
 
