@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
 
 from openloop.broker.errors import (
+    ConcurrentMutation,
     IdempotencyConflict,
     InvalidTransition,
     MigrationProblem,
@@ -26,6 +28,8 @@ from openloop.broker.models import (
 from openloop.broker.postgres import (
     Migration,
     PostgresBrokerRepository,
+    _generation_from_row,
+    _job_from_row,
     _load_packaged_migrations,
 )
 from openloop.db import BorrowedEngineStore, create_engine
@@ -782,3 +786,110 @@ async def test_migrations_apply_to_an_empty_schema_through_sqlalchemy(
     # still record the version.
     assert "broker_audit" in tables
     assert "broker_rpc_audit" in tables
+
+
+async def test_update_job_refuses_a_stale_expected_revision(postgres_repository):
+    """The optimistic predicate must stay inside the writing statement.
+
+    Driving this through the ledger cannot work: `_job()` reads `FOR UPDATE`
+    inside the same transaction that writes, and hands that freshly-read record
+    straight to `_update_job` as `before` — so a bump made beforehand is simply
+    read as the current revision and the guard passes. The race the guard exists
+    for happens between another transaction's read and write, which a sequential
+    test cannot stage. Calling `_update_job` with a `before` whose revision is
+    deliberately stale reproduces exactly what that race presents to the
+    statement, deterministically.
+    """
+    repository, _pool, engine = postgres_repository
+    ledger = BrokerLedger(repository, id_factory=SequenceIds())
+    created = await ledger.create_job(
+        OWNER, "postgres-fence-0001", "default", "docker", "postgres"
+    )
+
+    async with engine.connect() as conn:
+        row = (
+            (
+                await conn.execute(
+                    text("SELECT * FROM broker_jobs WHERE job_id = :job_id"),
+                    {"job_id": created.job_id},
+                )
+            )
+            .mappings()
+            .first()
+        )
+    current = _job_from_row(row)
+
+    stale = replace(current, revision=current.revision + 1)
+    after = replace(current, revision=current.revision + 1)
+
+    with pytest.raises(ConcurrentMutation):
+        async with engine.begin() as conn:
+            await PostgresBrokerRepository._update_job(conn, stale, after)
+
+    # And the matching revision still writes, so the guard is a guard and not a
+    # statement that never matches.
+    async with engine.begin() as conn:
+        await PostgresBrokerRepository._update_job(conn, current, after)
+
+
+async def test_update_generation_refuses_a_stale_expected_revision(
+    postgres_repository,
+):
+    """The generation guard, tested the same way as the job guard.
+
+    `begin_generation_start` is the contract helper that supplies `begin_start`'s
+    nine arguments; it leaves generation 1 in state 'starting' with a pending
+    operation, which is a row every CHECK on the table accepts. `after` changes
+    only the revision, so nothing that held for the stored row stops holding.
+    """
+    repository, _pool, engine = postgres_repository
+    ledger = BrokerLedger(repository, id_factory=SequenceIds())
+
+    created = await ledger.create_job(
+        OWNER, "postgres-genfence-0001", "default", "docker", "postgres"
+    )
+    await begin_generation_start(
+        ledger,
+        idempotency_key="postgres-genfence-start-1",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
+    )
+
+    async with engine.connect() as conn:
+        row = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT * FROM broker_generations "
+                        "WHERE job_id = :job_id AND generation = :generation"
+                    ),
+                    {"job_id": created.job_id, "generation": 1},
+                )
+            )
+            .mappings()
+            .first()
+        )
+    current = _generation_from_row(row)
+
+    stale = replace(current, revision=current.revision + 1)
+    after = replace(current, revision=current.revision + 1)
+
+    with pytest.raises(ConcurrentMutation):
+        async with engine.begin() as conn:
+            await PostgresBrokerRepository._update_generation(conn, stale, after)
+
+    # The matching revision still writes, so the guard is a guard and not a
+    # statement that never matches.
+    async with engine.begin() as conn:
+        await PostgresBrokerRepository._update_generation(conn, current, after)
+
+    async with engine.connect() as conn:
+        stored = await conn.scalar(
+            text(
+                "SELECT revision FROM broker_generations "
+                "WHERE job_id = :job_id AND generation = :generation"
+            ),
+            {"job_id": created.job_id, "generation": 1},
+        )
+    assert stored == current.revision + 1

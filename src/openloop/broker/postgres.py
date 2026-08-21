@@ -12,9 +12,11 @@ from importlib import resources
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, select, text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from openloop.broker.schema import broker_generations, broker_jobs
 from openloop.db import BorrowedEngineStore
 
 from .errors import (
@@ -437,115 +439,105 @@ WHERE operation_id = :operation_id AND status = 'pending'
 RETURNING *
 """
 
-_SELECT_JOB = "SELECT * FROM broker_jobs WHERE job_id = :job_id FOR UPDATE"
-_SELECT_JOB_READ = "SELECT * FROM broker_jobs WHERE job_id = :job_id"
 
-_INSERT_JOB = """
-INSERT INTO broker_jobs (
-    job_id, conversation_id, tenant_id, workload_subject, profile,
-    runtime_driver, durable_state_driver, state, revision, generation,
-    current_generation, pending_operation_id, durable_state_ref,
-    durable_key_version, durable_digest, terminal_outcome, created_at, updated_at,
-    minimum_isolation, control_key_version, control_epoch,
-    control_capability_digest
-)
-VALUES (
-    :job_id, :conversation_id, :tenant_id, :workload_subject, :profile,
-    :runtime_driver, :durable_state_driver, :state, :revision, :generation,
-    :current_generation, :pending_operation_id, :durable_state_ref,
-    :durable_key_version, :durable_digest, :terminal_outcome, :created_at,
-    :updated_at, :minimum_isolation, :control_key_version, :control_epoch,
-    :control_capability_digest
-)
-ON CONFLICT DO NOTHING
-RETURNING *
-"""
+def _select_job(*, lock: bool) -> Any:
+    statement = select(broker_jobs).where(broker_jobs.c.job_id == bindparam("job_id"))
+    return statement.with_for_update() if lock else statement
 
-_UPDATE_JOB = """
-UPDATE broker_jobs
-SET state = :state, revision = :revision, generation = :generation,
-    current_generation = :current_generation,
-    pending_operation_id = :pending_operation_id,
-    durable_state_ref = :durable_state_ref,
-    durable_key_version = :durable_key_version,
-    durable_digest = :durable_digest, terminal_outcome = :terminal_outcome,
-    updated_at = :updated_at
-WHERE job_id = :job_id AND revision = :expected_revision
-RETURNING *
-"""
 
-_SELECT_GENERATION = """
-SELECT * FROM broker_generations
-WHERE job_id = :job_id AND generation = :generation
-FOR UPDATE
-"""
+def _select_generation(*, lock: bool) -> Any:
+    statement = select(broker_generations).where(
+        broker_generations.c.job_id == bindparam("job_id"),
+        broker_generations.c.generation == bindparam("generation"),
+    )
+    return statement.with_for_update() if lock else statement
 
-_SELECT_GENERATION_READ = """
-SELECT * FROM broker_generations
-WHERE job_id = :job_id AND generation = :generation
-"""
 
-_INSERT_GENERATION = """
-INSERT INTO broker_generations (
-    job_id, generation, state, revision, previous_job_state,
-    start_operation_id, pending_operation_id, runtime_ref, durable_state_ref,
-    runtime_key_version, durable_key_version, capability_digest, durable_digest,
-    execution_lease_deadline, barrier_id, receipt_issuer, receipt_id,
-    receipt_tenant_id, receipt_job_id, receipt_conversation_id,
-    receipt_generation, receipt_barrier_id, receipt_artifact_id,
-    receipt_base_commit, receipt_ciphertext_sha256, receipt_plaintext_sha256,
-    receipt_byte_count, receipt_store_version, receipt_envelope_version,
-    receipt_key_version, receipt_durable_write_sequence, release_target,
-    release_terminal_outcome, failure_reason_code, created_at, updated_at
-)
-VALUES (
-    :job_id, :generation, :state, :revision, :previous_job_state,
-    :start_operation_id, :pending_operation_id, :runtime_ref,
-    :durable_state_ref, :runtime_key_version, :durable_key_version,
-    :capability_digest, :durable_digest, :execution_lease_deadline,
-    :barrier_id, :receipt_issuer, :receipt_id, :receipt_tenant_id,
-    :receipt_job_id, :receipt_conversation_id, :receipt_generation,
-    :receipt_barrier_id, :receipt_artifact_id, :receipt_base_commit,
-    :receipt_ciphertext_sha256, :receipt_plaintext_sha256,
-    :receipt_byte_count, :receipt_store_version, :receipt_envelope_version,
-    :receipt_key_version, :receipt_durable_write_sequence, :release_target,
-    :release_terminal_outcome, :failure_reason_code, :created_at, :updated_at
-)
-ON CONFLICT DO NOTHING
-RETURNING *
-"""
+def _insert_job_statement() -> Any:
+    return insert(broker_jobs).on_conflict_do_nothing().returning(*broker_jobs.c)
 
-_UPDATE_GENERATION = """
-UPDATE broker_generations
-SET state = :state, revision = :revision,
-    pending_operation_id = :pending_operation_id,
-    runtime_ref = :runtime_ref, durable_state_ref = :durable_state_ref,
-    runtime_key_version = :runtime_key_version,
-    durable_key_version = :durable_key_version,
-    capability_digest = :capability_digest, durable_digest = :durable_digest,
-    execution_lease_deadline = :execution_lease_deadline,
-    barrier_id = :barrier_id,
-    receipt_issuer = :receipt_issuer, receipt_id = :receipt_id,
-    receipt_tenant_id = :receipt_tenant_id, receipt_job_id = :receipt_job_id,
-    receipt_conversation_id = :receipt_conversation_id,
-    receipt_generation = :receipt_generation,
-    receipt_barrier_id = :receipt_barrier_id,
-    receipt_artifact_id = :receipt_artifact_id,
-    receipt_base_commit = :receipt_base_commit,
-    receipt_ciphertext_sha256 = :receipt_ciphertext_sha256,
-    receipt_plaintext_sha256 = :receipt_plaintext_sha256,
-    receipt_byte_count = :receipt_byte_count,
-    receipt_store_version = :receipt_store_version,
-    receipt_envelope_version = :receipt_envelope_version,
-    receipt_key_version = :receipt_key_version,
-    receipt_durable_write_sequence = :receipt_durable_write_sequence,
-    release_target = :release_target,
-    release_terminal_outcome = :release_terminal_outcome,
-    failure_reason_code = :failure_reason_code, updated_at = :updated_at
-WHERE job_id = :job_id AND generation = :generation
-  AND revision = :expected_revision
-RETURNING *
-"""
+
+def _update_job_statement() -> Any:
+    return (
+        broker_jobs.update()
+        .where(
+            # `key_`-prefixed: SQLAlchemy reserves a column's own name for the
+            # SET clause's automatic bind, so a WHERE bind must not reuse it.
+            broker_jobs.c.job_id == bindparam("key_job_id"),
+            # The optimistic guard. A concurrent writer that already bumped
+            # revision makes this match zero rows, and the caller raises.
+            broker_jobs.c.revision == bindparam("expected_revision"),
+        )
+        .values(
+            state=bindparam("state"),
+            revision=bindparam("revision"),
+            generation=bindparam("generation"),
+            current_generation=bindparam("current_generation"),
+            pending_operation_id=bindparam("pending_operation_id"),
+            durable_state_ref=bindparam("durable_state_ref"),
+            durable_key_version=bindparam("durable_key_version"),
+            durable_digest=bindparam("durable_digest"),
+            terminal_outcome=bindparam("terminal_outcome"),
+            updated_at=bindparam("updated_at"),
+        )
+        .returning(*broker_jobs.c)
+    )
+
+
+def _insert_generation_statement() -> Any:
+    return (
+        insert(broker_generations)
+        .on_conflict_do_nothing()
+        .returning(*broker_generations.c)
+    )
+
+
+def _update_generation_statement() -> Any:
+    return (
+        broker_generations.update()
+        .where(
+            # `key_`-prefixed for the same reason as the job update above.
+            broker_generations.c.job_id == bindparam("key_job_id"),
+            broker_generations.c.generation == bindparam("key_generation"),
+            # The optimistic guard, on the same statement that writes.
+            broker_generations.c.revision == bindparam("expected_revision"),
+        )
+        .values(
+            state=bindparam("state"),
+            revision=bindparam("revision"),
+            pending_operation_id=bindparam("pending_operation_id"),
+            runtime_ref=bindparam("runtime_ref"),
+            durable_state_ref=bindparam("durable_state_ref"),
+            runtime_key_version=bindparam("runtime_key_version"),
+            durable_key_version=bindparam("durable_key_version"),
+            capability_digest=bindparam("capability_digest"),
+            durable_digest=bindparam("durable_digest"),
+            execution_lease_deadline=bindparam("execution_lease_deadline"),
+            barrier_id=bindparam("barrier_id"),
+            receipt_issuer=bindparam("receipt_issuer"),
+            receipt_id=bindparam("receipt_id"),
+            receipt_tenant_id=bindparam("receipt_tenant_id"),
+            receipt_job_id=bindparam("receipt_job_id"),
+            receipt_conversation_id=bindparam("receipt_conversation_id"),
+            receipt_generation=bindparam("receipt_generation"),
+            receipt_barrier_id=bindparam("receipt_barrier_id"),
+            receipt_artifact_id=bindparam("receipt_artifact_id"),
+            receipt_base_commit=bindparam("receipt_base_commit"),
+            receipt_ciphertext_sha256=bindparam("receipt_ciphertext_sha256"),
+            receipt_plaintext_sha256=bindparam("receipt_plaintext_sha256"),
+            receipt_byte_count=bindparam("receipt_byte_count"),
+            receipt_store_version=bindparam("receipt_store_version"),
+            receipt_envelope_version=bindparam("receipt_envelope_version"),
+            receipt_key_version=bindparam("receipt_key_version"),
+            receipt_durable_write_sequence=bindparam("receipt_durable_write_sequence"),
+            release_target=bindparam("release_target"),
+            release_terminal_outcome=bindparam("release_terminal_outcome"),
+            failure_reason_code=bindparam("failure_reason_code"),
+            updated_at=bindparam("updated_at"),
+        )
+        .returning(*broker_generations.c)
+    )
+
 
 _INSERT_AUDIT = """
 INSERT INTO broker_audit (
@@ -889,8 +881,10 @@ class PostgresBrokerRepository(BorrowedEngineStore):
     async def _job(
         connection: Any, owner: BrokerOwner, job_id: UUID, *, lock: bool = True
     ) -> JobRecord:
-        row = await _first(
-            connection, _SELECT_JOB if lock else _SELECT_JOB_READ, job_id=job_id
+        row = (
+            (await connection.execute(_select_job(lock=lock), {"job_id": job_id}))
+            .mappings()
+            .first()
         )
         if row is None:
             raise JobNotFound(job_id)
@@ -903,11 +897,15 @@ class PostgresBrokerRepository(BorrowedEngineStore):
     async def _generation(
         connection: Any, job_id: UUID, generation: int, *, lock: bool = True
     ) -> GenerationRecord:
-        row = await _first(
-            connection,
-            _SELECT_GENERATION if lock else _SELECT_GENERATION_READ,
-            job_id=job_id,
-            generation=generation,
+        row = (
+            (
+                await connection.execute(
+                    _select_generation(lock=lock),
+                    {"job_id": job_id, "generation": generation},
+                )
+            )
+            .mappings()
+            .first()
         )
         if row is None:
             raise StaleGeneration(job_id, expected=generation, actual=0)
@@ -924,64 +922,84 @@ class PostgresBrokerRepository(BorrowedEngineStore):
 
     @staticmethod
     async def _insert_job(connection: Any, job: JobRecord) -> None:
-        row = await _first(
-            connection,
-            _INSERT_JOB,
-            job_id=job.job_id,
-            conversation_id=job.conversation_id,
-            tenant_id=job.owner.tenant_id,
-            workload_subject=job.owner.workload_subject,
-            profile=job.profile,
-            runtime_driver=job.runtime_driver,
-            durable_state_driver=job.durable_state_driver,
-            state=job.state.value,
-            revision=job.revision,
-            generation=job.generation,
-            current_generation=job.current_generation,
-            pending_operation_id=job.pending_operation_id,
-            durable_state_ref=job.durable_state_ref,
-            durable_key_version=job.durable_key_version,
-            durable_digest=job.durable_digest,
-            terminal_outcome=(
-                job.terminal_outcome.value if job.terminal_outcome else None
-            ),
-            created_at=job.created_at,
-            updated_at=job.updated_at,
-            minimum_isolation=(
-                job.minimum_isolation.value
-                if job.minimum_isolation is not None
-                else None
-            ),
-            control_key_version=(
-                job.authorization.key_version if job.authorization else None
-            ),
-            control_epoch=job.authorization.epoch if job.authorization else None,
-            control_capability_digest=(
-                job.authorization.capability_digest if job.authorization else None
-            ),
+        row = (
+            (
+                await connection.execute(
+                    _insert_job_statement(),
+                    {
+                        "job_id": job.job_id,
+                        "conversation_id": job.conversation_id,
+                        "tenant_id": job.owner.tenant_id,
+                        "workload_subject": job.owner.workload_subject,
+                        "profile": job.profile,
+                        "runtime_driver": job.runtime_driver,
+                        "durable_state_driver": job.durable_state_driver,
+                        "state": job.state.value,
+                        "revision": job.revision,
+                        "generation": job.generation,
+                        "current_generation": job.current_generation,
+                        "pending_operation_id": job.pending_operation_id,
+                        "durable_state_ref": job.durable_state_ref,
+                        "durable_key_version": job.durable_key_version,
+                        "durable_digest": job.durable_digest,
+                        "terminal_outcome": (
+                            job.terminal_outcome.value if job.terminal_outcome else None
+                        ),
+                        "created_at": job.created_at,
+                        "updated_at": job.updated_at,
+                        "minimum_isolation": (
+                            job.minimum_isolation.value
+                            if job.minimum_isolation is not None
+                            else None
+                        ),
+                        "control_key_version": (
+                            job.authorization.key_version if job.authorization else None
+                        ),
+                        "control_epoch": job.authorization.epoch
+                        if job.authorization
+                        else None,
+                        "control_capability_digest": (
+                            job.authorization.capability_digest
+                            if job.authorization
+                            else None
+                        ),
+                    },
+                )
+            )
+            .mappings()
+            .first()
         )
         if row is None:
             raise ConcurrentMutation(job.job_id)
 
     @staticmethod
     async def _update_job(connection: Any, before: JobRecord, after: JobRecord) -> None:
-        row = await _first(
-            connection,
-            _UPDATE_JOB,
-            job_id=after.job_id,
-            state=after.state.value,
-            revision=after.revision,
-            generation=after.generation,
-            current_generation=after.current_generation,
-            pending_operation_id=after.pending_operation_id,
-            durable_state_ref=after.durable_state_ref,
-            durable_key_version=after.durable_key_version,
-            durable_digest=after.durable_digest,
-            terminal_outcome=(
-                after.terminal_outcome.value if after.terminal_outcome else None
-            ),
-            updated_at=after.updated_at,
-            expected_revision=before.revision,
+        row = (
+            (
+                await connection.execute(
+                    _update_job_statement(),
+                    {
+                        "key_job_id": after.job_id,
+                        "state": after.state.value,
+                        "revision": after.revision,
+                        "generation": after.generation,
+                        "current_generation": after.current_generation,
+                        "pending_operation_id": after.pending_operation_id,
+                        "durable_state_ref": after.durable_state_ref,
+                        "durable_key_version": after.durable_key_version,
+                        "durable_digest": after.durable_digest,
+                        "terminal_outcome": (
+                            after.terminal_outcome.value
+                            if after.terminal_outcome
+                            else None
+                        ),
+                        "updated_at": after.updated_at,
+                        "expected_revision": before.revision,
+                    },
+                )
+            )
+            .mappings()
+            .first()
         )
         if row is None:
             raise ConcurrentMutation(after.job_id)
@@ -1022,36 +1040,45 @@ class PostgresBrokerRepository(BorrowedEngineStore):
     async def _insert_generation(
         cls, connection: Any, generation: GenerationRecord
     ) -> None:
-        row = await _first(
-            connection,
-            _INSERT_GENERATION,
-            job_id=generation.job_id,
-            generation=generation.generation,
-            state=generation.state.value,
-            revision=generation.revision,
-            previous_job_state=generation.previous_job_state.value,
-            start_operation_id=generation.start_operation_id,
-            pending_operation_id=generation.pending_operation_id,
-            runtime_ref=generation.runtime_ref,
-            durable_state_ref=generation.durable_state_ref,
-            runtime_key_version=generation.runtime_key_version,
-            durable_key_version=generation.durable_key_version,
-            capability_digest=generation.capability_digest,
-            durable_digest=generation.durable_digest,
-            execution_lease_deadline=generation.execution_lease_deadline,
-            barrier_id=generation.barrier_id,
-            **cls._receipt_values(generation.receipt),
-            release_target=(
-                generation.release_target.value if generation.release_target else None
-            ),
-            release_terminal_outcome=(
-                generation.release_terminal_outcome.value
-                if generation.release_terminal_outcome
-                else None
-            ),
-            failure_reason_code=generation.failure_reason_code,
-            created_at=generation.created_at,
-            updated_at=generation.updated_at,
+        row = (
+            (
+                await connection.execute(
+                    _insert_generation_statement(),
+                    {
+                        "job_id": generation.job_id,
+                        "generation": generation.generation,
+                        "state": generation.state.value,
+                        "revision": generation.revision,
+                        "previous_job_state": generation.previous_job_state.value,
+                        "start_operation_id": generation.start_operation_id,
+                        "pending_operation_id": generation.pending_operation_id,
+                        "runtime_ref": generation.runtime_ref,
+                        "durable_state_ref": generation.durable_state_ref,
+                        "runtime_key_version": generation.runtime_key_version,
+                        "durable_key_version": generation.durable_key_version,
+                        "capability_digest": generation.capability_digest,
+                        "durable_digest": generation.durable_digest,
+                        "execution_lease_deadline": generation.execution_lease_deadline,
+                        "barrier_id": generation.barrier_id,
+                        **cls._receipt_values(generation.receipt),
+                        "release_target": (
+                            generation.release_target.value
+                            if generation.release_target
+                            else None
+                        ),
+                        "release_terminal_outcome": (
+                            generation.release_terminal_outcome.value
+                            if generation.release_terminal_outcome
+                            else None
+                        ),
+                        "failure_reason_code": generation.failure_reason_code,
+                        "created_at": generation.created_at,
+                        "updated_at": generation.updated_at,
+                    },
+                )
+            )
+            .mappings()
+            .first()
         )
         if row is None:
             raise ConcurrentMutation(generation.job_id)
@@ -1063,34 +1090,41 @@ class PostgresBrokerRepository(BorrowedEngineStore):
         before: GenerationRecord,
         after: GenerationRecord,
     ) -> None:
-        row = await _first(
-            connection,
-            _UPDATE_GENERATION,
-            job_id=after.job_id,
-            generation=after.generation,
-            state=after.state.value,
-            revision=after.revision,
-            pending_operation_id=after.pending_operation_id,
-            runtime_ref=after.runtime_ref,
-            durable_state_ref=after.durable_state_ref,
-            runtime_key_version=after.runtime_key_version,
-            durable_key_version=after.durable_key_version,
-            capability_digest=after.capability_digest,
-            durable_digest=after.durable_digest,
-            execution_lease_deadline=after.execution_lease_deadline,
-            barrier_id=after.barrier_id,
-            **cls._receipt_values(after.receipt),
-            release_target=(
-                after.release_target.value if after.release_target else None
-            ),
-            release_terminal_outcome=(
-                after.release_terminal_outcome.value
-                if after.release_terminal_outcome
-                else None
-            ),
-            failure_reason_code=after.failure_reason_code,
-            updated_at=after.updated_at,
-            expected_revision=before.revision,
+        row = (
+            (
+                await connection.execute(
+                    _update_generation_statement(),
+                    {
+                        "key_job_id": after.job_id,
+                        "key_generation": after.generation,
+                        "state": after.state.value,
+                        "revision": after.revision,
+                        "pending_operation_id": after.pending_operation_id,
+                        "runtime_ref": after.runtime_ref,
+                        "durable_state_ref": after.durable_state_ref,
+                        "runtime_key_version": after.runtime_key_version,
+                        "durable_key_version": after.durable_key_version,
+                        "capability_digest": after.capability_digest,
+                        "durable_digest": after.durable_digest,
+                        "execution_lease_deadline": after.execution_lease_deadline,
+                        "barrier_id": after.barrier_id,
+                        **cls._receipt_values(after.receipt),
+                        "release_target": (
+                            after.release_target.value if after.release_target else None
+                        ),
+                        "release_terminal_outcome": (
+                            after.release_terminal_outcome.value
+                            if after.release_terminal_outcome
+                            else None
+                        ),
+                        "failure_reason_code": after.failure_reason_code,
+                        "updated_at": after.updated_at,
+                        "expected_revision": before.revision,
+                    },
+                )
+            )
+            .mappings()
+            .first()
         )
         if row is None:
             raise ConcurrentMutation(after.job_id)
