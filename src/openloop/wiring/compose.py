@@ -17,6 +17,7 @@ from openloop.agents.schema import Agent
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.config import RuntimeSettings
+from openloop.db import BorrowedEngineStore, create_engine
 from openloop.memory import InMemoryStore
 from openloop.postgres import BorrowedPostgresStore, create_pool
 from openloop.sessions import InMemorySurfaceSessionStore, InMemoryThreadRecordStore
@@ -44,6 +45,7 @@ _LEAF_KEYS = _STORE_KEYS | {
     "model_gateway",
     "coordinator",
     "pool_factory",
+    "engine_factory",
     "tools_factory",
     "broker_handle",
 }
@@ -53,6 +55,9 @@ async def _close_safely(resource: Any) -> None:
     close = getattr(resource, "close", None)
     if close is None:
         close = getattr(resource, "aclose", None)
+    if close is None:
+        # A SQLAlchemy AsyncEngine releases its pool through dispose().
+        close = getattr(resource, "dispose", None)
     if close is None:
         return
     try:
@@ -90,22 +95,26 @@ async def _settle_store(
     fallback: Callable[[], Any],
     *,
     pool: Any | None,
+    engine: Any | None = None,
     mode: str,
     label: str,
     post_setup: Callable[[Any], Any] | None = None,
 ) -> Any:
     """Return one final store, registering cleanup before any dependent exists."""
-    if not isinstance(candidate, BorrowedPostgresStore):
+    if not isinstance(candidate, BorrowedPostgresStore | BorrowedEngineStore):
         if hasattr(candidate, "close") or hasattr(candidate, "aclose"):
             stack.push_async_callback(_close_safely, candidate)
         log.info("%s backend: in-memory (process-local)", label)
         return candidate
 
-    if pool is None:
+    # Transitional (ADR 0007): converted stores borrow the engine, the rest
+    # still borrow the pool. Task 16 deletes this branch with the pool.
+    handle = engine if isinstance(candidate, BorrowedEngineStore) else pool
+    if handle is None:
         return fallback()
 
     try:
-        await candidate.setup(pool)
+        await candidate.setup(handle)
         if post_setup is not None:
             await post_setup(candidate)
     except Exception:
@@ -172,6 +181,36 @@ async def compose(
                     settings.postgres_pool_max_size,
                 )
 
+        # Transitional (ADR 0007): the engine is the destination, the pool is
+        # what unconverted stores still borrow. Task 16 removes the pool.
+        db_engine = None
+        if mode in ("auto", "postgres"):
+            engine_factory = selected.get("engine_factory", create_engine)
+            engine_kwargs: dict[str, Any] = {
+                "min_size": settings.postgres_pool_min_size,
+                "max_size": settings.postgres_pool_max_size,
+            }
+            if settings.postgres_password is not None:
+                engine_kwargs["password"] = (
+                    settings.postgres_password.get_secret_value()
+                )
+            try:
+                db_engine = await engine_factory(settings.database_url, **engine_kwargs)
+            except Exception:
+                if mode == "postgres":
+                    log.exception("postgres engine setup failed")
+                    raise
+                log.exception(
+                    "postgres engine setup failed — durable stores will "
+                    "use process-local fallbacks"
+                )
+            else:
+                stack.push_async_callback(_close_safely, db_engine)
+                log.info(
+                    "postgres engine ready (max=%d)",
+                    settings.postgres_pool_max_size,
+                )
+
         memory = await _settle_store(
             stack,
             _override_or(
@@ -179,6 +218,7 @@ async def compose(
             ),
             InMemoryStore,
             pool=pool,
+            engine=db_engine,
             mode=mode,
             label="memory",
         )
@@ -189,6 +229,7 @@ async def compose(
             ),
             InMemoryUsageStore,
             pool=pool,
+            engine=db_engine,
             mode=mode,
             label="usage",
         )
@@ -199,6 +240,7 @@ async def compose(
             ),
             InMemoryApprovalStore,
             pool=pool,
+            engine=db_engine,
             mode=mode,
             label="approval",
         )
@@ -211,6 +253,7 @@ async def compose(
             ),
             InMemoryCheckpointStore,
             pool=pool,
+            engine=db_engine,
             mode=mode,
             label="checkpoint",
         )
@@ -221,6 +264,7 @@ async def compose(
             ),
             InMemoryWorkflowStore,
             pool=pool,
+            engine=db_engine,
             mode=mode,
             label="workflow",
         )
@@ -233,6 +277,7 @@ async def compose(
             ),
             InMemorySurfaceSessionStore,
             pool=pool,
+            engine=db_engine,
             mode=mode,
             label="surface-session",
         )
@@ -245,6 +290,7 @@ async def compose(
             ),
             InMemoryThreadRecordStore,
             pool=pool,
+            engine=db_engine,
             mode=mode,
             label="thread-record",
             post_setup=_reset_thread_claims,

@@ -11,15 +11,22 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import SecretStr
 
 from openloop.agents import load_agent
+from openloop.approvals import InMemoryApprovalStore
 from openloop.broker_config import BrokerServiceConfig
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.coordination import InProcessLock, PostgresLock
+from openloop.memory import InMemoryStore
 from openloop.postgres import BorrowedPostgresStore
+from openloop.sessions import (
+    InMemorySurfaceSessionStore,
+    InMemoryThreadRecordStore,
+)
 from openloop.tools import ToolGateway
 from openloop.tools.openhands_broker_workspace import BrokerWorkspaceAdapter
 from openloop.wiring import builders, compose
 from openloop.wiring.broker import _derive_receipt_key, build_broker_service
+from openloop.workflows import InMemoryWorkflowStore
 from tests.support.settings import (
     IsolatedBrokerSettings,
 )
@@ -246,6 +253,16 @@ class _ClosingPool:
         self.close_calls += 1
 
 
+class _DisposingEngine:
+    """Stands in for an AsyncEngine — released through dispose(), not close()."""
+
+    def __init__(self):
+        self.dispose_calls = 0
+
+    async def dispose(self):
+        self.dispose_calls += 1
+
+
 class _FailingPostgresStore(BorrowedPostgresStore):
     async def setup(self, pool):
         raise RuntimeError("schema setup failed")
@@ -253,9 +270,13 @@ class _FailingPostgresStore(BorrowedPostgresStore):
 
 async def test_postgres_store_setup_failure_unwinds_pool_once():
     pool = _ClosingPool()
+    engine = _DisposingEngine()
 
     async def pool_factory(*args, **kwargs):
         return pool
+
+    async def engine_factory(*args, **kwargs):
+        return engine
 
     with pytest.raises(RuntimeError, match="schema setup failed"):
         async with compose(
@@ -267,12 +288,14 @@ async def test_postgres_store_setup_failure_unwinds_pool_once():
             {},
             overrides={
                 "pool_factory": pool_factory,
+                "engine_factory": engine_factory,
                 "memory": _FailingPostgresStore(),
             },
         ):
             pass
 
     assert pool.close_calls == 1
+    assert engine.dispose_calls == 1
 
 
 def test_create_app_composes_with_the_settings_it_is_given(tmp_path):
@@ -289,3 +312,51 @@ def test_create_app_composes_with_the_settings_it_is_given(tmp_path):
 
     with TestClient(created):
         assert list(created.state.ctx.agents.loaded) == []
+
+
+async def test_engine_backed_stores_bind_to_the_engine_not_the_pool():
+    """During the ADR 0007 transition both binds exist; a store gets its own."""
+    from openloop.db import BorrowedEngineStore
+
+    bound: dict[str, object] = {}
+
+    class _EngineStore(BorrowedEngineStore):
+        async def setup(self, engine):
+            bound["engine"] = engine
+
+    class _Engine:
+        async def dispose(self):
+            bound["disposed"] = True
+
+    async def engine_factory(*args, **kwargs):
+        return _Engine()
+
+    async def pool_factory(*args, **kwargs):
+        return _ClosingPool()
+
+    settings = Settings(
+        storage_mode="postgres",
+        embeddings_enabled=False,
+        recovery_interval_seconds=0,
+    )
+    async with compose(
+        settings,
+        agents={},
+        overrides={
+            "pool_factory": pool_factory,
+            "engine_factory": engine_factory,
+            "usage": _EngineStore(),
+            # Only `usage` is durable here: the stub pool has no acquire(), so
+            # every other store has to stay process-local.
+            "memory": InMemoryStore(),
+            "approvals": InMemoryApprovalStore(),
+            "checkpoints": InMemoryCheckpointStore(),
+            "workflows": InMemoryWorkflowStore(),
+            "sessions": InMemorySurfaceSessionStore(),
+            "threads": InMemoryThreadRecordStore(),
+        },
+    ):
+        pass
+
+    assert isinstance(bound["engine"], _Engine)
+    assert bound.get("disposed") is True

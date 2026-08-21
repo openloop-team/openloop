@@ -1,9 +1,11 @@
 """Unit coverage for engine construction, DSN normalization, and store binding."""
 
 import pytest
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 
 from openloop.db import BorrowedEngineStore, create_engine, normalize_dsn
+from openloop.db.engine import _split_server_settings
 
 
 def test_normalize_dsn_adds_the_asyncpg_driver():
@@ -24,6 +26,26 @@ def test_normalize_dsn_leaves_an_explicit_driver_alone():
 def test_normalize_dsn_rejects_a_non_postgres_url():
     with pytest.raises(ValueError):
         normalize_dsn("mysql://h/db")
+
+
+def test_normalize_dsn_keeps_the_query_intact():
+    assert (
+        normalize_dsn("postgresql://h/db?search_path=s1")
+        == "postgresql+asyncpg://h/db?search_path=s1"
+    )
+
+
+def test_a_query_server_setting_is_not_a_connect_argument():
+    """asyncpg's DSN reads `?search_path=x` as a session setting.
+
+    The dialect copies the whole URL query into asyncpg's connect() kwargs, so
+    without the split the driver raises TypeError on an unexpected keyword.
+    """
+    url, settings = _split_server_settings(
+        make_url("postgresql+asyncpg://h/db?search_path=s1&ssl=require")
+    )
+    assert settings == {"search_path": "s1"}
+    assert dict(url.query) == {"ssl": "require"}
 
 
 async def test_create_engine_probes_connectivity_and_disposes_on_failure():

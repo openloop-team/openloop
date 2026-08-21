@@ -29,6 +29,7 @@ from openloop.broker_rpc.coordinator import (
 from openloop.broker_rpc.keys import VerificationKeySet
 from openloop.broker_rpc.models import StartSegmentPayload
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
+from openloop.db import BorrowedEngineStore, create_engine
 from tests.support.broker_repository_contract import SequenceIds
 from tests.support.postgres import postgres_dsn, require_postgres
 
@@ -55,16 +56,26 @@ async def postgres_start(tmp_path: Path):
         max_size=10,
         server_settings={"search_path": schema},
     )
+    # Same schema, the other bind. Task 16 removes the pool and the isinstance.
+    engine = await create_engine(
+        DSN,
+        min_size=2,
+        max_size=10,
+        server_settings={"search_path": schema},
+    )
     repository = PostgresBrokerRepository()
-    await repository.setup(pool)
+    await repository.setup(
+        engine if isinstance(repository, BorrowedEngineStore) else pool
+    )
     state_root = tmp_path / "state"
     state_root.mkdir(mode=0o700)
     os.chown(state_root, os.getuid(), os.getgid())
     state_root.chmod(0o700)
     try:
-        yield repository, pool, state_root
+        yield repository, pool, state_root, engine
     finally:
         await repository.close()
+        await engine.dispose()
         await pool.close()
         admin = await asyncpg.connect(DSN)
         try:
@@ -149,7 +160,7 @@ async def _pin_starting_generation(
 async def test_restart_replays_persisted_old_versions_without_secrets(
     postgres_start,
 ):
-    repository, pool, state_root = postgres_start
+    repository, pool, state_root, engine = postgres_start
     first_ledger = BrokerLedger(repository, id_factory=SequenceIds(start=30_000))
     authority_v1 = _authority(current="runtime-v1")
     created = await first_ledger.create_job(
@@ -169,7 +180,9 @@ async def test_restart_replays_persisted_old_versions_without_secrets(
     )
 
     restarted_repository = PostgresBrokerRepository()
-    await restarted_repository.setup(pool)
+    await restarted_repository.setup(
+        engine if isinstance(restarted_repository, BorrowedEngineStore) else pool
+    )
     restarted_ledger = BrokerLedger(
         restarted_repository, id_factory=SequenceIds(start=40_000)
     )
@@ -236,7 +249,7 @@ async def test_restart_replays_persisted_old_versions_without_secrets(
 async def test_abandon_rotation_and_concurrent_replay_preserve_pins(
     postgres_start,
 ):
-    repository, _, state_root = postgres_start
+    repository, _, state_root, _ = postgres_start
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=50_000))
     authority_v1 = _authority(current="runtime-v1")
     created = await ledger.create_job(

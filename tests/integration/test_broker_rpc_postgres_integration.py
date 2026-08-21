@@ -47,6 +47,7 @@ from openloop.broker_rpc.models import (
     RpcRequest,
     StartSegmentPayload,
 )
+from openloop.db import BorrowedEngineStore, create_engine
 from tests.support.broker_repository_contract import SequenceIds
 from tests.support.postgres import postgres_dsn, require_postgres
 
@@ -86,6 +87,8 @@ class RpcPostgresFixture:
     capability: JobCapabilityAuthority
     audit: PostgresRpcAuditSink
     pool: object
+    # Same schema, the other bind. Task 16 removes the pool.
+    engine: object
 
     def token(
         self,
@@ -130,11 +133,19 @@ async def rpc_postgres():
         max_size=10,
         server_settings={"search_path": schema},
     )
+    engine = await create_engine(
+        DSN,
+        min_size=2,
+        max_size=10,
+        server_settings={"search_path": schema},
+    )
     repository = PostgresBrokerRepository()
     audit = PostgresRpcAuditSink()
     try:
-        await repository.setup(pool)
-        await audit.setup(pool)
+        await repository.setup(
+            engine if isinstance(repository, BorrowedEngineStore) else pool
+        )
+        await audit.setup(engine if isinstance(audit, BorrowedEngineStore) else pool)
         private_key = Ed25519PrivateKey.generate()
         issuer = WorkloadIdentityIssuer(
             private_key=private_key,
@@ -161,10 +172,11 @@ async def rpc_postgres():
             policy=BrokerRpcPolicy("default", "docker", "postgres", 300),
             segment_coordinator=DisabledSegmentCoordinator(),
         )
-        yield RpcPostgresFixture(app, issuer, ledger, capability, audit, pool)
+        yield RpcPostgresFixture(app, issuer, ledger, capability, audit, pool, engine)
     finally:
         await audit.close()
         await repository.close()
+        await engine.dispose()
         await pool.close()
         admin = await asyncpg.connect(DSN)
         try:

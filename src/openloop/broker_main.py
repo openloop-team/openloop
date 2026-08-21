@@ -28,6 +28,7 @@ from openloop.broker_control import (
 )
 from openloop.broker_rpc.server import take_over_stale_socket
 from openloop.config import BrokerSettings
+from openloop.db import create_engine
 from openloop.postgres import create_pool
 from openloop.wiring.broker import build_broker_service
 
@@ -152,6 +153,9 @@ async def run_broker(
             log.info("broker startup: exclusive lifecycle lock acquired")
 
             pool = None
+            # Transitional (ADR 0007): both handles, one database. Task 16
+            # removes the pool.
+            engine = None
             if settings.broker_dev_in_memory:
                 log.warning("broker startup: DEVELOPMENT in-memory state enabled")
             else:
@@ -170,8 +174,25 @@ async def run_broker(
                 )
                 stack.push_async_callback(pool.close)
 
+                log.info("broker startup: opening Postgres engine")
+                engine_kwargs: dict[str, Any] = {
+                    "min_size": settings.postgres_pool_min_size,
+                    "max_size": settings.postgres_pool_max_size,
+                }
+                if settings.postgres_password is not None:
+                    engine_kwargs["password"] = (
+                        settings.postgres_password.get_secret_value()
+                    )
+                engine = await create_engine(
+                    settings.database_url,
+                    **engine_kwargs,
+                )
+                stack.push_async_callback(engine.dispose)
+
             log.info("broker startup: building unbound service graph")
-            service = await build_broker_service(config, stack, pool=pool)
+            service = await build_broker_service(
+                config, stack, pool=pool, engine=engine
+            )
 
             log.info(
                 "broker startup: building receipt locator and lifecycle reconciler"

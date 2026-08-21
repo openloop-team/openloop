@@ -27,6 +27,7 @@ from openloop.broker.postgres import (
     PostgresBrokerRepository,
     _load_packaged_migrations,
 )
+from openloop.db import BorrowedEngineStore, create_engine
 from tests.support.broker_repository_contract import (
     OWNER,
     SequenceIds,
@@ -58,12 +59,22 @@ async def postgres_repository():
         max_size=10,
         server_settings={"search_path": schema},
     )
+    # Same schema, the other bind. Task 16 removes the pool and the isinstance.
+    engine = await create_engine(
+        DSN,
+        min_size=1,
+        max_size=10,
+        server_settings={"search_path": schema},
+    )
     repository = PostgresBrokerRepository()
     try:
-        await repository.setup(pool)
-        yield repository, pool
+        await repository.setup(
+            engine if isinstance(repository, BorrowedEngineStore) else pool
+        )
+        yield repository, pool, engine
     finally:
         await repository.close()
+        await engine.dispose()
         await pool.close()
         admin = await asyncpg.connect(DSN)
         try:
@@ -80,7 +91,7 @@ async def _audit_count(pool) -> int:
 async def test_postgres_create_start_running_and_abandon_contract(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, pool, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds())
 
     created = await ledger.create_job(
@@ -139,7 +150,7 @@ async def test_postgres_create_start_running_and_abandon_contract(
 async def test_postgres_start_failure_allocates_next_generation(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, pool, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=100))
     created = await ledger.create_job(
         OWNER, "postgres-create-0002", "default", "docker", "postgres"
@@ -179,7 +190,7 @@ async def test_postgres_start_failure_allocates_next_generation(
 
 
 async def test_postgres_complete_lifecycle_shared_contract(postgres_repository):
-    repository, pool = postgres_repository
+    repository, pool, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=200))
     trace = await exercise_complete_lifecycle(ledger)
     assert trace.snapshots[-1].state is JobState.TERMINAL
@@ -190,7 +201,7 @@ async def test_postgres_complete_lifecycle_shared_contract(postgres_repository):
 async def test_postgres_restart_preserves_inspection_and_exact_replay(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, pool, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=300))
     created = await ledger.create_job(
         OWNER, "postgres-restart-001", "default", "docker", "postgres"
@@ -211,7 +222,9 @@ async def test_postgres_restart_preserves_inspection_and_exact_replay(
     await repository.close()
 
     restarted = PostgresBrokerRepository()
-    await restarted.setup(pool)
+    await restarted.setup(
+        engine if isinstance(restarted, BorrowedEngineStore) else pool
+    )
     try:
         restarted_ledger = BrokerLedger(restarted, id_factory=SequenceIds(start=400))
         snapshot = await restarted_ledger.inspect_job(OWNER, created.job_id)
@@ -240,7 +253,7 @@ async def test_postgres_restart_preserves_inspection_and_exact_replay(
 async def test_postgres_concurrent_same_key_create_is_one_mutation_and_replay(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, pool, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=500))
     first, second = await asyncio.gather(
         ledger.create_job(
@@ -259,7 +272,7 @@ async def test_postgres_concurrent_same_key_create_is_one_mutation_and_replay(
 async def test_postgres_concurrent_conflicting_key_has_one_winner(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, pool, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=600))
     results = await asyncio.gather(
         ledger.create_job(
@@ -276,7 +289,7 @@ async def test_postgres_concurrent_conflicting_key_has_one_winner(
 async def test_postgres_concurrent_starts_preserve_one_live_generation(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, pool, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=700))
     created = await ledger.create_job(
         OWNER, "postgres-race-job001", "default", "docker", "postgres"
@@ -322,7 +335,7 @@ async def test_postgres_concurrent_starts_preserve_one_live_generation(
 async def test_postgres_same_key_quiesce_release_and_completion_races_replay(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, pool, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=800))
     created = await ledger.create_job(
         OWNER, "postgres-race-flow01", "default", "docker", "postgres"
@@ -402,7 +415,7 @@ async def test_postgres_same_key_quiesce_release_and_completion_races_replay(
 async def test_postgres_receipt_rejection_rolls_back_operation_and_audit(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, pool, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=900))
     created = await ledger.create_job(
         OWNER, "postgres-receipt-001", "default", "docker", "postgres"
@@ -455,7 +468,7 @@ async def test_postgres_receipt_rejection_rolls_back_operation_and_audit(
 async def test_postgres_recovery_scan_and_internal_operations_are_durable(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, pool, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=1000))
     created = await ledger.create_job(
         OWNER, "postgres-recovery-01", "default", "docker", "postgres"
@@ -519,7 +532,7 @@ async def test_postgres_recovery_scan_and_internal_operations_are_durable(
 async def test_postgres_recovery_running_expiry_uses_database_time(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, pool, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=1100))
     created = await ledger.create_job(
         OWNER, "postgres-expiry-001", "default", "docker", "postgres"
@@ -558,7 +571,7 @@ async def test_postgres_recovery_running_expiry_uses_database_time(
 async def test_postgres_concurrent_repeated_setup_is_idempotent(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, pool, engine = postgres_repository
     second = PostgresBrokerRepository()
     third = PostgresBrokerRepository()
     try:
@@ -623,7 +636,7 @@ async def test_postgres_concurrent_fresh_setup_serializes_bootstrap():
 async def test_postgres_append_only_upgrade_records_checksum(
     postgres_repository, monkeypatch
 ):
-    repository, pool = postgres_repository
+    repository, pool, engine = postgres_repository
     await repository.close()
     packaged = _load_packaged_migrations()
     upgrade = Migration.from_bytes(
@@ -668,7 +681,7 @@ async def test_postgres_append_only_upgrade_records_checksum(
 async def test_postgres_setup_fails_closed_on_drift_or_future_version(
     postgres_repository, mutation, problem
 ):
-    repository, pool = postgres_repository
+    repository, pool, engine = postgres_repository
     await repository.close()
     async with pool.acquire() as connection:
         await connection.execute(mutation)
@@ -684,7 +697,7 @@ async def test_postgres_setup_fails_closed_on_drift_or_future_version(
 async def test_postgres_failed_pending_migration_rolls_back_and_detaches(
     postgres_repository, monkeypatch
 ):
-    repository, pool = postgres_repository
+    repository, pool, engine = postgres_repository
     await repository.close()
     packaged = _load_packaged_migrations()
     broken = Migration.from_bytes(
