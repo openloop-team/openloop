@@ -56,12 +56,12 @@ Docker endpoint; the adapter does not filter the root-equivalent Docker API.
 
 ### PostgreSQL access
 
-Per [ADR 0007](docs/adr/0007-sqlalchemy-postgresql-interface.md), SQLAlchemy is
-the only interface to PostgreSQL. Statements are written in the expression
-language. A statement kept as SQL text — `text()` or `exec_driver_sql()` — needs
-a comment on the line above it beginning `# sql-text:` and saying why the
-expression language would obscure what the statement does. Reviewers reject text
-without one; nothing enforces it automatically.
+SQLAlchemy is the only interface to PostgreSQL — no module imports or calls the
+driver. Statements are written in the expression language. A statement kept as
+SQL text — `text()` or `exec_driver_sql()` — needs a comment on the line above it
+beginning `# sql-text:` and saying why the expression language would obscure what
+the statement does. Reviewers reject text without one; nothing enforces it
+automatically.
 
 Two dialect behaviours to know before writing any statement text. A cast is
 written `CAST(:name AS type)`, never `:name::type` — a bind name followed by a
