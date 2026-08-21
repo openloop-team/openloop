@@ -6,8 +6,6 @@ cross-replica guarantee that only one of two processes leads a piece of work.
 """
 
 import asyncio
-import sys
-import types
 
 import pytest
 
@@ -239,90 +237,107 @@ def test_postgres_lock_id_is_deterministic_and_in_bigint_range():
     assert PostgresLock._lock_id("other-key") != a
 
 
-async def test_postgres_lock_setup_probes_lazy_pool(monkeypatch):
-    queries = []
+class FakeLockConnection:
+    """The little of an AsyncConnection that PostgresLock drives."""
 
-    class Connection:
-        async def fetchval(self, query):
-            queries.append(query)
-            return 1
+    def __init__(self, held=True):
+        self.held = held
+        self.options = None
+        self.statements = []
+        self.closed = False
 
-    class Acquire:
-        async def __aenter__(self):
-            return Connection()
+    async def execution_options(self, **options):
+        self.options = options
+        return self
 
-        async def __aexit__(self, exc_type, exc, traceback):
-            return False
+    async def scalar(self, statement, parameters=None):
+        self.statements.append((str(statement), parameters))
+        return self.held
 
-    class Pool:
-        def acquire(self):
-            return Acquire()
+    async def execute(self, statement, parameters=None):
+        self.statements.append((str(statement), parameters))
+        return None
 
-        async def close(self):
-            pass
+    async def close(self):
+        self.closed = True
 
-    pool = Pool()
 
-    async def create_pool(*args, **kwargs):
-        return pool
+class FakeLockEngine:
+    def __init__(self, connections):
+        self._connections = list(connections)
+        self.disposed = False
 
-    monkeypatch.setitem(
-        sys.modules,
-        "asyncpg",
-        types.SimpleNamespace(create_pool=create_pool),
-    )
+    async def connect(self):
+        return self._connections.pop(0)
+
+    async def dispose(self):
+        self.disposed = True
+
+
+async def test_postgres_lock_setup_builds_an_eagerly_probed_engine(monkeypatch):
+    calls = []
+    engine = FakeLockEngine([])
+
+    async def create_engine(dsn, **kwargs):
+        calls.append((dsn, kwargs))
+        return engine
+
+    monkeypatch.setattr("openloop.db.create_engine", create_engine)
     lock = PostgresLock("postgresql://test")
 
     await lock.setup()
 
-    assert queries == ["SELECT 1"]
-    assert lock._pool is pool
+    # min_size=1 is what makes construction a connectivity probe.
+    assert calls == [
+        ("postgresql://test", {"min_size": 1, "max_size": 2, "password": None})
+    ]
+    assert lock._engine is engine
 
 
 async def test_postgres_lock_forwards_an_explicit_password(monkeypatch):
     calls = []
 
-    class Connection:
-        async def fetchval(self, query):
-            return 1
+    async def create_engine(dsn, **kwargs):
+        calls.append((dsn, kwargs))
+        return FakeLockEngine([])
 
-    class Acquire:
-        async def __aenter__(self):
-            return Connection()
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return False
-
-    class Pool:
-        def acquire(self):
-            return Acquire()
-
-        async def close(self):
-            pass
-
-    async def create_pool(*args, **kwargs):
-        calls.append((args, kwargs))
-        return Pool()
-
-    monkeypatch.setitem(
-        sys.modules,
-        "asyncpg",
-        types.SimpleNamespace(create_pool=create_pool),
-    )
-    lock = PostgresLock(
-        "postgresql://test",
-        password="mounted-db-secret",
-    )
+    monkeypatch.setattr("openloop.db.create_engine", create_engine)
+    lock = PostgresLock("postgresql://test", password="mounted-db-secret")
 
     await lock.setup()
 
     assert calls == [
         (
-            ("postgresql://test",),
-            {
-                "min_size": 0,
-                "max_size": 2,
-                "password": "mounted-db-secret",
-            },
+            "postgresql://test",
+            {"min_size": 1, "max_size": 2, "password": "mounted-db-secret"},
         )
     ]
+
+
+async def test_postgres_lock_holds_the_connection_and_releases_it(monkeypatch):
+    """The connection is the lease: it stays checked out until release."""
+    holder, loser = FakeLockConnection(), FakeLockConnection(held=False)
+    engine = FakeLockEngine([holder, loser])
+
+    async def create_engine(dsn, **kwargs):
+        return engine
+
+    monkeypatch.setattr("openloop.db.create_engine", create_engine)
+    lock = PostgresLock("postgresql://test")
+    await lock.setup()
+
+    token = await lock.acquire("sweep", ttl_seconds=60)
+
+    assert token is not None
+    # AUTOCOMMIT, so the held connection is not parked inside a transaction.
+    assert holder.options == {"isolation_level": "AUTOCOMMIT"}
+    assert "pg_try_advisory_lock" in holder.statements[0][0]
+    assert not holder.closed
+
+    # A refused lock returns its connection rather than leaking it.
+    assert await lock.acquire("sweep", ttl_seconds=60) is None
+    assert loser.closed
+
+    assert await lock.release("sweep", token) is True
+    assert "pg_advisory_unlock" in holder.statements[-1][0]
+    assert holder.closed

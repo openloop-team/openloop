@@ -24,6 +24,7 @@ from openloop.approvals import ApprovalRequest
 from openloop.approvals.postgres import PostgresApprovalStore
 from openloop.approvals.schema import approvals
 from openloop.checkpoints.postgres import PostgresCheckpointStore
+from openloop.coordination import PostgresLock
 from openloop.db import BorrowedEngineStore, create_engine
 from openloop.memory.postgres import PostgresMemoryStore
 from openloop.memory.store import MemoryRecord, scope_key_for
@@ -1566,3 +1567,24 @@ async def test_reset_active_claims_counts_the_rows_it_cleared(thread_store):
 
     assert await thread_store.reset_active_claims() == 3
     assert await thread_store.reset_active_claims() == 0
+
+
+async def test_postgres_lock_excludes_a_second_holder_and_frees_on_release():
+    dsn = postgres_dsn()
+    await require_postgres(dsn)
+    first, second = PostgresLock(dsn), PostgresLock(dsn)
+    await first.setup()
+    await second.setup()
+    key = f"sweep-{uuid.uuid4().hex[:8]}"
+    try:
+        token = await first.acquire(key, ttl_seconds=60)
+        assert token is not None
+        assert await second.acquire(key, ttl_seconds=60) is None
+        assert await first.release(key, token) is True
+
+        other = await second.acquire(key, ttl_seconds=60)
+        assert other is not None
+        assert await second.release(key, other) is True
+    finally:
+        await first.close()
+        await second.close()
