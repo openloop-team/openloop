@@ -1,4 +1,4 @@
-"""Describes `broker_rpc_audit` for statement construction only (ADR 0007).
+"""Describes `broker_rpc_audit` for statement construction only.
 
 Not the table's definition: broker migration `0002_rpc_authorization.sql`
 creates it and the sink only appends. Nothing here emits DDL.

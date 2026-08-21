@@ -99,7 +99,7 @@ ORDER BY version
 """
 
 # sql-text: this runner's own bookkeeping table, created above rather than
-# described. (ADR 0009 replaces the runner outright.)
+# described.
 _RECORD_MIGRATION = """
 INSERT INTO broker_schema_migrations (version, name, checksum, applied_at)
 VALUES (:version, :name, :checksum, clock_timestamp())
@@ -736,7 +736,7 @@ class PostgresBrokerRepository(BorrowedEngineStore):
         async with self._setup_connection(engine) as connection:
             # sql-text: an advisory lock and the bootstrap DDL — neither has a
             # statement form, and the migration table is created here, not
-            # described. (ADR 0009 replaces this runner outright.)
+            # described.
             await connection.execute(
                 text("SELECT pg_advisory_xact_lock(:lock_id)"),
                 {"lock_id": BROKER_MIGRATION_LOCK_ID},

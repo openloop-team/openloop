@@ -1,4 +1,4 @@
-"""Column types SQLAlchemy does not ship (ADR 0007).
+"""Column types SQLAlchemy does not ship.
 
 Describe-only, like every declaration in this project: `get_col_spec` exists so
 a CAST renders, never so a table is created.

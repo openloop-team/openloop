@@ -1,4 +1,4 @@
-"""Engine construction — the single door to PostgreSQL (ADR 0007).
+"""Engine construction — the single door to PostgreSQL.
 
 `asyncpg.create_pool` opened `min_size` connections eagerly, so a database that
 was down failed at construction and the composition root could fall back.

@@ -1,8 +1,7 @@
-"""ADR 0007's one mechanically checkable completion condition.
+"""Only SQLAlchemy's dialect may reach the database driver.
 
-Only SQLAlchemy's dialect may reach the database driver. This is the whole of
-what tooling can settle; that every surviving SQL string carries a stated reason
-is settled in review.
+This is the whole of what tooling can settle; that every surviving SQL string
+carries a stated reason is settled in review.
 
 The check is AST-based, not textual. A grep for "asyncpg" would flag the dialect
 name itself — `postgresql+asyncpg://` in a URL, the `_DRIVER` constant in
@@ -53,8 +52,7 @@ def test_no_module_reaches_the_driver():
                 if isinstance(node.value, ast.Name) and node.value.id == DRIVER:
                     offenders.append(_where(path, node))
     assert offenders == [], (
-        "ADR 0007: only SQLAlchemy's dialect may reach the driver; found "
-        + ", ".join(offenders)
+        "only SQLAlchemy's dialect may reach the driver; found " + ", ".join(offenders)
     )
 
 
@@ -73,6 +71,6 @@ def test_no_metadata_defines_a_schema():
             if any(kw.arg == DEFINING_KEYWORD for kw in node.keywords):
                 offenders.append(f"{_where(path, node)} ({DEFINING_KEYWORD})")
     assert offenders == [], (
-        "ADR 0007: metadata describes a schema and never defines one; found "
+        "metadata describes a schema and never defines one; found "
         + ", ".join(offenders)
     )

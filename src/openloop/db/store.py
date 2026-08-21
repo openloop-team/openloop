@@ -1,4 +1,4 @@
-"""Store base class — durable stores borrow, never own, an engine (ADR 0007)."""
+"""Store base class — durable stores borrow, never own, an engine."""
 
 from __future__ import annotations
 

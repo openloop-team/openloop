@@ -1,8 +1,8 @@
 """What the asyncpg *dialect* does differently from the asyncpg *driver*.
 
-Every conversion task in the ADR 0007 plan rests on these answers. If one of
-these fails, stop and report it: the plan's prescribed conversions are wrong,
-not the test.
+Every statement in this project rests on these answers, and each one fails at
+run time rather than at construction. If one of these fails, stop and report it:
+the statements written against it are wrong, not the test.
 """
 
 import pytest

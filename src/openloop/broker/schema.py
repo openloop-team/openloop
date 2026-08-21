@@ -1,4 +1,4 @@
-"""Describes the broker's tables for statement construction only (ADR 0007).
+"""Describes the broker's tables for statement construction only.
 
 The migration files under `migrations/` define this schema; this module only
 describes it, and where the two disagree the database is right. Nothing here is

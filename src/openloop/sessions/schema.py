@@ -1,8 +1,8 @@
 """Describes the surface-session and thread tables for statement construction
-only (ADR 0007).
+only.
 
-Not the schema's definition — the stores' `setup()` still owns that until ADR
-0009 moves it to Alembic. Nothing here emits DDL.
+Not the schema's definition — the stores' `setup()` still owns that until schema
+evolution moves to a migration tool. Nothing here emits DDL.
 """
 
 from __future__ import annotations

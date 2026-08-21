@@ -301,7 +301,7 @@ def test_create_app_composes_with_the_settings_it_is_given(tmp_path):
 
 
 async def test_engine_backed_stores_bind_to_the_engine_not_the_pool():
-    """During the ADR 0007 transition both binds exist; a store gets its own."""
+    """A durable store is settled against the engine and released with it."""
     from openloop.db import BorrowedEngineStore
 
     bound: dict[str, object] = {}

@@ -1,4 +1,4 @@
-"""Describes the `usage` table for statement construction only (ADR 0007)."""
+"""Describes the `usage` table for statement construction only."""
 
 from __future__ import annotations
 

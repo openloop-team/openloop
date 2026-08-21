@@ -17,7 +17,7 @@ class PostgresUsageStore(BorrowedEngineStore):
     """Persists usage to a `usage` table; totals drive budget enforcement."""
 
     async def setup(self, engine: AsyncEngine) -> None:
-        # sql-text: schema evolution moves to Alembic (ADR 0009); DDL is not
+        # sql-text: schema evolution moves to a migration tool; DDL is not
         # restated as metadata. The ALTER loop interpolates a column name and a
         # SQL type, never a value.
         async with self._setup_connection(engine) as conn:

@@ -1,7 +1,7 @@
 """Unit coverage for the shared PostgreSQL connection pool's sizing.
 
-Ownership and binding moved to `test_db_engine.py` with the engine seam
-(ADR 0007); the pool bounds are still configuration, and still validated here.
+Ownership and binding moved to `test_db_engine.py` with the engine seam; the
+pool bounds are still configuration, and still validated here.
 """
 
 import pytest

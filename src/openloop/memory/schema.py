@@ -1,7 +1,7 @@
-"""Describes the `memories` table for statement construction only (ADR 0007).
+"""Describes the `memories` table for statement construction only.
 
 This is not the schema's definition — `PostgresMemoryStore.setup` still owns
-that until ADR 0009 moves it to Alembic. Nothing here emits DDL.
+that until schema evolution moves to a migration tool. Nothing here emits DDL.
 """
 
 from __future__ import annotations

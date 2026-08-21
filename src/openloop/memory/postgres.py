@@ -35,7 +35,7 @@ class PostgresMemoryStore(BorrowedEngineStore):
     async def setup(self, engine: AsyncEngine) -> None:
         """Bind a caller-owned engine and create the extension, table, and index."""
         async with self._setup_connection(engine) as conn:
-            # sql-text: schema evolution moves to Alembic (ADR 0009); DDL is not
+            # sql-text: schema evolution moves to a migration tool; DDL is not
             # restated as metadata, and the vector column's width is a runtime
             # value the expression language has no place for.
             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))

@@ -1,4 +1,4 @@
-"""Describes `worker_checkpoints` for statement construction only (ADR 0007)."""
+"""Describes `worker_checkpoints` for statement construction only."""
 
 from __future__ import annotations
 

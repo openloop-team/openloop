@@ -21,7 +21,7 @@ from openloop.db import BorrowedEngineStore
 class PostgresCheckpointStore(BorrowedEngineStore):
     async def setup(self, engine: AsyncEngine) -> None:
         async with self._setup_connection(engine) as conn:
-            # sql-text: schema evolution moves to Alembic (ADR 0009); DDL is not
+            # sql-text: schema evolution moves to a migration tool; DDL is not
             # restated as metadata.
             await conn.execute(
                 text(
