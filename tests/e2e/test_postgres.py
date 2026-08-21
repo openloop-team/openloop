@@ -40,7 +40,7 @@ from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
 from openloop.usage import UsageRecord, budget_scope_key
 from openloop.usage.postgres import PostgresUsageStore
-from openloop.workflows import WorkflowEngine
+from openloop.workflows import WorkflowEngine, WorkflowInstance
 from openloop.workflows.postgres import PostgresWorkflowStore
 from tests.support.postgres import postgres_dsn, require_postgres
 
@@ -75,6 +75,16 @@ async def postgres_engine():
         yield engine
     finally:
         await engine.dispose()
+
+
+async def _sql(engine, statement, **parameters):
+    """Run one statement directly — cleanup, and the schema rewinds.
+
+    sql-text: these reach past the stores on purpose, to delete a run's rows or
+    to un-do a migration the metadata no longer describes.
+    """
+    async with engine.begin() as conn:
+        await conn.execute(text(statement), parameters)
 
 
 async def _settle(store, pool, engine):
@@ -341,11 +351,11 @@ async def test_worker_checkpoint_resume_across_real_postgres(
     finally:
         # Best-effort cleanup of this run's row.
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM worker_checkpoints WHERE job_id = $1", job_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM worker_checkpoints WHERE job_id = :job_id",
+                job_id=job_id,
+            )
         except Exception:
             pass
         await store.close()
@@ -388,11 +398,11 @@ async def test_workflow_resume_across_real_postgres(postgres_pool, postgres_engi
             await store2.close()
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM workflow_instances WHERE id = :id",
+                id=instance_id,
+            )
         except Exception:
             pass
         await store.close()
@@ -469,11 +479,11 @@ async def test_surface_session_roundtrip_across_real_postgres(
             await store2.close()
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM surface_sessions WHERE id = $1", session_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM surface_sessions WHERE id = :id",
+                id=session_id,
+            )
         except Exception:
             pass
         await store.close()
@@ -576,11 +586,11 @@ async def test_thread_history_across_real_postgres(postgres_pool, postgres_engin
             await store2.close()
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM surface_sessions WHERE thread = $1", thread
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM surface_sessions WHERE thread = :thread",
+                thread=thread,
+            )
         except Exception:
             pass
         await store.close()
@@ -726,12 +736,14 @@ async def test_session_reconcile_across_real_postgres(postgres_pool, postgres_en
             await workflows2.close()
     finally:
         try:
-            pool = sessions._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute("DELETE FROM surface_sessions WHERE id = $1", sid)
-            pool = workflows._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute("DELETE FROM workflow_instances WHERE id = $1", sid)
+            await _sql(
+                postgres_engine, "DELETE FROM surface_sessions WHERE id = :id", id=sid
+            )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM workflow_instances WHERE id = :id",
+                id=sid,
+            )
         except Exception:
             pass
         await sessions.close()
@@ -793,15 +805,17 @@ async def test_thread_record_transcript_across_real_postgres(
             await store2.close()
     finally:
         try:
-            pool = store._require_pool()
             key = "\x1f".join(("slack", "acme", "dev-platform", "C1", thread))
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM surface_thread_transcript WHERE scope_key = $1", key
-                )
-                await conn.execute(
-                    "DELETE FROM surface_threads WHERE scope_key = $1", key
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM surface_thread_transcript WHERE scope_key = :key",
+                key=key,
+            )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM surface_threads WHERE scope_key = :key",
+                key=key,
+            )
         except Exception:
             pass
         await store.close()
@@ -844,11 +858,11 @@ async def test_thread_context_ref_across_real_postgres(postgres_pool, postgres_e
             await store2.close()
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM surface_threads WHERE scope_key = $1", key
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM surface_threads WHERE scope_key = :key",
+                key=key,
+            )
         except Exception:
             pass
         await store.close()
@@ -910,14 +924,16 @@ async def test_thread_inbox_and_claim_across_real_postgres(
             await store2.close()
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM surface_thread_inbox WHERE scope_key = $1", key
-                )
-                await conn.execute(
-                    "DELETE FROM surface_threads WHERE scope_key = $1", key
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM surface_thread_inbox WHERE scope_key = :key",
+                key=key,
+            )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM surface_threads WHERE scope_key = :key",
+                key=key,
+            )
         except Exception:
             pass
         await store.close()
@@ -934,8 +950,6 @@ async def test_workflow_drive_arbitration_sql_semantics(postgres_pool, postgres_
     store = PostgresWorkflowStore()
     await _settle(store, postgres_pool, postgres_engine)
     try:
-        pool = store._require_pool()
-
         # create: inserts once, conflict loses without overwriting.
         assert await store.create(
             WorkflowInstance(
@@ -959,12 +973,12 @@ async def test_workflow_drive_arbitration_sql_semantics(postgres_pool, postgres_
         first = await store.claim_drive(instance_id, lease_seconds=60)
         assert first is not None and first.drive_gen == 1
         assert await store.claim_drive(instance_id, lease_seconds=60) is None
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE workflow_instances "
-                "SET leased_until = now() - interval '1 second' WHERE id = $1",
-                instance_id,
-            )
+        await _sql(
+            postgres_engine,
+            "UPDATE workflow_instances "
+            "SET leased_until = now() - interval '1 second' WHERE id = :id",
+            id=instance_id,
+        )
         second = await store.claim_drive(instance_id, lease_seconds=60)
         assert second is not None and second.drive_gen == 2
 
@@ -1004,11 +1018,11 @@ async def test_workflow_drive_arbitration_sql_semantics(postgres_pool, postgres_
         assert await store.cancel_instance(instance_id, "again") is None
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM workflow_instances WHERE id = :id",
+                id=instance_id,
+            )
         except Exception:
             pass
         await store.close()
@@ -1033,17 +1047,17 @@ async def test_workflow_drive_gen_migration_is_idempotent(
     store = PostgresWorkflowStore()
     await _settle(store, postgres_pool, postgres_engine)
     try:
-        pool = store._require_pool()
-        async with pool.acquire() as conn:
-            # Rewind to the pre-migration schema with a live row in place.
-            await conn.execute(
-                "ALTER TABLE workflow_instances DROP COLUMN IF EXISTS drive_gen"
-            )
-            await conn.execute(
-                "INSERT INTO workflow_instances (id, workflow, status) "
-                "VALUES ($1, 't', 'waiting')",
-                instance_id,
-            )
+        # Rewind to the pre-migration schema with a live row in place.
+        await _sql(
+            postgres_engine,
+            "ALTER TABLE workflow_instances DROP COLUMN IF EXISTS drive_gen",
+        )
+        await _sql(
+            postgres_engine,
+            "INSERT INTO workflow_instances (id, workflow, status) "
+            "VALUES (:id, 't', 'waiting')",
+            id=instance_id,
+        )
         await _settle(store, postgres_pool, postgres_engine)  # migrate
         await _settle(
             store, postgres_pool, postgres_engine
@@ -1053,11 +1067,11 @@ async def test_workflow_drive_gen_migration_is_idempotent(
         assert migrated.drive_gen == 0
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM workflow_instances WHERE id = :id",
+                id=instance_id,
+            )
         except Exception:
             pass
         await store.close()
@@ -1102,11 +1116,11 @@ async def test_workflow_concurrent_drives_run_steps_once(
         assert (await store.get(instance_id)).status == "completed"
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM workflow_instances WHERE id = :id",
+                id=instance_id,
+            )
         except Exception:
             pass
         await store2.close()
@@ -1151,13 +1165,12 @@ async def test_workflow_lease_takeover_evicts_stale_drive(
         stale_engine.drive_background(instance_id)
         await asyncio.wait_for(started.wait(), timeout=5)
 
-        pool = store._require_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE workflow_instances "
-                "SET leased_until = now() - interval '1 second' WHERE id = $1",
-                instance_id,
-            )
+        await _sql(
+            postgres_engine,
+            "UPDATE workflow_instances "
+            "SET leased_until = now() - interval '1 second' WHERE id = :id",
+            id=instance_id,
+        )
         rival = await store2.claim_drive(instance_id, lease_seconds=60)
         assert rival is not None
 
@@ -1170,11 +1183,11 @@ async def test_workflow_lease_takeover_evicts_stale_drive(
         assert "hang" not in current.completed_steps  # nothing clobbered
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM workflow_instances WHERE id = :id",
+                id=instance_id,
+            )
         except Exception:
             pass
         await store2.close()
@@ -1235,11 +1248,11 @@ async def test_workflow_cancel_during_drive_wins_over_writer(
         assert terminal == [instance_id]
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM workflow_instances WHERE id = :id",
+                id=instance_id,
+            )
         except Exception:
             pass
         await store2.close()
@@ -1464,3 +1477,34 @@ async def test_claim_decision_is_won_exactly_once(approval_store):
 
     assert first is not None and first.decided_by == "alice"
     assert second is None
+
+
+async def test_fenced_write_rejects_a_stale_generation(workflow_store):
+    wid = f"w-{uuid.uuid4().hex[:8]}"
+    instance = WorkflowInstance(id=wid, workflow="demo", status="running")
+    assert await workflow_store.create(instance) is True
+
+    claimed = await workflow_store.claim_drive(wid, lease_seconds=30)
+    assert claimed is not None
+
+    # The current generation writes; a stale one is fenced out. An ordinary
+    # write deliberately leaves drive_gen alone, so the same gen stays valid —
+    # only a release (or a rival claim) moves it on.
+    assert await workflow_store.fenced_write(claimed, claimed.drive_gen) is True
+    assert await workflow_store.fenced_write(claimed, claimed.drive_gen - 1) is False
+
+
+async def test_release_clears_the_lease_and_bumps_the_generation(workflow_store):
+    wid = f"w-{uuid.uuid4().hex[:8]}"
+    instance = WorkflowInstance(id=wid, workflow="demo", status="running")
+    await workflow_store.create(instance)
+    claimed = await workflow_store.claim_drive(wid, lease_seconds=30)
+
+    assert (
+        await workflow_store.fenced_write(claimed, claimed.drive_gen, release=True)
+        is True
+    )
+
+    reread = await workflow_store.get(wid)
+    assert reread.leased_until is None
+    assert reread.drive_gen == claimed.drive_gen + 1
