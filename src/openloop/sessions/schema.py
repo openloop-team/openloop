@@ -7,7 +7,7 @@ Not the schema's definition — the stores' `setup()` still owns that until ADR
 
 from __future__ import annotations
 
-from sqlalchemy import Column, DateTime, MetaData, Table, Text
+from sqlalchemy import BigInteger, Column, DateTime, MetaData, Table, Text
 from sqlalchemy.dialects.postgresql import JSONB
 
 metadata = MetaData()
@@ -35,4 +35,39 @@ surface_sessions = Table(
     Column("error", Text),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+surface_threads = Table(
+    "surface_threads",
+    metadata,
+    Column("scope_key", Text, primary_key=True),
+    Column("surface", Text, nullable=False),
+    Column("workspace", Text, nullable=False),
+    Column("agent", Text, nullable=False),
+    Column("channel", Text),
+    Column("thread", Text),
+    Column("active_turn_id", Text),
+    Column("context_ref", Text),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+surface_thread_transcript = Table(
+    "surface_thread_transcript",
+    metadata,
+    Column("scope_key", Text, primary_key=True),
+    Column("turn_id", Text, primary_key=True),
+    Column("seq", BigInteger),
+    Column("request", Text, nullable=False),
+    Column("answer", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+surface_thread_inbox = Table(
+    "surface_thread_inbox",
+    metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("scope_key", Text, nullable=False),
+    Column("event_id", Text, nullable=False),
+    Column("payload", JSONB, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
 )

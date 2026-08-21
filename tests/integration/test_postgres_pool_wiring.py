@@ -57,10 +57,28 @@ class _Pool:
         self.close_calls += 1
 
 
+class _EngineResult:
+    """The little of a SQLAlchemy Result that a store's setup() path reads."""
+
+    rowcount = 0
+
+    def first(self):
+        return None
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return []
+
+
 class _EngineConnection:
     """Accepts any statement a converted store's setup() issues."""
 
     async def execute(self, statement, parameters=None):
+        return _EngineResult()
+
+    async def scalar(self, statement, parameters=None):
         return None
 
 

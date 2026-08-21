@@ -29,6 +29,7 @@ from openloop.memory.postgres import PostgresMemoryStore
 from openloop.memory.store import MemoryRecord, scope_key_for
 from openloop.runtime import Runtime, Task
 from openloop.sessions.postgres import PostgresSurfaceSessionStore
+from openloop.sessions.store import SurfaceTarget
 from openloop.sessions.threads import PostgresThreadRecordStore
 from openloop.testing import (
     FakeEmbedder,
@@ -1508,3 +1509,60 @@ async def test_release_clears_the_lease_and_bumps_the_generation(workflow_store)
     reread = await workflow_store.get(wid)
     assert reread.leased_until is None
     assert reread.drive_gen == claimed.drive_gen + 1
+
+
+async def test_try_begin_turn_needs_both_a_free_thread_and_pending_work(thread_store):
+    scope = SurfaceTarget(
+        surface="slack",
+        workspace="w",
+        agent="a",
+        channel=f"c-{uuid.uuid4().hex[:8]}",
+        thread="t",
+    )
+    await thread_store.get_or_create(scope)
+
+    assert await thread_store.try_begin_turn(scope) is False
+
+    await thread_store.append_inbox(scope, "e-1", {"hello": "world"})
+    assert await thread_store.try_begin_turn(scope) is True
+    assert await thread_store.try_begin_turn(scope) is False
+
+
+async def test_next_inbox_drains_in_order_and_decodes_the_payload(thread_store):
+    scope = SurfaceTarget(
+        surface="slack",
+        workspace="w",
+        agent="a",
+        channel=f"c-{uuid.uuid4().hex[:8]}",
+        thread="t2",
+    )
+    await thread_store.append_inbox(scope, "e-1", {"n": 1})
+    await thread_store.append_inbox(scope, "e-2", {"n": 2})
+
+    first = await thread_store.next_inbox(scope)
+    second = await thread_store.next_inbox(scope)
+
+    assert (first.event_id, first.payload) == ("e-1", {"n": 1})
+    assert (second.event_id, second.payload) == ("e-2", {"n": 2})
+    assert await thread_store.next_inbox(scope) is None
+
+
+@pytest.mark.serial
+async def test_reset_active_claims_counts_the_rows_it_cleared(thread_store):
+    run = uuid.uuid4().hex[:8]
+    # surface_threads is shared across this suite, and the reset is table-wide:
+    # start from a clean slate so the count is this test's three rows.
+    await thread_store.reset_active_claims()
+    for n in range(3):
+        scope = SurfaceTarget(
+            surface="slack",
+            workspace="w",
+            agent="a",
+            channel=f"c{n}-{run}",
+            thread="t",
+        )
+        await thread_store.append_inbox(scope, f"e-{n}", {})
+        assert await thread_store.try_begin_turn(scope) is True
+
+    assert await thread_store.reset_active_claims() == 3
+    assert await thread_store.reset_active_claims() == 0
