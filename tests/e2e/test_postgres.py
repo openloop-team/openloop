@@ -1421,3 +1421,15 @@ async def test_recall_ranks_by_vector_distance(memory_store):
 
     assert [h.text for h in hits] == ["near", "far"]
     assert hits[0].metadata == {"k": 1}
+
+
+async def test_record_reports_the_duplicate_as_not_written(usage_store):
+    record = UsageRecord(
+        scope_key="s",
+        workspace="w",
+        agent="a",
+        model="m",
+        idempotency_key=f"dupe-key-{uuid.uuid4().hex[:8]}",
+    )
+    assert await usage_store.record(record) is True
+    assert await usage_store.record(record) is False
