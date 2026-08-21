@@ -20,6 +20,7 @@ from openloop.broker_control.local_receipts import LocalCheckpointReceiptStore
 from openloop.broker_control.receipts import CheckpointReceiptIssuer
 from openloop.broker_runtime import DockerOpenHandsRuntimeDriver
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
+from openloop.db import create_engine
 from openloop.tools.openhands_artifacts import WorkspaceArtifactStore
 from openloop.tools.openhands_state import OpenHandsKeyDeriver, OpenHandsStateLayout
 from openloop.wiring.broker import (
@@ -238,6 +239,9 @@ async def test_build_broker_uses_durable_audit_with_postgres(tmp_path, sock_dir)
 
     settings, embedded, _broker = _settings(tmp_path, sock_dir)
     pool = await asyncpg.create_pool(_DSN, min_size=1, max_size=2)
+    # Transitional (ADR 0007): both handles, one database. Task 16 removes the
+    # pool.
+    engine = await create_engine(_DSN, min_size=1, max_size=2)
     try:
         async with AsyncExitStack() as stack:
             handle = await build_broker(
@@ -245,6 +249,7 @@ async def test_build_broker_uses_durable_audit_with_postgres(tmp_path, sock_dir)
                 stack,
                 embedded_settings=embedded,
                 pool=pool,
+                engine=engine,
                 runtime_driver=InMemoryRuntimeDriver(),
             )
             assert isinstance(handle, BrokerClientHandle)
@@ -253,6 +258,7 @@ async def test_build_broker_uses_durable_audit_with_postgres(tmp_path, sock_dir)
             )
             assert created.ticket.job_id is not None
     finally:
+        await engine.dispose()
         await pool.close()
 
 
