@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from sqlalchemy import text
 
 from openloop.broker.ledger import BrokerLedger
 from openloop.broker.models import BrokerOwner, GenerationState
@@ -29,10 +30,24 @@ from openloop.broker_rpc.coordinator import (
 from openloop.broker_rpc.keys import VerificationKeySet
 from openloop.broker_rpc.models import StartSegmentPayload
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
+from openloop.db import create_engine
 from tests.support.broker_repository_contract import SequenceIds
 from tests.support.postgres import postgres_dsn, require_postgres
 
 DSN = postgres_dsn()
+
+
+async def _admin(statement: str) -> None:
+    """Run one statement outside the per-test schema, to create or drop it."""
+    engine = await create_engine(DSN, min_size=1, max_size=1)
+    try:
+        async with engine.begin() as connection:
+            # sql-text: DDL naming a schema this suite creates for itself.
+            await connection.execute(text(statement))
+    finally:
+        await engine.dispose()
+
+
 OWNER = BrokerOwner("tenant-start-postgres", "workload-start-postgres")
 POLICY = BrokerRpcPolicy("default", "docker", "local", 300)
 _RECEIPT_PRIVATE_KEY = Ed25519PrivateKey.generate()
@@ -43,34 +58,27 @@ pytestmark = [pytest.mark.integration, pytest.mark.postgres]
 @pytest.fixture
 async def postgres_start(tmp_path: Path):
     await require_postgres(DSN)
-    import asyncpg
 
     schema = f"broker_start_test_{uuid4().hex}"
-    admin = await asyncpg.connect(DSN)
-    await admin.execute(f'CREATE SCHEMA "{schema}"')
-    await admin.close()
-    pool = await asyncpg.create_pool(
+    await _admin(f'CREATE SCHEMA "{schema}"')
+    engine = await create_engine(
         DSN,
         min_size=2,
         max_size=10,
         server_settings={"search_path": schema},
     )
     repository = PostgresBrokerRepository()
-    await repository.setup(pool)
+    await repository.setup(engine)
     state_root = tmp_path / "state"
     state_root.mkdir(mode=0o700)
     os.chown(state_root, os.getuid(), os.getgid())
     state_root.chmod(0o700)
     try:
-        yield repository, pool, state_root
+        yield repository, state_root, engine
     finally:
         await repository.close()
-        await pool.close()
-        admin = await asyncpg.connect(DSN)
-        try:
-            await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-        finally:
-            await admin.close()
+        await engine.dispose()
+        await _admin(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
 
 
 def _authority(*, current: str) -> RuntimeSecretAuthority:
@@ -149,7 +157,7 @@ async def _pin_starting_generation(
 async def test_restart_replays_persisted_old_versions_without_secrets(
     postgres_start,
 ):
-    repository, pool, state_root = postgres_start
+    repository, state_root, engine = postgres_start
     first_ledger = BrokerLedger(repository, id_factory=SequenceIds(start=30_000))
     authority_v1 = _authority(current="runtime-v1")
     created = await first_ledger.create_job(
@@ -169,7 +177,7 @@ async def test_restart_replays_persisted_old_versions_without_secrets(
     )
 
     restarted_repository = PostgresBrokerRepository()
-    await restarted_repository.setup(pool)
+    await restarted_repository.setup(engine)
     restarted_ledger = BrokerLedger(
         restarted_repository, id_factory=SequenceIds(start=40_000)
     )
@@ -211,17 +219,22 @@ async def test_restart_replays_persisted_old_versions_without_secrets(
         runtime_key_version="runtime-v1",
         durable_key_version="runtime-v1",
     )
-    async with pool.acquire() as connection:
-        encoded = await connection.fetchval(
-            """
-            SELECT json_build_object(
-                'job', row_to_json(j), 'generation', row_to_json(g)
-            )::text
-            FROM broker_jobs j
-            JOIN broker_generations g USING (job_id)
-            WHERE j.job_id = $1 AND g.generation = 1
-            """,
-            created.job_id,
+    async with engine.connect() as connection:
+        # sql-text: dumps two whole rows as JSON to prove no secret reached
+        # them; row_to_json over a join has no expression-language form worth
+        # reading.
+        encoded = await connection.scalar(
+            text(
+                """
+                SELECT json_build_object(
+                    'job', row_to_json(j), 'generation', row_to_json(g)
+                )::text
+                FROM broker_jobs j
+                JOIN broker_generations g USING (job_id)
+                WHERE j.job_id = :job_id AND g.generation = 1
+                """
+            ),
+            {"job_id": created.job_id},
         )
     for secret in (
         derived.relay_capability,
@@ -236,7 +249,7 @@ async def test_restart_replays_persisted_old_versions_without_secrets(
 async def test_abandon_rotation_and_concurrent_replay_preserve_pins(
     postgres_start,
 ):
-    repository, _, state_root = postgres_start
+    repository, state_root, _ = postgres_start
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=50_000))
     authority_v1 = _authority(current="runtime-v1")
     created = await ledger.create_job(

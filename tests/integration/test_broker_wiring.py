@@ -20,6 +20,7 @@ from openloop.broker_control.local_receipts import LocalCheckpointReceiptStore
 from openloop.broker_control.receipts import CheckpointReceiptIssuer
 from openloop.broker_runtime import DockerOpenHandsRuntimeDriver
 from openloop.broker_runtime.memory import InMemoryRuntimeDriver
+from openloop.db import create_engine
 from openloop.tools.openhands_artifacts import WorkspaceArtifactStore
 from openloop.tools.openhands_state import OpenHandsKeyDeriver, OpenHandsStateLayout
 from openloop.wiring.broker import (
@@ -232,19 +233,18 @@ async def test_build_broker_uses_durable_audit_with_postgres(tmp_path, sock_dir)
     # A Postgres-backed broker must pair with the durable RPC audit sink; if the
     # audit table were missing or set up before the migrations, setup would raise
     # and build_broker would fail closed. A returned handle + a create_job that
-    # round-trips over the pool proves the durable repo + durable audit path.
+    # round-trips over the engine proves the durable repo + durable audit path.
     await require_postgres(_DSN)
-    import asyncpg
 
     settings, embedded, _broker = _settings(tmp_path, sock_dir)
-    pool = await asyncpg.create_pool(_DSN, min_size=1, max_size=2)
+    engine = await create_engine(_DSN, min_size=1, max_size=2)
     try:
         async with AsyncExitStack() as stack:
             handle = await build_broker(
                 settings,
                 stack,
                 embedded_settings=embedded,
-                pool=pool,
+                engine=engine,
                 runtime_driver=InMemoryRuntimeDriver(),
             )
             assert isinstance(handle, BrokerClientHandle)
@@ -253,7 +253,7 @@ async def test_build_broker_uses_durable_audit_with_postgres(tmp_path, sock_dir)
             )
             assert created.ticket.job_id is not None
     finally:
-        await pool.close()
+        await engine.dispose()
 
 
 # --- external mode -------------------------------------------------------

@@ -90,7 +90,7 @@ class AppContext:
     slack_app: Any | None
     session_runner: Any | None
     slack_handler: Any | None
-    postgres_pool: Any | None
+    postgres_engine: Any | None
     recovery_task: Any | None = None
     warm_sweep_task: Any | None = None
 

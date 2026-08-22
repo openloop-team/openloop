@@ -1,4 +1,4 @@
-"""Integration coverage for the application-owned PostgreSQL pool."""
+"""Integration coverage for the application-owned PostgreSQL engine."""
 
 import importlib
 
@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from openloop import app as appmod
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
+from openloop.db import BorrowedEngineStore
 from openloop.memory import InMemoryStore
 from openloop.sessions import InMemorySurfaceSessionStore, InMemoryThreadRecordStore
 from openloop.usage import InMemoryUsageStore
@@ -28,32 +29,52 @@ class _Acquire:
         return False
 
 
-class _Connection:
-    async def execute(self, query, *args):
-        if query.lstrip().startswith("UPDATE"):
-            return "UPDATE 0"
-        return "OK"
+class _EngineResult:
+    """The little of a SQLAlchemy Result that a store's setup() path reads."""
 
-    async def fetch(self, query, *args):
-        return []
+    rowcount = 0
 
-    async def fetchrow(self, query, *args):
+    def first(self):
         return None
 
-    async def fetchval(self, query, *args):
-        return 0
+    def mappings(self):
+        return self
+
+    def all(self):
+        return []
 
 
-class _Pool:
+class _EngineConnection:
+    """Accepts any statement a converted store's setup() issues."""
+
+    async def execute(self, statement, parameters=None):
+        return _EngineResult()
+
+    async def scalar(self, statement, parameters=None):
+        return None
+
+
+class _Engine:
+    """Stands in for an AsyncEngine — begin()/connect(), released by dispose()."""
+
     def __init__(self):
-        self.connection = _Connection()
-        self.close_calls = 0
+        self.connection = _EngineConnection()
+        self.dispose_calls = 0
 
-    def acquire(self):
+    def begin(self):
         return _Acquire(self.connection)
 
-    async def close(self):
-        self.close_calls += 1
+    def connect(self):
+        return _Acquire(self.connection)
+
+    async def dispose(self):
+        self.dispose_calls += 1
+
+
+def _handle_of(store):
+    """The engine a settled store is bound to."""
+    assert isinstance(store, BorrowedEngineStore)
+    return store._engine
 
 
 def _settings(tmp_path, **overrides) -> Settings:
@@ -70,23 +91,23 @@ def _settings(tmp_path, **overrides) -> Settings:
     return Settings(**values)
 
 
-def test_lifespan_creates_and_closes_one_shared_pool(monkeypatch, tmp_path):
+def test_lifespan_creates_and_disposes_one_shared_engine(monkeypatch, tmp_path):
     settings = _settings(tmp_path)
-    pool = _Pool()
-    create_calls = []
+    engine = _Engine()
+    engine_calls = []
 
-    async def create_pool(dsn, *, min_size, max_size):
-        create_calls.append((dsn, min_size, max_size))
-        return pool
+    async def create_engine(dsn, *, min_size, max_size):
+        engine_calls.append((dsn, min_size, max_size))
+        return engine
 
-    monkeypatch.setattr(composemod, "create_pool", create_pool)
+    monkeypatch.setattr(composemod, "create_engine", create_engine)
 
     app = appmod.create_app(settings=settings)
     with pytest.raises(RuntimeError, match="exceptional shutdown"):
         with TestClient(app):
-            assert create_calls == [(settings.database_url, 2, 7)]
+            assert engine_calls == [(settings.database_url, 2, 7)]
             ctx = app.state.ctx
-            assert ctx.postgres_pool is pool
+            assert ctx.postgres_engine is engine
             ordinary_stores = [
                 ctx.memory,
                 ctx.usage,
@@ -96,32 +117,33 @@ def test_lifespan_creates_and_closes_one_shared_pool(monkeypatch, tmp_path):
                 ctx.threads,
                 ctx.engine.store,
             ]
-            assert all(store._pool is pool for store in ordinary_stores)
-            assert pool.close_calls == 0
+            for store in ordinary_stores:
+                assert _handle_of(store) is engine
+            assert engine.dispose_calls == 0
             raise RuntimeError("exceptional shutdown")
 
-    assert pool.close_calls == 1
-    assert all(store._pool is None for store in ordinary_stores)
+    assert engine.dispose_calls == 1
+    assert all(_handle_of(store) is None for store in ordinary_stores)
 
 
-def test_pool_creation_failure_uses_fallbacks_without_store_pool_attempts(
+def test_engine_creation_failure_uses_fallbacks_without_store_setup_attempts(
     monkeypatch, tmp_path
 ):
     settings = _settings(tmp_path)
     calls = 0
 
-    async def create_pool(dsn, *, min_size, max_size):
+    async def create_engine(dsn, *, min_size, max_size):
         nonlocal calls
         calls += 1
         raise RuntimeError("database unavailable")
 
-    monkeypatch.setattr(composemod, "create_pool", create_pool)
+    monkeypatch.setattr(composemod, "create_engine", create_engine)
 
     app = appmod.create_app(settings=settings)
     with TestClient(app):
         assert calls == 1
         ctx = app.state.ctx
-        assert ctx.postgres_pool is None
+        assert ctx.postgres_engine is None
         assert isinstance(ctx.memory, InMemoryStore)
         assert isinstance(ctx.usage, InMemoryUsageStore)
         assert isinstance(ctx.approvals, InMemoryApprovalStore)
@@ -133,18 +155,17 @@ def test_pool_creation_failure_uses_fallbacks_without_store_pool_attempts(
 
 def test_lifespan_passes_the_mounted_postgres_password(monkeypatch, tmp_path):
     settings = _settings(tmp_path, postgres_password="mounted-db-secret")
-    pool = _Pool()
-    create_calls = []
+    engine_calls = []
 
-    async def create_pool(dsn, *, min_size, max_size, password):
-        create_calls.append((dsn, min_size, max_size, password))
-        return pool
+    async def create_engine(dsn, *, min_size, max_size, password):
+        engine_calls.append((dsn, min_size, max_size, password))
+        return _Engine()
 
-    monkeypatch.setattr(composemod, "create_pool", create_pool)
+    monkeypatch.setattr(composemod, "create_engine", create_engine)
 
     app = appmod.create_app(settings=settings)
     with TestClient(app):
-        assert create_calls == [
+        assert engine_calls == [
             (
                 settings.database_url,
                 2,

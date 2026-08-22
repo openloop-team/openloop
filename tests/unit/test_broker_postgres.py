@@ -88,59 +88,74 @@ def test_migration_discovery_fails_closed_on_bad_sequences(
     assert caught.value.problem is problem
 
 
-class FakeTransaction(AbstractAsyncContextManager):
-    def __init__(self, connection):
-        self.connection = connection
+class FakeResult:
+    """The little of a SQLAlchemy Result that `setup()` reads back."""
 
-    async def __aenter__(self):
-        self.connection.events.append(("transaction_enter",))
+    def __init__(self, rows):
+        self._rows = rows
+
+    def mappings(self):
         return self
 
-    async def __aexit__(self, exc_type, exc, traceback):
-        self.connection.events.append(("transaction_exit", exc_type))
-        return False
+    def all(self):
+        return self._rows
 
 
 class FakeConnection:
+    """Records what `setup()` sends, in order, as (kind, sql, parameters).
+
+    `text()` statements are recorded by their string so the assertions below
+    can keep matching on SQL fragments; a migration file arrives through
+    `exec_driver_sql` instead, one statement per call.
+    """
+
     def __init__(self, applied=(), *, fail_on=None):
         self.applied = list(applied)
         self.fail_on = fail_on
         self.events = []
 
-    def transaction(self):
-        return FakeTransaction(self)
-
-    async def execute(self, query, *args):
-        self.events.append(("execute", query, args))
-        if self.fail_on is not None and self.fail_on in query:
+    async def execute(self, statement, parameters=None):
+        sql = str(statement)
+        self.events.append(("execute", sql, parameters or {}))
+        if self.fail_on is not None and self.fail_on in sql:
             raise RuntimeError("schema permission denied")
+        if "FROM broker_schema_migrations" in sql:
+            return FakeResult(self.applied)
+        return FakeResult([])
 
-    async def fetch(self, query, *args):
-        self.events.append(("fetch", query, args))
-        return self.applied
+    async def exec_driver_sql(self, statement):
+        self.events.append(("exec_driver_sql", statement, {}))
+        if self.fail_on is not None and self.fail_on in statement:
+            raise RuntimeError("schema permission denied")
+        return FakeResult([])
 
 
-class Acquire(AbstractAsyncContextManager):
-    def __init__(self, connection):
-        self.connection = connection
+class Begin(AbstractAsyncContextManager):
+    def __init__(self, engine):
+        self.engine = engine
 
     async def __aenter__(self):
-        return self.connection
+        self.engine.connection.events.append(("transaction_enter",))
+        return self.engine.connection
 
     async def __aexit__(self, exc_type, exc, traceback):
+        self.engine.connection.events.append(("transaction_exit", exc_type))
         return False
 
 
-class FakePool:
+class FakeEngine:
     def __init__(self, connection):
         self.connection = connection
-        self.closed = False
+        self.disposed = False
 
-    def acquire(self):
-        return Acquire(self.connection)
+    def begin(self):
+        return Begin(self)
 
-    async def close(self):
-        self.closed = True
+    def connect(self):
+        return Begin(self)
+
+    async def dispose(self):
+        self.disposed = True
 
 
 async def test_database_clock_is_truncated_for_runtime_identity_deadlines():
@@ -148,8 +163,8 @@ async def test_database_clock_is_truncated_for_runtime_identity_deadlines():
         def __init__(self):
             self.query = None
 
-        async def fetchval(self, query):
-            self.query = query
+        async def scalar(self, query):
+            self.query = str(query)
             return datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
 
     connection = ClockConnection()
@@ -168,33 +183,38 @@ async def test_setup_uses_one_transaction_lock_and_applies_in_order(monkeypatch)
         "openloop.broker.postgres._load_packaged_migrations", lambda: migrations
     )
     connection = FakeConnection()
-    pool = FakePool(connection)
+    engine = FakeEngine(connection)
     repository = PostgresBrokerRepository()
 
-    await repository.setup(pool)
+    await repository.setup(engine)
 
-    assert repository._pool is pool
-    assert not pool.closed
+    assert repository._engine is engine
+    assert not engine.disposed
     assert connection.events[0] == ("transaction_enter",)
     execute_events = [event for event in connection.events if event[0] == "execute"]
     assert "pg_advisory_xact_lock" in execute_events[0][1]
-    assert execute_events[0][2] == (BROKER_MIGRATION_LOCK_ID,)
+    assert execute_events[0][2] == {"lock_id": BROKER_MIGRATION_LOCK_ID}
     assert "CREATE TABLE IF NOT EXISTS broker_schema_migrations" in execute_events[1][1]
-    fetch_index = next(
-        index for index, event in enumerate(connection.events) if event[0] == "fetch"
+    read_index = next(
+        index
+        for index, event in enumerate(connection.events)
+        if event[0] == "execute" and "FROM broker_schema_migrations" in event[1]
     )
     migration_indexes = [
         index
         for index, event in enumerate(connection.events)
-        if event[0] == "execute" and event[1] in {"SELECT 1;\n", "SELECT 2;\n"}
+        if event[0] == "exec_driver_sql" and event[1] in {"SELECT 1", "SELECT 2"}
     ]
-    assert fetch_index < migration_indexes[0] < migration_indexes[1]
+    assert read_index < migration_indexes[0] < migration_indexes[1]
     inserts = [
         event
         for event in execute_events
         if "INSERT INTO broker_schema_migrations" in event[1]
     ]
-    assert [event[2][:3] for event in inserts] == [
+    assert [
+        (event[2]["version"], event[2]["name"], event[2]["checksum"])
+        for event in inserts
+    ] == [
         (1, "initial", migrations[0].checksum),
         (2, "second", migrations[1].checksum),
     ]
@@ -216,9 +236,9 @@ async def test_setup_skips_exact_applied_migrations(monkeypatch):
         ]
     )
     repository = PostgresBrokerRepository()
-    await repository.setup(FakePool(connection))
+    await repository.setup(FakeEngine(connection))
     assert not any(
-        event[0] == "execute" and event[1] == migration.sql
+        event[0] == "exec_driver_sql" and event[1] in migration.sql
         for event in connection.events
     )
 
@@ -249,26 +269,26 @@ async def test_setup_rejects_future_version_or_applied_drift(monkeypatch, row, p
     )
     repository = PostgresBrokerRepository()
     with pytest.raises(MigrationVersionError) as caught:
-        await repository.setup(FakePool(FakeConnection(applied=[row])))
+        await repository.setup(FakeEngine(FakeConnection(applied=[row])))
     assert caught.value.version == row["version"]
     assert caught.value.problem is problem
-    assert repository._pool is None
+    assert repository._engine is None
 
 
-async def test_setup_failure_detaches_without_closing_borrowed_pool(monkeypatch):
+async def test_setup_failure_detaches_without_disposing_borrowed_engine(monkeypatch):
     migration = Migration.from_bytes(1, "initial", b"SELECT fail_here;\n")
     monkeypatch.setattr(
         "openloop.broker.postgres._load_packaged_migrations", lambda: (migration,)
     )
     connection = FakeConnection(fail_on="fail_here")
-    pool = FakePool(connection)
+    engine = FakeEngine(connection)
     repository = PostgresBrokerRepository()
 
     with pytest.raises(RuntimeError, match="schema permission denied"):
-        await repository.setup(pool)
+        await repository.setup(engine)
 
-    assert repository._pool is None
-    assert not pool.closed
+    assert repository._engine is None
+    assert not engine.disposed
     assert connection.events[-1][0] == "transaction_exit"
     assert connection.events[-1][1] is RuntimeError
 

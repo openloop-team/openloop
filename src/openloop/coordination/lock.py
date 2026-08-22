@@ -38,6 +38,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, Protocol, runtime_checkable
 
+from sqlalchemy import text
+
 logger = logging.getLogger(__name__)
 
 
@@ -237,8 +239,11 @@ class PostgresLock:
     binds the lock to that *session*, so the **connection is the lease**: if the
     holder crashes, its connection drops and Postgres releases the lock at once —
     no TTL to tune (``ttl_seconds`` is ignored) and no renewal (``renew`` is a
-    no-op that just confirms we still hold it). The pool is small and separate from
-    the stores' pools so a long-held lock never starves query traffic.
+    no-op that just confirms we still hold it). The engine is small and separate
+    from the stores' engine so a long-held lock never starves query traffic.
+
+    ``max_size`` is a hard cap on simultaneously held locks: the engine is built
+    with no overflow, exactly as the asyncpg pool this replaced behaved.
     """
 
     def __init__(
@@ -251,27 +256,23 @@ class PostgresLock:
         self.dsn = dsn
         self._max_size = max_size
         self._password = password
-        self._pool = None  # asyncpg.Pool, created in setup()
-        # Any, not object: the values are asyncpg Connections, which this module
-        # deliberately does not import, and it calls execute() on them.
-        self._held: dict[str, Any] = {}  # token -> checked-out Connection
+        self._engine: Any = None  # AsyncEngine, created in setup()
+        # Values are checked-out AsyncConnections: holding one holds the lease.
+        self._held: dict[str, Any] = {}  # token -> AsyncConnection
 
     async def setup(self) -> None:
-        import asyncpg  # noqa: PLC0415 — optional until a Postgres deploy needs it
+        from openloop.db import (  # noqa: PLC0415 — optional until a Postgres deploy needs it
+            create_engine,
+        )
 
-        # min_size=0 keeps idle usage at zero, so explicitly borrow once here:
-        # pool construction is lazy and is not itself a connectivity probe.
-        kwargs: dict[str, Any] = {"min_size": 0, "max_size": self._max_size}
-        if self._password is not None:
-            kwargs["password"] = self._password
-        pool = await asyncpg.create_pool(self.dsn, **kwargs)
-        try:
-            async with pool.acquire() as conn:
-                await conn.fetchval("SELECT 1")
-        except BaseException:
-            await pool.close()
-            raise
-        self._pool = pool
+        # min_size=1 makes construction a connectivity probe, as it was when
+        # this borrowed an eagerly-filled pool.
+        self._engine = await create_engine(
+            self.dsn,
+            min_size=1,
+            max_size=self._max_size,
+            password=self._password,
+        )
 
     @staticmethod
     def _lock_id(key: str) -> int:
@@ -279,37 +280,46 @@ class PostgresLock:
         digest = hashlib.blake2b(key.encode(), digest_size=8).digest()
         return int.from_bytes(digest, "big", signed=True)
 
-    def _require_pool(self):
-        if self._pool is None:
+    def _require_engine(self) -> Any:
+        if self._engine is None:
             raise RuntimeError("PostgresLock.setup() must be called first")
-        return self._pool
+        return self._engine
 
     async def acquire(self, key: str, *, ttl_seconds: float) -> str | None:
-        pool = self._require_pool()
-        conn = await pool.acquire()
+        engine = self._require_engine()
+        connection = await engine.connect()
+        # AUTOCOMMIT: the lock is bound to the *session*, and a held connection
+        # must not sit idle inside an open transaction for the lease's lifetime.
+        connection = await connection.execution_options(isolation_level="AUTOCOMMIT")
         try:
-            got = await conn.fetchval(
-                "SELECT pg_try_advisory_lock($1)", self._lock_id(key)
+            # sql-text: `pg_try_advisory_lock` is a bare function call with no
+            # table behind it.
+            got = await connection.scalar(
+                text("SELECT pg_try_advisory_lock(:lock_id)"),
+                {"lock_id": self._lock_id(key)},
             )
         except BaseException:
-            await pool.release(conn)
+            await connection.close()
             raise
         if not got:
-            await pool.release(conn)
+            await connection.close()
             return None
         token = uuid.uuid4().hex
-        self._held[token] = conn  # hold the connection → hold the lease
+        self._held[token] = connection  # hold the connection → hold the lease
         return token
 
     async def release(self, key: str, token: str) -> bool:
-        conn = self._held.pop(token, None)
-        if conn is None:
+        connection = self._held.pop(token, None)
+        if connection is None:
             return False
-        pool = self._require_pool()
         try:
-            await conn.execute("SELECT pg_advisory_unlock($1)", self._lock_id(key))
+            # sql-text: as above — the unlock is a function call.
+            await connection.execute(
+                text("SELECT pg_advisory_unlock(:lock_id)"),
+                {"lock_id": self._lock_id(key)},
+            )
         finally:
-            await pool.release(conn)
+            await connection.close()
         return True
 
     async def renew(self, key: str, token: str, *, ttl_seconds: float) -> bool:
@@ -317,13 +327,13 @@ class PostgresLock:
         return token in self._held
 
     async def close(self) -> None:
-        if self._pool is None:
+        if self._engine is None:
             return
-        # Return any still-held connections (closing the pool ends their sessions,
-        # which also drops the advisory locks).
-        for conn in list(self._held.values()):
+        # Return any still-held connections (disposing the engine ends their
+        # sessions, which also drops the advisory locks).
+        for connection in list(self._held.values()):
             with contextlib.suppress(Exception):
-                await self._pool.release(conn)
+                await connection.close()
         self._held.clear()
-        await self._pool.close()
-        self._pool = None
+        await self._engine.dispose()
+        self._engine = None

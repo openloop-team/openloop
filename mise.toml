@@ -151,7 +151,7 @@ run = "docker rm -f openloop-test-postgres >/dev/null 2>&1 || true"
 [tasks.test-postgres]
 description = "Run the Postgres-backed suites against the disposable test database"
 depends = ["test-postgres-up"]
-run = "python -m pytest tests/e2e/test_postgres.py tests/e2e/test_analysis_retirement.py -v"
+run = "python -m pytest tests/e2e/test_postgres.py tests/e2e/test_analysis_retirement.py tests/e2e/test_sqlalchemy_dialect_behaviour.py -v"
 
 [tasks.test-e2e]
 description = "Bring up Postgres and run Postgres E2E tests"

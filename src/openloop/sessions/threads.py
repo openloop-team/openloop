@@ -25,12 +25,20 @@ implementation, sharing ``SurfaceTarget`` for scope and the same pool as
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
-from openloop.postgres import BorrowedPostgresStore
+from sqlalchemy import exists, literal, select, text
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from openloop.db import BorrowedEngineStore
+from openloop.sessions.schema import (
+    surface_thread_inbox,
+    surface_thread_transcript,
+    surface_threads,
+)
 from openloop.sessions.store import SurfaceTarget
 
 
@@ -245,7 +253,7 @@ class InMemoryThreadRecordStore:
         return self._context_ref.get(scope_key)
 
 
-class PostgresThreadRecordStore(BorrowedPostgresStore):
+class PostgresThreadRecordStore(BorrowedEngineStore):
     """Postgres-backed thread records — the durable delivered-transcript lane.
 
     ``surface_threads`` is one row per thread scope (active-turn and
@@ -255,124 +263,119 @@ class PostgresThreadRecordStore(BorrowedPostgresStore):
     reads fall out of a serial ``seq``.
     """
 
-    async def setup(self, pool) -> None:
-        async with self._setup_connection(pool) as conn:
+    async def setup(self, engine: AsyncEngine) -> None:
+        # sql-text: schema evolution moves to a migration tool; DDL is not
+        # restated as metadata.
+        async with self._setup_connection(engine) as conn:
             await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS surface_threads (
-                    scope_key      TEXT PRIMARY KEY,
-                    surface        TEXT NOT NULL,
-                    workspace      TEXT NOT NULL,
-                    agent          TEXT NOT NULL,
-                    channel        TEXT,
-                    thread         TEXT,
-                    active_turn_id TEXT,
-                    context_ref    TEXT,
-                    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS surface_threads (
+                        scope_key      TEXT PRIMARY KEY,
+                        surface        TEXT NOT NULL,
+                        workspace      TEXT NOT NULL,
+                        agent          TEXT NOT NULL,
+                        channel        TEXT,
+                        thread         TEXT,
+                        active_turn_id TEXT,
+                        context_ref    TEXT,
+                        created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                    """
                 )
-                """
             )
             # Migration for thread rows created before the active-turn claim (C).
             await conn.execute(
-                "ALTER TABLE surface_threads "
-                "ADD COLUMN IF NOT EXISTS active_turn_id TEXT"
+                text(
+                    "ALTER TABLE surface_threads "
+                    "ADD COLUMN IF NOT EXISTS active_turn_id TEXT"
+                )
             )
             # Migration for the Phase B warm-context handle.
             await conn.execute(
-                "ALTER TABLE surface_threads ADD COLUMN IF NOT EXISTS context_ref TEXT"
+                text(
+                    "ALTER TABLE surface_threads "
+                    "ADD COLUMN IF NOT EXISTS context_ref TEXT"
+                )
             )
             await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS surface_thread_transcript (
-                    scope_key   TEXT NOT NULL,
-                    turn_id     TEXT NOT NULL,
-                    seq         BIGSERIAL,
-                    request     TEXT NOT NULL,
-                    answer      TEXT NOT NULL,
-                    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    PRIMARY KEY (scope_key, turn_id)
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS surface_thread_transcript (
+                        scope_key   TEXT NOT NULL,
+                        turn_id     TEXT NOT NULL,
+                        seq         BIGSERIAL,
+                        request     TEXT NOT NULL,
+                        answer      TEXT NOT NULL,
+                        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        PRIMARY KEY (scope_key, turn_id)
+                    )
+                    """
                 )
-                """
             )
             # Drives the ordered "most-recent N, oldest-first" transcript read.
             await conn.execute(
-                "CREATE INDEX IF NOT EXISTS surface_thread_transcript_seq_idx "
-                "ON surface_thread_transcript (scope_key, seq)"
+                text(
+                    "CREATE INDEX IF NOT EXISTS surface_thread_transcript_seq_idx "
+                    "ON surface_thread_transcript (scope_key, seq)"
+                )
             )
             # Ordered inbox of pending replies (Phase C). `id` (serial) both orders
             # the drain and is the dedup-friendly key; UNIQUE(scope, event_id) makes
             # a re-delivered event a no-op INSERT while it is still pending.
             await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS surface_thread_inbox (
-                    id          BIGSERIAL PRIMARY KEY,
-                    scope_key   TEXT NOT NULL,
-                    event_id    TEXT NOT NULL,
-                    payload     JSONB NOT NULL,
-                    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    UNIQUE (scope_key, event_id)
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS surface_thread_inbox (
+                        id          BIGSERIAL PRIMARY KEY,
+                        scope_key   TEXT NOT NULL,
+                        event_id    TEXT NOT NULL,
+                        payload     JSONB NOT NULL,
+                        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        UNIQUE (scope_key, event_id)
+                    )
+                    """
                 )
-                """
             )
             await conn.execute(
-                "CREATE INDEX IF NOT EXISTS surface_thread_inbox_scope_idx "
-                "ON surface_thread_inbox (scope_key, id)"
+                text(
+                    "CREATE INDEX IF NOT EXISTS surface_thread_inbox_scope_idx "
+                    "ON surface_thread_inbox (scope_key, id)"
+                )
             )
 
     async def get_or_create(self, scope: SurfaceTarget) -> ThreadRecord:
-        pool = self._require_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO surface_threads
-                    (scope_key, surface, workspace, agent, channel, thread)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT (scope_key) DO NOTHING
-                """,
-                _scope_key(scope),
-                scope.surface,
-                scope.workspace,
-                scope.agent,
-                scope.channel,
-                scope.thread,
-            )
+        engine = self._require_engine()
+        async with engine.begin() as conn:
+            await conn.execute(_ensure_thread_row(scope))
         return ThreadRecord(scope=scope)
 
     async def append_delivered_fragment(
         self, scope: SurfaceTarget, fragment: TranscriptFragment
     ) -> None:
-        pool = self._require_pool()
+        engine = self._require_engine()
         key = _scope_key(scope)
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute(
-                    """
-                    INSERT INTO surface_threads
-                        (scope_key, surface, workspace, agent, channel, thread)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT (scope_key) DO NOTHING
-                    """,
-                    key,
-                    scope.surface,
-                    scope.workspace,
-                    scope.agent,
-                    scope.channel,
-                    scope.thread,
-                )
-                # Idempotent on (scope, turn): the first delivered write wins, so a
-                # redelivery/reconcile of the same turn never double-appends.
-                await conn.execute(
-                    """
-                    INSERT INTO surface_thread_transcript
-                        (scope_key, turn_id, request, answer)
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (scope_key, turn_id) DO NOTHING
-                    """,
-                    key,
-                    fragment.turn_id,
-                    fragment.request,
-                    fragment.answer,
-                )
+        # Idempotent on (scope, turn): the first delivered write wins, so a
+        # redelivery/reconcile of the same turn never double-appends.
+        append = (
+            insert(surface_thread_transcript)
+            .values(
+                scope_key=key,
+                turn_id=fragment.turn_id,
+                request=fragment.request,
+                answer=fragment.answer,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    surface_thread_transcript.c.scope_key,
+                    surface_thread_transcript.c.turn_id,
+                ]
+            )
+        )
+        # One transaction: the thread row and its fragment land together.
+        async with engine.begin() as conn:
+            await conn.execute(_ensure_thread_row(scope))
+            await conn.execute(append)
 
     async def replayable_transcript(
         self,
@@ -381,26 +384,26 @@ class PostgresThreadRecordStore(BorrowedPostgresStore):
         exclude_turn_id: str | None = None,
         limit: int = 20,
     ) -> list[TranscriptFragment]:
-        pool = self._require_pool()
-        async with pool.acquire() as conn:
-            # Most-recent `limit` fragments, then flipped to ascending so the caller
-            # replays them oldest-first (mirrors surface_sessions.thread_history).
-            rows = await conn.fetch(
-                """
-                SELECT * FROM (
-                    SELECT turn_id, request, answer, created_at
-                    FROM surface_thread_transcript
-                    WHERE scope_key = $1
-                      AND ($2::text IS NULL OR turn_id <> $2)
-                    ORDER BY seq DESC
-                    LIMIT $3
-                ) recent
-                ORDER BY created_at ASC
-                """,
-                _scope_key(scope),
-                exclude_turn_id,
-                limit,
+        engine = self._require_engine()
+        # Most-recent `limit` fragments, then flipped to ascending so the caller
+        # replays them oldest-first (mirrors surface_sessions.thread_history).
+        inner = (
+            select(
+                surface_thread_transcript.c.turn_id,
+                surface_thread_transcript.c.request,
+                surface_thread_transcript.c.answer,
+                surface_thread_transcript.c.created_at,
             )
+            .where(surface_thread_transcript.c.scope_key == _scope_key(scope))
+            .order_by(surface_thread_transcript.c.seq.desc())
+            .limit(limit)
+        )
+        if exclude_turn_id is not None:
+            inner = inner.where(surface_thread_transcript.c.turn_id != exclude_turn_id)
+        recent = inner.subquery("recent")
+        statement = select(recent).order_by(recent.c.created_at.asc())
+        async with engine.connect() as conn:
+            rows = (await conn.execute(statement)).mappings().all()
         return [
             TranscriptFragment(
                 turn_id=r["turn_id"],
@@ -414,36 +417,22 @@ class PostgresThreadRecordStore(BorrowedPostgresStore):
     async def append_inbox(
         self, scope: SurfaceTarget, event_id: str, payload: dict
     ) -> bool:
-        pool = self._require_pool()
-        key = _scope_key(scope)
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute(
-                    """
-                    INSERT INTO surface_threads
-                        (scope_key, surface, workspace, agent, channel, thread)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT (scope_key) DO NOTHING
-                    """,
-                    key,
-                    scope.surface,
-                    scope.workspace,
-                    scope.agent,
-                    scope.channel,
-                    scope.thread,
-                )
-                # Dedup on (scope, event_id) while the event is still pending.
-                row = await conn.fetchrow(
-                    """
-                    INSERT INTO surface_thread_inbox (scope_key, event_id, payload)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (scope_key, event_id) DO NOTHING
-                    RETURNING id
-                    """,
-                    key,
-                    event_id,
-                    json.dumps(payload),
-                )
+        engine = self._require_engine()
+        # Dedup on (scope, event_id) while the event is still pending.
+        enqueue = (
+            insert(surface_thread_inbox)
+            .values(scope_key=_scope_key(scope), event_id=event_id, payload=payload)
+            .on_conflict_do_nothing(
+                index_elements=[
+                    surface_thread_inbox.c.scope_key,
+                    surface_thread_inbox.c.event_id,
+                ]
+            )
+            .returning(surface_thread_inbox.c.id)
+        )
+        async with engine.begin() as conn:
+            await conn.execute(_ensure_thread_row(scope))
+            row = (await conn.execute(enqueue)).first()
         return row is not None
 
     async def try_begin_turn(self, scope: SurfaceTarget) -> bool:
@@ -451,69 +440,79 @@ class PostgresThreadRecordStore(BorrowedPostgresStore):
         # EXISTS clause means the runner's drain loop can re-claim after releasing
         # (to catch a reply that arrived mid-drain) without spinning on an empty
         # inbox — a free thread with nothing queued is simply not claimed.
-        pool = self._require_pool()
         key = _scope_key(scope)
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                UPDATE surface_threads SET active_turn_id = 'held'
-                WHERE scope_key = $1 AND active_turn_id IS NULL
-                  AND EXISTS (
-                    SELECT 1 FROM surface_thread_inbox WHERE scope_key = $1
-                  )
-                RETURNING scope_key
-                """,
-                key,
+        statement = (
+            surface_threads.update()
+            .where(
+                surface_threads.c.scope_key == key,
+                surface_threads.c.active_turn_id.is_(None),
+                exists(
+                    select(literal(1)).where(surface_thread_inbox.c.scope_key == key)
+                ),
             )
+            .values(active_turn_id="held")
+            .returning(surface_threads.c.scope_key)
+        )
+        engine = self._require_engine()
+        async with engine.begin() as conn:
+            row = (await conn.execute(statement)).first()
         return row is not None
 
     async def next_inbox(self, scope: SurfaceTarget) -> InboxItem | None:
-        pool = self._require_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                DELETE FROM surface_thread_inbox
-                WHERE id = (
-                    SELECT id FROM surface_thread_inbox
-                    WHERE scope_key = $1 ORDER BY id LIMIT 1
-                    FOR UPDATE SKIP LOCKED
-                )
-                RETURNING id, event_id, payload
-                """,
-                _scope_key(scope),
+        oldest = (
+            select(surface_thread_inbox.c.id)
+            .where(surface_thread_inbox.c.scope_key == _scope_key(scope))
+            .order_by(surface_thread_inbox.c.id)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+            .scalar_subquery()
+        )
+        statement = (
+            surface_thread_inbox.delete()
+            .where(surface_thread_inbox.c.id == oldest)
+            .returning(
+                surface_thread_inbox.c.id,
+                surface_thread_inbox.c.event_id,
+                surface_thread_inbox.c.payload,
             )
+        )
+        engine = self._require_engine()
+        async with engine.begin() as conn:
+            row = (await conn.execute(statement)).mappings().first()
         if row is None:
             return None
         return InboxItem(
             event_id=row["event_id"],
-            payload=json.loads(row["payload"]),
+            # JSONB arrives decoded — the dialect registers a jsonb codec.
+            payload=row["payload"],
             seq=row["id"],
         )
 
     async def end_turn(self, scope: SurfaceTarget) -> None:
-        pool = self._require_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE surface_threads SET active_turn_id = NULL WHERE scope_key = $1",
-                _scope_key(scope),
-            )
+        engine = self._require_engine()
+        statement = (
+            surface_threads.update()
+            .where(surface_threads.c.scope_key == _scope_key(scope))
+            .values(active_turn_id=None)
+        )
+        async with engine.begin() as conn:
+            await conn.execute(statement)
 
     async def reset_active_claims(self) -> int:
         """Clear every active-turn claim. Called once at startup: a crashed drain
         leader would otherwise leave ``active_turn_id`` set forever, wedging the
         thread. Single-replica-correct (a restart means nothing is draining); the
         multi-replica version is a leased claim, not a blanket reset."""
-        pool = self._require_pool()
-        async with pool.acquire() as conn:
-            result = await conn.execute(
-                "UPDATE surface_threads SET active_turn_id = NULL "
-                "WHERE active_turn_id IS NOT NULL"
-            )
-        # asyncpg returns e.g. "UPDATE 3"; parse the count defensively.
-        try:
-            return int(result.split()[-1])
-        except (ValueError, IndexError):
-            return 0
+        statement = (
+            surface_threads.update()
+            .where(surface_threads.c.active_turn_id.is_not(None))
+            .values(active_turn_id=None)
+        )
+        engine = self._require_engine()
+        async with engine.begin() as conn:
+            result = await conn.execute(statement)
+        # The driver's "UPDATE 3" status string is gone; rowcount says the same.
+        return result.rowcount
 
     async def set_context_ref(self, scope_key: str, context_ref: str | None) -> None:
         """Persist (or clear) the thread's warm-context handle.
@@ -525,19 +524,36 @@ class PostgresThreadRecordStore(BorrowedPostgresStore):
         a missing row means the thread was never seen and the (best-effort, cache)
         handle is simply dropped.
         """
-        pool = self._require_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE surface_threads SET context_ref = $2 WHERE scope_key = $1",
-                scope_key,
-                context_ref,
-            )
+        engine = self._require_engine()
+        statement = (
+            surface_threads.update()
+            .where(surface_threads.c.scope_key == scope_key)
+            .values(context_ref=context_ref)
+        )
+        async with engine.begin() as conn:
+            await conn.execute(statement)
 
     async def get_context_ref(self, scope_key: str) -> str | None:
-        pool = self._require_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT context_ref FROM surface_threads WHERE scope_key = $1",
-                scope_key,
-            )
+        engine = self._require_engine()
+        statement = select(surface_threads.c.context_ref).where(
+            surface_threads.c.scope_key == scope_key
+        )
+        async with engine.connect() as conn:
+            row = (await conn.execute(statement)).mappings().first()
         return row["context_ref"] if row is not None else None
+
+
+def _ensure_thread_row(scope: SurfaceTarget):
+    """Insert the thread's row if this scope has never been seen before."""
+    return (
+        insert(surface_threads)
+        .values(
+            scope_key=_scope_key(scope),
+            surface=scope.surface,
+            workspace=scope.workspace,
+            agent=scope.agent,
+            channel=scope.channel,
+            thread=scope.thread,
+        )
+        .on_conflict_do_nothing(index_elements=[surface_threads.c.scope_key])
+    )

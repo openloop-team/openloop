@@ -17,12 +17,21 @@ from datetime import UTC
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 
 from openloop.agents import load_agent
+from openloop.approvals import ApprovalRequest
 from openloop.approvals.postgres import PostgresApprovalStore
+from openloop.approvals.schema import approvals
+from openloop.checkpoints.postgres import PostgresCheckpointStore
+from openloop.coordination import PostgresLock
+from openloop.db import create_engine
 from openloop.memory.postgres import PostgresMemoryStore
 from openloop.memory.store import MemoryRecord, scope_key_for
 from openloop.runtime import Runtime, Task
+from openloop.sessions.postgres import PostgresSurfaceSessionStore
+from openloop.sessions.store import SurfaceTarget
+from openloop.sessions.threads import PostgresThreadRecordStore
 from openloop.testing import (
     FakeEmbedder,
     FakeGitHub,
@@ -33,7 +42,7 @@ from openloop.tools import ToolGateway
 from openloop.tools.github import GitHubConnector
 from openloop.usage import UsageRecord, budget_scope_key
 from openloop.usage.postgres import PostgresUsageStore
-from openloop.workflows import WorkflowEngine
+from openloop.workflows import WorkflowEngine, WorkflowInstance
 from openloop.workflows.postgres import PostgresWorkflowStore
 from tests.support.postgres import postgres_dsn, require_postgres
 
@@ -48,36 +57,53 @@ pytestmark = [pytest.mark.e2e, pytest.mark.postgres]
 
 
 @pytest.fixture
-async def postgres_pool():
+async def postgres_engine():
     await require_postgres(DSN)
-    import asyncpg
 
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=10)
+    engine = await create_engine(DSN, min_size=1, max_size=10)
     try:
-        yield pool
+        yield engine
     finally:
-        await pool.close()
+        await engine.dispose()
+
+
+async def _sql(engine, statement, **parameters):
+    """Run one statement directly — cleanup, and the schema rewinds.
+
+    sql-text: these reach past the stores on purpose, to delete a run's rows or
+    to un-do a migration the metadata no longer describes.
+    """
+    async with engine.begin() as conn:
+        await conn.execute(text(statement), parameters)
+
+
+def _store_fixture(build):
+    @pytest.fixture
+    async def fixture(postgres_engine):
+        store = build()
+        await store.setup(postgres_engine)
+        try:
+            yield store
+        finally:
+            await store.close()
+
+    return fixture
+
+
+memory_store = _store_fixture(lambda: PostgresMemoryStore(embedding_dim=EMBED_DIM))
+usage_store = _store_fixture(PostgresUsageStore)
+approval_store = _store_fixture(PostgresApprovalStore)
+workflow_store = _store_fixture(PostgresWorkflowStore)
+checkpoint_store = _store_fixture(PostgresCheckpointStore)
+session_store = _store_fixture(PostgresSurfaceSessionStore)
+thread_store = _store_fixture(PostgresThreadRecordStore)
 
 
 @pytest.fixture
-async def stores(postgres_pool):
+async def stores(memory_store, usage_store, approval_store, workflow_store):
     # Unique table-free isolation isn't possible (shared tables), so scope keys
     # are made unique per run instead.
-    memory = PostgresMemoryStore(embedding_dim=EMBED_DIM)
-    usage = PostgresUsageStore()
-    approvals = PostgresApprovalStore()
-    workflows = PostgresWorkflowStore()
-    await memory.setup(postgres_pool)
-    await usage.setup(postgres_pool)
-    await approvals.setup(postgres_pool)
-    await workflows.setup(postgres_pool)
-    try:
-        yield memory, usage, approvals, workflows
-    finally:
-        await memory.close()
-        await usage.close()
-        await approvals.close()
-        await workflows.close()
+    yield memory_store, usage_store, approval_store, workflow_store
 
 
 async def test_usage_attribution_envelope_round_trip(stores):
@@ -233,7 +259,7 @@ async def test_happy_path_end_to_end(stores):
     assert any("open an issue to track" in t for t in texts)
 
 
-async def test_worker_checkpoint_resume_across_real_postgres(postgres_pool):
+async def test_worker_checkpoint_resume_across_real_postgres(postgres_engine):
     """A worker job persisted to Postgres resumes on a fresh store instance."""
     await require_postgres(DSN)
 
@@ -272,7 +298,7 @@ async def test_worker_checkpoint_resume_across_real_postgres(postgres_pool):
             return await super().create_pull(*a, **k)
 
     store = PostgresCheckpointStore()
-    await store.setup(postgres_pool)
+    await store.setup(postgres_engine)
     try:
         args = {"repo": "acme/x", "instruction": "do x", "job_id": job_id}
 
@@ -290,7 +316,7 @@ async def test_worker_checkpoint_resume_across_real_postgres(postgres_pool):
         # A *fresh* store + connector (simulating a restart) resumes from PG:
         # the worker is not re-run and exactly one PR is opened.
         store2 = PostgresCheckpointStore()
-        await store2.setup(postgres_pool)
+        await store2.setup(postgres_engine)
         try:
             runner2, github2 = _Runner(), FakeGitHub()
             conn2 = CodingWorkerConnector(runner2, github2, checkpoints=store2)
@@ -304,17 +330,17 @@ async def test_worker_checkpoint_resume_across_real_postgres(postgres_pool):
     finally:
         # Best-effort cleanup of this run's row.
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM worker_checkpoints WHERE job_id = $1", job_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM worker_checkpoints WHERE job_id = :job_id",
+                job_id=job_id,
+            )
         except Exception:
             pass
         await store.close()
 
 
-async def test_workflow_resume_across_real_postgres(postgres_pool):
+async def test_workflow_resume_across_real_postgres(postgres_engine):
     """A workflow parked at a wait node resumes from Postgres on a fresh engine."""
     await require_postgres(DSN)
 
@@ -331,7 +357,7 @@ async def test_workflow_resume_across_real_postgres(postgres_pool):
         return Workflow("t", [Step("gate", wait=True), Step("finish", finish)])
 
     store = PostgresWorkflowStore()
-    await store.setup(postgres_pool)
+    await store.setup(postgres_engine)
     try:
         engine1 = WorkflowEngine(store, {"t": _wf()})
         parked = await engine1.start("t", instance_id, {"seed": 1})
@@ -339,7 +365,7 @@ async def test_workflow_resume_across_real_postgres(postgres_pool):
 
         # Fresh store + engine (a restart) delivers the event and completes.
         store2 = PostgresWorkflowStore()
-        await store2.setup(postgres_pool)
+        await store2.setup(postgres_engine)
         try:
             engine2 = WorkflowEngine(store2, {"t": _wf()})
             done = await engine2.send_event(instance_id, "gate", {"by": "x"})
@@ -351,17 +377,17 @@ async def test_workflow_resume_across_real_postgres(postgres_pool):
             await store2.close()
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM workflow_instances WHERE id = :id",
+                id=instance_id,
+            )
         except Exception:
             pass
         await store.close()
 
 
-async def test_surface_session_roundtrip_across_real_postgres(postgres_pool):
+async def test_surface_session_roundtrip_across_real_postgres(postgres_engine):
     """Persist a surface session and look it up by event + approval id (Phase D)."""
     await require_postgres(DSN)
 
@@ -373,7 +399,7 @@ async def test_surface_session_roundtrip_across_real_postgres(postgres_pool):
     approval_id = f"appr-{uuid.uuid4().hex[:8]}"
 
     store = PostgresSurfaceSessionStore()
-    await store.setup(postgres_pool)
+    await store.setup(postgres_engine)
     try:
         await store.upsert(
             SurfaceSession(
@@ -397,7 +423,7 @@ async def test_surface_session_roundtrip_across_real_postgres(postgres_pool):
 
         # A fresh store (a restart) reads it back by all three keys.
         store2 = PostgresSurfaceSessionStore()
-        await store2.setup(postgres_pool)
+        await store2.setup(postgres_engine)
         try:
             by_id = await store2.get(session_id)
             assert by_id is not None and by_id.status == "waiting"
@@ -430,17 +456,17 @@ async def test_surface_session_roundtrip_across_real_postgres(postgres_pool):
             await store2.close()
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM surface_sessions WHERE id = $1", session_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM surface_sessions WHERE id = :id",
+                id=session_id,
+            )
         except Exception:
             pass
         await store.close()
 
 
-async def test_thread_history_across_real_postgres(postgres_pool):
+async def test_thread_history_across_real_postgres(postgres_engine):
     """Rebuild conversation history from prior thread sessions (oldest-first)."""
     await require_postgres(DSN)
 
@@ -461,7 +487,7 @@ async def test_thread_history_across_real_postgres(postgres_pool):
         )
 
     store = PostgresSurfaceSessionStore()
-    await store.setup(postgres_pool)
+    await store.setup(postgres_engine)
     try:
         # Two delivered turns + one still-running, plus an undelivered completed
         # turn (answer never reached the user) and a same-thread session for a
@@ -518,7 +544,7 @@ async def test_thread_history_across_real_postgres(postgres_pool):
         )
 
         store2 = PostgresSurfaceSessionStore()
-        await store2.setup(postgres_pool)
+        await store2.setup(postgres_engine)
         try:
             # Oldest-first, scoped to this agent's thread, excluding the in-flight
             # turn — exactly the two *delivered* exchanges in order (the running,
@@ -537,11 +563,11 @@ async def test_thread_history_across_real_postgres(postgres_pool):
             await store2.close()
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM surface_sessions WHERE thread = $1", thread
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM surface_sessions WHERE thread = :thread",
+                thread=thread,
+            )
         except Exception:
             pass
         await store.close()
@@ -608,7 +634,7 @@ async def test_postgres_advisory_lock_frees_when_holder_goes_away():
             await a.close()
 
 
-async def test_session_reconcile_across_real_postgres(postgres_pool):
+async def test_session_reconcile_across_real_postgres(postgres_engine):
     """A session that crashed before delivery is recovered + delivered on a fresh
     runner reading both the session and workflow state from Postgres (Phase D)."""
     await require_postgres(DSN)
@@ -627,8 +653,8 @@ async def test_session_reconcile_across_real_postgres(postgres_pool):
 
     sessions = PostgresSurfaceSessionStore()
     workflows = PostgresWorkflowStore()
-    await sessions.setup(postgres_pool)
-    await workflows.setup(postgres_pool)
+    await sessions.setup(postgres_engine)
+    await workflows.setup(postgres_engine)
     try:
         # The turn's workflow completed, but the session crashed before delivery.
         await workflows.create(
@@ -668,8 +694,8 @@ async def test_session_reconcile_across_real_postgres(postgres_pool):
         # Fresh stores + runner (a restart) reconcile and deliver the answer.
         sessions2 = PostgresSurfaceSessionStore()
         workflows2 = PostgresWorkflowStore()
-        await sessions2.setup(postgres_pool)
-        await workflows2.setup(postgres_pool)
+        await sessions2.setup(postgres_engine)
+        await workflows2.setup(postgres_engine)
         try:
             engine = WorkflowEngine(workflows2)
             runtime = Runtime(agent, gateway=FakeGateway(), engine=engine)
@@ -687,19 +713,21 @@ async def test_session_reconcile_across_real_postgres(postgres_pool):
             await workflows2.close()
     finally:
         try:
-            pool = sessions._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute("DELETE FROM surface_sessions WHERE id = $1", sid)
-            pool = workflows._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute("DELETE FROM workflow_instances WHERE id = $1", sid)
+            await _sql(
+                postgres_engine, "DELETE FROM surface_sessions WHERE id = :id", id=sid
+            )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM workflow_instances WHERE id = :id",
+                id=sid,
+            )
         except Exception:
             pass
         await sessions.close()
         await workflows.close()
 
 
-async def test_thread_record_transcript_across_real_postgres(postgres_pool):
+async def test_thread_record_transcript_across_real_postgres(postgres_engine):
     """Phase A: the delivered-transcript lane round-trips and appends idempotently."""
     await require_postgres(DSN)
 
@@ -720,7 +748,7 @@ async def test_thread_record_transcript_across_real_postgres(postgres_pool):
     )
 
     store = PostgresThreadRecordStore()
-    await store.setup(postgres_pool)
+    await store.setup(postgres_engine)
     try:
         await store.get_or_create(scope)
         await store.append_delivered_fragment(
@@ -736,7 +764,7 @@ async def test_thread_record_transcript_across_real_postgres(postgres_pool):
 
         # A fresh store (a restart) reads the transcript back, oldest-first.
         store2 = PostgresThreadRecordStore()
-        await store2.setup(postgres_pool)
+        await store2.setup(postgres_engine)
         try:
             out = await store2.replayable_transcript(scope)
             assert [(f.request, f.answer) for f in out] == [("q1", "a1"), ("q2", "a2")]
@@ -752,21 +780,23 @@ async def test_thread_record_transcript_across_real_postgres(postgres_pool):
             await store2.close()
     finally:
         try:
-            pool = store._require_pool()
             key = "\x1f".join(("slack", "acme", "dev-platform", "C1", thread))
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM surface_thread_transcript WHERE scope_key = $1", key
-                )
-                await conn.execute(
-                    "DELETE FROM surface_threads WHERE scope_key = $1", key
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM surface_thread_transcript WHERE scope_key = :key",
+                key=key,
+            )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM surface_threads WHERE scope_key = :key",
+                key=key,
+            )
         except Exception:
             pass
         await store.close()
 
 
-async def test_thread_context_ref_across_real_postgres(postgres_pool):
+async def test_thread_context_ref_across_real_postgres(postgres_engine):
     """Phase B: the warm-context handle column round-trips and clears."""
     await require_postgres(DSN)
 
@@ -785,7 +815,7 @@ async def test_thread_context_ref_across_real_postgres(postgres_pool):
     key = thread_scope_key(scope)
 
     store = PostgresThreadRecordStore()
-    await store.setup(postgres_pool)
+    await store.setup(postgres_engine)
     try:
         # The row must exist first — set_context_ref is UPDATE-only (the caller,
         # the warm pool, holds only the scope_key, not the full target).
@@ -794,7 +824,7 @@ async def test_thread_context_ref_across_real_postgres(postgres_pool):
 
         # A fresh store (a restart) reads the persisted handle back, then clears it.
         store2 = PostgresThreadRecordStore()
-        await store2.setup(postgres_pool)
+        await store2.setup(postgres_engine)
         try:
             assert await store2.get_context_ref(key) == "handle-1"
             await store2.set_context_ref(key, None)
@@ -803,17 +833,17 @@ async def test_thread_context_ref_across_real_postgres(postgres_pool):
             await store2.close()
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM surface_threads WHERE scope_key = $1", key
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM surface_threads WHERE scope_key = :key",
+                key=key,
+            )
         except Exception:
             pass
         await store.close()
 
 
-async def test_thread_inbox_and_claim_across_real_postgres(postgres_pool):
+async def test_thread_inbox_and_claim_across_real_postgres(postgres_engine):
     """Phase C: inbox dedup, ordered drain, and the atomic active-turn claim."""
     await require_postgres(DSN)
 
@@ -832,7 +862,7 @@ async def test_thread_inbox_and_claim_across_real_postgres(postgres_pool):
     key = "\x1f".join(("slack", "acme", "dev-platform", "C1", thread))
 
     store = PostgresThreadRecordStore()
-    await store.setup(postgres_pool)
+    await store.setup(postgres_engine)
     try:
         assert await store.append_inbox(scope, "e1", {"text": "one"}) is True
         assert await store.append_inbox(scope, "e2", {"text": "two"}) is True
@@ -841,7 +871,7 @@ async def test_thread_inbox_and_claim_across_real_postgres(postgres_pool):
         # A fresh store (restart) claims and drains, oldest-first; the claim is
         # exclusive against a concurrent second claimant.
         store2 = PostgresThreadRecordStore()
-        await store2.setup(postgres_pool)
+        await store2.setup(postgres_engine)
         try:
             assert await store.try_begin_turn(scope) is True
             assert await store2.try_begin_turn(scope) is False  # exclusive CAS
@@ -867,20 +897,22 @@ async def test_thread_inbox_and_claim_across_real_postgres(postgres_pool):
             await store2.close()
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM surface_thread_inbox WHERE scope_key = $1", key
-                )
-                await conn.execute(
-                    "DELETE FROM surface_threads WHERE scope_key = $1", key
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM surface_thread_inbox WHERE scope_key = :key",
+                key=key,
+            )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM surface_threads WHERE scope_key = :key",
+                key=key,
+            )
         except Exception:
             pass
         await store.close()
 
 
-async def test_workflow_drive_arbitration_sql_semantics(postgres_pool):
+async def test_workflow_drive_arbitration_sql_semantics(postgres_engine):
     """The claim/fence/release/evict predicates against real server-side SQL."""
     await require_postgres(DSN)
 
@@ -889,10 +921,8 @@ async def test_workflow_drive_arbitration_sql_semantics(postgres_pool):
 
     instance_id = f"wf-{uuid.uuid4().hex[:8]}"
     store = PostgresWorkflowStore()
-    await store.setup(postgres_pool)
+    await store.setup(postgres_engine)
     try:
-        pool = store._require_pool()
-
         # create: inserts once, conflict loses without overwriting.
         assert await store.create(
             WorkflowInstance(
@@ -916,12 +946,12 @@ async def test_workflow_drive_arbitration_sql_semantics(postgres_pool):
         first = await store.claim_drive(instance_id, lease_seconds=60)
         assert first is not None and first.drive_gen == 1
         assert await store.claim_drive(instance_id, lease_seconds=60) is None
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE workflow_instances "
-                "SET leased_until = now() - interval '1 second' WHERE id = $1",
-                instance_id,
-            )
+        await _sql(
+            postgres_engine,
+            "UPDATE workflow_instances "
+            "SET leased_until = now() - interval '1 second' WHERE id = :id",
+            id=instance_id,
+        )
         second = await store.claim_drive(instance_id, lease_seconds=60)
         assert second is not None and second.drive_gen == 2
 
@@ -961,18 +991,18 @@ async def test_workflow_drive_arbitration_sql_semantics(postgres_pool):
         assert await store.cancel_instance(instance_id, "again") is None
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM workflow_instances WHERE id = :id",
+                id=instance_id,
+            )
         except Exception:
             pass
         await store.close()
 
 
 @pytest.mark.serial
-async def test_workflow_drive_gen_migration_is_idempotent(postgres_pool):
+async def test_workflow_drive_gen_migration_is_idempotent(postgres_engine):
     """setup() adds drive_gen to a pre-existing populated table, once.
 
     HAZARD: this DROPs a column on the shared `workflow_instances` table and
@@ -986,37 +1016,37 @@ async def test_workflow_drive_gen_migration_is_idempotent(postgres_pool):
 
     instance_id = f"wf-{uuid.uuid4().hex[:8]}"
     store = PostgresWorkflowStore()
-    await store.setup(postgres_pool)
+    await store.setup(postgres_engine)
     try:
-        pool = store._require_pool()
-        async with pool.acquire() as conn:
-            # Rewind to the pre-migration schema with a live row in place.
-            await conn.execute(
-                "ALTER TABLE workflow_instances DROP COLUMN IF EXISTS drive_gen"
-            )
-            await conn.execute(
-                "INSERT INTO workflow_instances (id, workflow, status) "
-                "VALUES ($1, 't', 'waiting')",
-                instance_id,
-            )
-        await store.setup(postgres_pool)  # migrate
-        await store.setup(postgres_pool)  # and prove it re-runs cleanly
+        # Rewind to the pre-migration schema with a live row in place.
+        await _sql(
+            postgres_engine,
+            "ALTER TABLE workflow_instances DROP COLUMN IF EXISTS drive_gen",
+        )
+        await _sql(
+            postgres_engine,
+            "INSERT INTO workflow_instances (id, workflow, status) "
+            "VALUES (:id, 't', 'waiting')",
+            id=instance_id,
+        )
+        await store.setup(postgres_engine)  # migrate
+        await store.setup(postgres_engine)  # and prove it re-runs cleanly
         migrated = await store.get(instance_id)
         assert migrated.status == "waiting"
         assert migrated.drive_gen == 0
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM workflow_instances WHERE id = :id",
+                id=instance_id,
+            )
         except Exception:
             pass
         await store.close()
 
 
-async def test_workflow_concurrent_drives_run_steps_once(postgres_pool):
+async def test_workflow_concurrent_drives_run_steps_once(postgres_engine):
     """Two engines over one real store: exactly one claims and runs the step."""
     await require_postgres(DSN)
 
@@ -1035,9 +1065,9 @@ async def test_workflow_concurrent_drives_run_steps_once(postgres_pool):
         return Workflow("t", [Step("gate", wait=True), Step("work", work)])
 
     store = PostgresWorkflowStore()
-    await store.setup(postgres_pool)
+    await store.setup(postgres_engine)
     store2 = PostgresWorkflowStore()
-    await store2.setup(postgres_pool)
+    await store2.setup(postgres_engine)
     try:
         first = WorkflowEngine(store, {"t": _wf()})
         second = WorkflowEngine(store2, {"t": _wf()})
@@ -1053,18 +1083,18 @@ async def test_workflow_concurrent_drives_run_steps_once(postgres_pool):
         assert (await store.get(instance_id)).status == "completed"
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM workflow_instances WHERE id = :id",
+                id=instance_id,
+            )
         except Exception:
             pass
         await store2.close()
         await store.close()
 
 
-async def test_workflow_lease_takeover_evicts_stale_drive(postgres_pool):
+async def test_workflow_lease_takeover_evicts_stale_drive(postgres_engine):
     """Forced lease expiry: a rival claims, the stale drive is cancelled and
     cannot clobber — asserting the public contract, not internal exceptions."""
     await require_postgres(DSN)
@@ -1088,9 +1118,9 @@ async def test_workflow_lease_takeover_evicts_stale_drive(postgres_pool):
         return Workflow("t", [Step("gate", wait=True), Step("hang", hang)])
 
     store = PostgresWorkflowStore()
-    await store.setup(postgres_pool)
+    await store.setup(postgres_engine)
     store2 = PostgresWorkflowStore()
-    await store2.setup(postgres_pool)
+    await store2.setup(postgres_engine)
     try:
         # Lease 3s → the stale drive's ticker checks every 1s; the takeover
         # happens well inside the first tick.
@@ -1100,13 +1130,12 @@ async def test_workflow_lease_takeover_evicts_stale_drive(postgres_pool):
         stale_engine.drive_background(instance_id)
         await asyncio.wait_for(started.wait(), timeout=5)
 
-        pool = store._require_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE workflow_instances "
-                "SET leased_until = now() - interval '1 second' WHERE id = $1",
-                instance_id,
-            )
+        await _sql(
+            postgres_engine,
+            "UPDATE workflow_instances "
+            "SET leased_until = now() - interval '1 second' WHERE id = :id",
+            id=instance_id,
+        )
         rival = await store2.claim_drive(instance_id, lease_seconds=60)
         assert rival is not None
 
@@ -1119,18 +1148,18 @@ async def test_workflow_lease_takeover_evicts_stale_drive(postgres_pool):
         assert "hang" not in current.completed_steps  # nothing clobbered
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM workflow_instances WHERE id = :id",
+                id=instance_id,
+            )
         except Exception:
             pass
         await store2.close()
         await store.close()
 
 
-async def test_workflow_cancel_during_drive_wins_over_writer(postgres_pool):
+async def test_workflow_cancel_during_drive_wins_over_writer(postgres_engine):
     """cancel_instance evicts a live drive mid-step; the terminal state and
     at-most-once callbacks survive the driver's losing write."""
     await require_postgres(DSN)
@@ -1151,9 +1180,9 @@ async def test_workflow_cancel_during_drive_wins_over_writer(postgres_pool):
         return Workflow("t", [Step("gate", wait=True), Step("work", work)])
 
     store = PostgresWorkflowStore()
-    await store.setup(postgres_pool)
+    await store.setup(postgres_engine)
     store2 = PostgresWorkflowStore()
-    await store2.setup(postgres_pool)
+    await store2.setup(postgres_engine)
     try:
         driver = WorkflowEngine(store, {"t": _wf()})
         canceller = WorkflowEngine(store2, {"t": _wf()})
@@ -1182,11 +1211,11 @@ async def test_workflow_cancel_during_drive_wins_over_writer(postgres_pool):
         assert terminal == [instance_id]
     finally:
         try:
-            pool = store._require_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM workflow_instances WHERE id = $1", instance_id
-                )
+            await _sql(
+                postgres_engine,
+                "DELETE FROM workflow_instances WHERE id = :id",
+                id=instance_id,
+            )
         except Exception:
             pass
         await store2.close()
@@ -1212,13 +1241,13 @@ def _approval(rid: str, *, created_at=None, **overrides):
     )
 
 
-async def test_approval_claim_decision_sql_guard_under_concurrency(postgres_pool):
+async def test_approval_claim_decision_sql_guard_under_concurrency(postgres_engine):
     """The WHERE status='pending' guard makes claim_decision win once server-side."""
     await require_postgres(DSN)
 
     rid = f"appr-{uuid.uuid4().hex[:8]}"
     store = PostgresApprovalStore()
-    await store.setup(postgres_pool)
+    await store.setup(postgres_engine)
     try:
         await store.create(_approval(rid))
         results = await asyncio.gather(
@@ -1238,7 +1267,7 @@ async def test_approval_claim_decision_sql_guard_under_concurrency(postgres_pool
         await store.close()
 
 
-async def test_approval_decided_unreconciled_keyset_and_mark(postgres_pool):
+async def test_approval_decided_unreconciled_keyset_and_mark(postgres_engine):
     """Keyset pagination + (created_at, id) ordering + mark_reconciled idempotency."""
     await require_postgres(DSN)
 
@@ -1248,7 +1277,7 @@ async def test_approval_decided_unreconciled_keyset_and_mark(postgres_pool):
     prefix = f"appr-{uuid.uuid4().hex[:8]}"
     ids = [f"{prefix}-{i}" for i in range(5)]
     store = PostgresApprovalStore()
-    await store.setup(postgres_pool)
+    await store.setup(postgres_engine)
     try:
         for i, rid in enumerate(ids):
             await store.create(_approval(rid, created_at=base + timedelta(minutes=i)))
@@ -1285,7 +1314,7 @@ async def test_approval_decided_unreconciled_keyset_and_mark(postgres_pool):
 
 @pytest.mark.serial
 async def test_approval_decide_once_migration_idempotent_on_populated_table(
-    postgres_pool,
+    postgres_engine,
 ):
     """setup() adds the three decide-once columns to a populated pre-migration
     table, once; the pre-existing row reads back with None sentinels and is
@@ -1299,27 +1328,34 @@ async def test_approval_decide_once_migration_idempotent_on_populated_table(
 
     rid = f"appr-{uuid.uuid4().hex[:8]}"
     store = PostgresApprovalStore()
-    await store.setup(postgres_pool)
+    await store.setup(postgres_engine)
     try:
-        pool = store._require_pool()
-        async with pool.acquire() as conn:
+        engine = store._require_engine()
+        async with engine.begin() as conn:
             # Rewind to the pre-migration schema with a live decided row.
+            # sql-text: DDL that deliberately un-does a migration, and an INSERT
+            # against the pre-migration column set the metadata no longer
+            # describes.
             await conn.execute(
-                "ALTER TABLE approvals DROP COLUMN IF EXISTS workflow_backed"
+                text("ALTER TABLE approvals DROP COLUMN IF EXISTS workflow_backed")
             )
             await conn.execute(
-                "ALTER TABLE approvals DROP COLUMN IF EXISTS workflow_instance_id"
+                text("ALTER TABLE approvals DROP COLUMN IF EXISTS workflow_instance_id")
             )
-            await conn.execute("ALTER TABLE approvals DROP COLUMN IF EXISTS effect_at")
             await conn.execute(
-                "INSERT INTO approvals "
-                "(id, agent, action, tool, permission, status, decided_by) "
-                "VALUES ($1, 'a', 'github.issues:write', 'github', "
-                "'issues:write', 'approved', '@a')",
-                rid,
+                text("ALTER TABLE approvals DROP COLUMN IF EXISTS effect_at")
             )
-        await store.setup(postgres_pool)  # migrate
-        await store.setup(postgres_pool)  # and prove it re-runs cleanly
+            await conn.execute(
+                text(
+                    "INSERT INTO approvals "
+                    "(id, agent, action, tool, permission, status, decided_by) "
+                    "VALUES (:rid, 'a', 'github.issues:write', 'github', "
+                    "'issues:write', 'approved', '@a')"
+                ),
+                {"rid": rid},
+            )
+        await store.setup(postgres_engine)  # migrate
+        await store.setup(postgres_engine)  # and prove it re-runs cleanly
 
         migrated = await store.get(rid)
         assert migrated.status == "approved"
@@ -1336,8 +1372,173 @@ async def test_approval_decide_once_migration_idempotent_on_populated_table(
 
 async def _delete_approvals(store, ids):
     try:
-        pool = store._require_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM approvals WHERE id = ANY($1)", ids)
+        engine = store._require_engine()
+        async with engine.begin() as conn:
+            await conn.execute(approvals.delete().where(approvals.c.id.in_(ids)))
     except Exception:
         pass
+
+
+async def test_recall_ranks_by_vector_distance(memory_store):
+    # EMBED_DIM, not the store's 1536 default: this suite's fixture builds the
+    # store at 26 to match FakeEmbedder, and `memories.embedding` is vector(26)
+    # in the test database. A 1536-wide value is rejected by Postgres.
+    near = [1.0] + [0.0] * (EMBED_DIM - 1)
+    far = [0.0, 1.0] + [0.0] * (EMBED_DIM - 2)
+    # The suite shares tables across runs, so scopes are made unique per run —
+    # a fixed key would rank against rows an earlier run left behind.
+    scope = f"vec:{uuid.uuid4().hex[:8]}"
+
+    await memory_store.remember(
+        MemoryRecord(scope_key=scope, text="near", embedding=near, metadata={"k": 1})
+    )
+    await memory_store.remember(
+        MemoryRecord(scope_key=scope, text="far", embedding=far, metadata={})
+    )
+
+    hits = await memory_store.recall(scope, query_embedding=near, limit=2)
+
+    assert [h.text for h in hits] == ["near", "far"]
+    assert hits[0].metadata == {"k": 1}
+
+
+async def test_record_reports_the_duplicate_as_not_written(usage_store):
+    record = UsageRecord(
+        scope_key="s",
+        workspace="w",
+        agent="a",
+        model="m",
+        idempotency_key=f"dupe-key-{uuid.uuid4().hex[:8]}",
+    )
+    assert await usage_store.record(record) is True
+    assert await usage_store.record(record) is False
+
+
+async def test_claim_decision_is_won_exactly_once(approval_store):
+    request_id = f"a-{uuid.uuid4().hex[:8]}"
+    request = ApprovalRequest(
+        id=request_id,
+        agent="a",
+        action="act",
+        tool="t",
+        permission="p",
+        args={},
+        approvers=["alice", "bob"],
+        summary="",
+    )
+    await approval_store.create(request)
+
+    first = await approval_store.claim_decision(request_id, "alice", approve=True)
+    second = await approval_store.claim_decision(request_id, "bob", approve=False)
+
+    assert first is not None and first.decided_by == "alice"
+    assert second is None
+
+
+async def test_fenced_write_rejects_a_stale_generation(workflow_store):
+    wid = f"w-{uuid.uuid4().hex[:8]}"
+    instance = WorkflowInstance(id=wid, workflow="demo", status="running")
+    assert await workflow_store.create(instance) is True
+
+    claimed = await workflow_store.claim_drive(wid, lease_seconds=30)
+    assert claimed is not None
+
+    # The current generation writes; a stale one is fenced out. An ordinary
+    # write deliberately leaves drive_gen alone, so the same gen stays valid —
+    # only a release (or a rival claim) moves it on.
+    assert await workflow_store.fenced_write(claimed, claimed.drive_gen) is True
+    assert await workflow_store.fenced_write(claimed, claimed.drive_gen - 1) is False
+
+
+async def test_release_clears_the_lease_and_bumps_the_generation(workflow_store):
+    wid = f"w-{uuid.uuid4().hex[:8]}"
+    instance = WorkflowInstance(id=wid, workflow="demo", status="running")
+    await workflow_store.create(instance)
+    claimed = await workflow_store.claim_drive(wid, lease_seconds=30)
+
+    assert (
+        await workflow_store.fenced_write(claimed, claimed.drive_gen, release=True)
+        is True
+    )
+
+    reread = await workflow_store.get(wid)
+    assert reread.leased_until is None
+    assert reread.drive_gen == claimed.drive_gen + 1
+
+
+async def test_try_begin_turn_needs_both_a_free_thread_and_pending_work(thread_store):
+    scope = SurfaceTarget(
+        surface="slack",
+        workspace="w",
+        agent="a",
+        channel=f"c-{uuid.uuid4().hex[:8]}",
+        thread="t",
+    )
+    await thread_store.get_or_create(scope)
+
+    assert await thread_store.try_begin_turn(scope) is False
+
+    await thread_store.append_inbox(scope, "e-1", {"hello": "world"})
+    assert await thread_store.try_begin_turn(scope) is True
+    assert await thread_store.try_begin_turn(scope) is False
+
+
+async def test_next_inbox_drains_in_order_and_decodes_the_payload(thread_store):
+    scope = SurfaceTarget(
+        surface="slack",
+        workspace="w",
+        agent="a",
+        channel=f"c-{uuid.uuid4().hex[:8]}",
+        thread="t2",
+    )
+    await thread_store.append_inbox(scope, "e-1", {"n": 1})
+    await thread_store.append_inbox(scope, "e-2", {"n": 2})
+
+    first = await thread_store.next_inbox(scope)
+    second = await thread_store.next_inbox(scope)
+
+    assert (first.event_id, first.payload) == ("e-1", {"n": 1})
+    assert (second.event_id, second.payload) == ("e-2", {"n": 2})
+    assert await thread_store.next_inbox(scope) is None
+
+
+@pytest.mark.serial
+async def test_reset_active_claims_counts_the_rows_it_cleared(thread_store):
+    run = uuid.uuid4().hex[:8]
+    # surface_threads is shared across this suite, and the reset is table-wide:
+    # start from a clean slate so the count is this test's three rows.
+    await thread_store.reset_active_claims()
+    for n in range(3):
+        scope = SurfaceTarget(
+            surface="slack",
+            workspace="w",
+            agent="a",
+            channel=f"c{n}-{run}",
+            thread="t",
+        )
+        await thread_store.append_inbox(scope, f"e-{n}", {})
+        assert await thread_store.try_begin_turn(scope) is True
+
+    assert await thread_store.reset_active_claims() == 3
+    assert await thread_store.reset_active_claims() == 0
+
+
+async def test_postgres_lock_excludes_a_second_holder_and_frees_on_release():
+    dsn = postgres_dsn()
+    await require_postgres(dsn)
+    first, second = PostgresLock(dsn), PostgresLock(dsn)
+    await first.setup()
+    await second.setup()
+    key = f"sweep-{uuid.uuid4().hex[:8]}"
+    try:
+        token = await first.acquire(key, ttl_seconds=60)
+        assert token is not None
+        assert await second.acquire(key, ttl_seconds=60) is None
+        assert await first.release(key, token) is True
+
+        other = await second.acquire(key, ttl_seconds=60)
+        assert other is not None
+        assert await second.release(key, other) is True
+    finally:
+        await first.close()
+        await second.close()

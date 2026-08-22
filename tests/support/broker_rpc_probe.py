@@ -47,7 +47,7 @@ from openloop.broker_rpc.server import (
     BrokerRpcServer,
     UnixSocketPolicy,
 )
-from openloop.postgres import create_pool
+from openloop.db import create_engine
 
 _CONFIG_PATH = Path("/run/openloop/config/broker.json")
 
@@ -89,13 +89,13 @@ async def _broker() -> None:
         current_version=str(config["capability_key_version"]),
         expected_uid=expected_uid,
     )
-    pool = await create_pool(str(config["postgres_dsn"]), min_size=1, max_size=5)
+    engine = await create_engine(str(config["postgres_dsn"]), min_size=1, max_size=5)
     repository = PostgresBrokerRepository()
     audit = PostgresRpcAuditSink()
     server = None
     try:
-        await repository.setup(pool)
-        await audit.setup(pool)
+        await repository.setup(engine)
+        await audit.setup(engine)
         verifier = WorkloadIdentityVerifier(
             public_keys=verification_keys.snapshot(),
             issuer=str(config["issuer"]),
@@ -139,7 +139,7 @@ async def _broker() -> None:
             await server.stop()
         await audit.close()
         await repository.close()
-        await pool.close()
+        await engine.dispose()
 
 
 def _token(value: object) -> WorkloadIdentityToken:

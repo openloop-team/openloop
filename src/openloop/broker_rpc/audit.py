@@ -10,12 +10,16 @@ from enum import StrEnum
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
+
 from openloop.broker.models import (
     validate_positive_bigint,
     validate_timestamp,
     validate_uuid,
 )
-from openloop.postgres import BorrowedPostgresStore
+from openloop.broker_rpc.schema import broker_rpc_audit
+from openloop.db import BorrowedEngineStore
 
 from .identity import WorkloadIntent, WorkloadPrincipal
 
@@ -148,13 +152,15 @@ class InMemoryRpcAuditSink:
             return tuple(self._records)
 
 
-class PostgresRpcAuditSink(BorrowedPostgresStore):
+class PostgresRpcAuditSink(BorrowedEngineStore):
     """Append authenticated RPC decisions to migration-owned durable storage."""
 
-    async def setup(self, pool) -> None:
-        async with self._setup_connection(pool) as connection:
-            exists = await connection.fetchval(
-                "SELECT to_regclass('broker_rpc_audit') IS NOT NULL"
+    async def setup(self, engine: AsyncEngine) -> None:
+        async with self._setup_connection(engine) as connection:
+            # sql-text: `to_regclass` is a presence probe against a table this
+            # store never creates — there is nothing here to build from metadata.
+            exists = await connection.scalar(
+                text("SELECT to_regclass('broker_rpc_audit') IS NOT NULL")
             )
             if exists is not True:
                 raise RpcAuditProblem()
@@ -162,43 +168,34 @@ class PostgresRpcAuditSink(BorrowedPostgresStore):
     async def append(self, record: RpcAuditRecord) -> StoredRpcAuditRecord:
         if not isinstance(record, RpcAuditRecord):
             raise TypeError("record must be RpcAuditRecord")
-        pool = self._require_pool()
+        engine = self._require_engine()
         principal = record.principal
+        statement = (
+            broker_rpc_audit.insert()
+            .values(
+                request_id=record.request_id,
+                method=record.method.value,
+                decision=record.decision.value,
+                reason_code=record.reason.value,
+                peer_pid=record.peer.pid,
+                peer_uid=record.peer.uid,
+                peer_gid=record.peer.gid,
+                tenant_id=principal.owner.tenant_id,
+                workload_subject=principal.owner.workload_subject,
+                worker_instance_id=principal.worker_instance_id,
+                assignment_id=principal.assignment_id,
+                isolation_mode=principal.isolation_mode.value,
+                required_isolation=principal.required_isolation.value,
+                jwt_key_id=principal.key_id,
+                jwt_id=principal.jwt_id,
+                job_id=record.job_id,
+                operation_id=record.operation_id,
+            )
+            .returning(broker_rpc_audit.c.sequence, broker_rpc_audit.c.created_at)
+        )
         try:
-            async with pool.acquire() as connection:
-                row = await connection.fetchrow(
-                    """
-                    INSERT INTO broker_rpc_audit (
-                        request_id, method, decision, reason_code,
-                        peer_pid, peer_uid, peer_gid,
-                        tenant_id, workload_subject,
-                        worker_instance_id, assignment_id,
-                        isolation_mode, required_isolation,
-                        jwt_key_id, jwt_id, job_id, operation_id
-                    ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8, $9,
-                        $10, $11, $12, $13, $14, $15, $16, $17
-                    )
-                    RETURNING sequence, created_at
-                    """,
-                    record.request_id,
-                    record.method.value,
-                    record.decision.value,
-                    record.reason.value,
-                    record.peer.pid,
-                    record.peer.uid,
-                    record.peer.gid,
-                    principal.owner.tenant_id,
-                    principal.owner.workload_subject,
-                    principal.worker_instance_id,
-                    principal.assignment_id,
-                    principal.isolation_mode.value,
-                    principal.required_isolation.value,
-                    principal.key_id,
-                    principal.jwt_id,
-                    record.job_id,
-                    record.operation_id,
-                )
+            async with engine.begin() as connection:
+                row = (await connection.execute(statement)).mappings().first()
         except Exception as error:
             raise RpcAuditProblem() from error
         if row is None:

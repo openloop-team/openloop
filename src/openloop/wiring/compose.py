@@ -17,8 +17,8 @@ from openloop.agents.schema import Agent
 from openloop.approvals import InMemoryApprovalStore
 from openloop.checkpoints import InMemoryCheckpointStore
 from openloop.config import RuntimeSettings
+from openloop.db import BorrowedEngineStore, create_engine
 from openloop.memory import InMemoryStore
-from openloop.postgres import BorrowedPostgresStore, create_pool
 from openloop.sessions import InMemorySurfaceSessionStore, InMemoryThreadRecordStore
 from openloop.surfaces.slack import build_slack_app
 from openloop.usage import InMemoryTaskLimiter, InMemoryUsageStore
@@ -43,7 +43,7 @@ _LEAF_KEYS = _STORE_KEYS | {
     "limiter",
     "model_gateway",
     "coordinator",
-    "pool_factory",
+    "engine_factory",
     "tools_factory",
     "broker_handle",
 }
@@ -53,6 +53,9 @@ async def _close_safely(resource: Any) -> None:
     close = getattr(resource, "close", None)
     if close is None:
         close = getattr(resource, "aclose", None)
+    if close is None:
+        # A SQLAlchemy AsyncEngine releases its pool through dispose().
+        close = getattr(resource, "dispose", None)
     if close is None:
         return
     try:
@@ -89,23 +92,23 @@ async def _settle_store(
     candidate: Any,
     fallback: Callable[[], Any],
     *,
-    pool: Any | None,
+    engine: Any | None,
     mode: str,
     label: str,
     post_setup: Callable[[Any], Any] | None = None,
 ) -> Any:
     """Return one final store, registering cleanup before any dependent exists."""
-    if not isinstance(candidate, BorrowedPostgresStore):
+    if not isinstance(candidate, BorrowedEngineStore):
         if hasattr(candidate, "close") or hasattr(candidate, "aclose"):
             stack.push_async_callback(_close_safely, candidate)
         log.info("%s backend: in-memory (process-local)", label)
         return candidate
 
-    if pool is None:
+    if engine is None:
         return fallback()
 
     try:
-        await candidate.setup(pool)
+        await candidate.setup(engine)
         if post_setup is not None:
             await post_setup(candidate)
     except Exception:
@@ -142,33 +145,31 @@ async def compose(
     mode = settings.effective_storage_mode
 
     async with AsyncExitStack() as stack:
-        pool = None
+        db_engine = None
         if mode in ("auto", "postgres"):
-            pool_factory = selected.get("pool_factory", create_pool)
-            pool_kwargs: dict[str, Any] = {
+            engine_factory = selected.get("engine_factory", create_engine)
+            engine_kwargs: dict[str, Any] = {
                 "min_size": settings.postgres_pool_min_size,
                 "max_size": settings.postgres_pool_max_size,
             }
             if settings.postgres_password is not None:
-                pool_kwargs["password"] = settings.postgres_password.get_secret_value()
-            try:
-                pool = await pool_factory(
-                    settings.database_url,
-                    **pool_kwargs,
+                engine_kwargs["password"] = (
+                    settings.postgres_password.get_secret_value()
                 )
+            try:
+                db_engine = await engine_factory(settings.database_url, **engine_kwargs)
             except Exception:
                 if mode == "postgres":
-                    log.exception("postgres shared pool setup failed")
+                    log.exception("postgres engine setup failed")
                     raise
                 log.exception(
-                    "postgres shared pool setup failed — durable stores will "
+                    "postgres engine setup failed — durable stores will "
                     "use process-local fallbacks"
                 )
             else:
-                stack.push_async_callback(_close_safely, pool)
+                stack.push_async_callback(_close_safely, db_engine)
                 log.info(
-                    "postgres shared pool ready (min=%d, max=%d)",
-                    settings.postgres_pool_min_size,
+                    "postgres engine ready (max=%d)",
                     settings.postgres_pool_max_size,
                 )
 
@@ -178,7 +179,7 @@ async def compose(
                 selected, "memory", lambda: builders.build_memory_store(settings)
             ),
             InMemoryStore,
-            pool=pool,
+            engine=db_engine,
             mode=mode,
             label="memory",
         )
@@ -188,7 +189,7 @@ async def compose(
                 selected, "usage", lambda: builders.build_usage_store(settings)
             ),
             InMemoryUsageStore,
-            pool=pool,
+            engine=db_engine,
             mode=mode,
             label="usage",
         )
@@ -198,7 +199,7 @@ async def compose(
                 selected, "approvals", lambda: builders.build_approval_store(settings)
             ),
             InMemoryApprovalStore,
-            pool=pool,
+            engine=db_engine,
             mode=mode,
             label="approval",
         )
@@ -210,7 +211,7 @@ async def compose(
                 lambda: builders.build_checkpoint_store(settings),
             ),
             InMemoryCheckpointStore,
-            pool=pool,
+            engine=db_engine,
             mode=mode,
             label="checkpoint",
         )
@@ -220,7 +221,7 @@ async def compose(
                 selected, "workflows", lambda: builders.build_workflow_store(settings)
             ),
             InMemoryWorkflowStore,
-            pool=pool,
+            engine=db_engine,
             mode=mode,
             label="workflow",
         )
@@ -232,7 +233,7 @@ async def compose(
                 lambda: builders.build_surface_session_store(settings),
             ),
             InMemorySurfaceSessionStore,
-            pool=pool,
+            engine=db_engine,
             mode=mode,
             label="surface-session",
         )
@@ -244,7 +245,7 @@ async def compose(
                 lambda: builders.build_thread_record_store(settings),
             ),
             InMemoryThreadRecordStore,
-            pool=pool,
+            engine=db_engine,
             mode=mode,
             label="thread-record",
             post_setup=_reset_thread_claims,
@@ -285,7 +286,7 @@ async def compose(
                 )
                 broker_handle = None
             elif broker_handle is None:
-                broker_handle = await build_broker(settings, stack, pool=pool)
+                broker_handle = await build_broker(settings, stack, engine=db_engine)
 
         tools_factory = selected.get("tools_factory")
         if tools_factory is None:
@@ -400,7 +401,7 @@ async def compose(
             slack_app=slack_app,
             session_runner=session_runner,
             slack_handler=slack_handler,
-            postgres_pool=pool,
+            postgres_engine=db_engine,
             recovery_task=recovery_task,
             warm_sweep_task=warm_sweep_task,
         )

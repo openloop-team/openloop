@@ -394,7 +394,7 @@ async def build_broker_service(
     config: BrokerServiceConfig,
     stack: Any,
     *,
-    pool: Any | None = None,
+    engine: Any | None = None,
     runtime_driver: RuntimeDriver | None = None,
     clock: Callable[[], datetime] | None = None,
     identity_public_keys: dict[str, Ed25519PublicKey] | None = None,
@@ -484,15 +484,15 @@ async def build_broker_service(
     )
 
     # --- ledger / durable audit / runtime / coordinator ------------------
-    if pool is not None:
+    if engine is not None:
         repository: Any = PostgresBrokerRepository()
-        await repository.setup(pool)
+        await repository.setup(engine)
         # Durable broker state demands a durable RPC audit trail: the in-memory
         # sink would drop authenticated security decisions on restart while their
         # effects survive. The broker migrations (run by the repository setup
         # above) own the broker_rpc_audit table.
         audit_sink: Any = PostgresRpcAuditSink()
-        await audit_sink.setup(pool)
+        await audit_sink.setup(engine)
     else:
         repository = InMemoryBrokerRepository(clock=now)
         audit_sink = InMemoryRpcAuditSink(clock=now)
@@ -688,7 +688,7 @@ async def build_broker(
     stack: Any,
     *,
     embedded_settings: EmbeddedBrokerSettings | None = None,
-    pool: Any | None = None,
+    engine: Any | None = None,
     runtime_driver: RuntimeDriver | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> BrokerClientHandle | None:
@@ -767,7 +767,7 @@ async def build_broker(
         service = await build_broker_service(
             service_config,
             stack,
-            pool=pool,
+            engine=engine,
             runtime_driver=runtime_driver,
             clock=clock,
             identity_public_keys={identity_key_id: identity_key.public_key()},

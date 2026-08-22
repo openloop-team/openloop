@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import text
 
 from openloop.broker.errors import (
+    ConcurrentMutation,
     IdempotencyConflict,
     InvalidTransition,
     MigrationProblem,
@@ -25,8 +28,11 @@ from openloop.broker.models import (
 from openloop.broker.postgres import (
     Migration,
     PostgresBrokerRepository,
+    _generation_from_row,
+    _job_from_row,
     _load_packaged_migrations,
 )
+from openloop.db import create_engine
 from tests.support.broker_repository_contract import (
     OWNER,
     SequenceIds,
@@ -43,16 +49,24 @@ DSN = postgres_dsn()
 pytestmark = [pytest.mark.integration, pytest.mark.postgres]
 
 
+async def _admin(statement: str) -> None:
+    """Run one statement outside the per-test schema, to create or drop it."""
+    engine = await create_engine(DSN, min_size=1, max_size=1)
+    try:
+        async with engine.begin() as connection:
+            # sql-text: DDL naming a schema this suite creates for itself.
+            await connection.execute(text(statement))
+    finally:
+        await engine.dispose()
+
+
 @pytest.fixture
 async def postgres_repository():
     await require_postgres(DSN)
-    import asyncpg
 
     schema = f"broker_test_{uuid4().hex}"
-    admin = await asyncpg.connect(DSN)
-    await admin.execute(f'CREATE SCHEMA "{schema}"')
-    await admin.close()
-    pool = await asyncpg.create_pool(
+    await _admin(f'CREATE SCHEMA "{schema}"')
+    engine = await create_engine(
         DSN,
         min_size=1,
         max_size=10,
@@ -60,27 +74,30 @@ async def postgres_repository():
     )
     repository = PostgresBrokerRepository()
     try:
-        await repository.setup(pool)
-        yield repository, pool
+        await repository.setup(engine)
+        yield repository, engine
     finally:
         await repository.close()
-        await pool.close()
-        admin = await asyncpg.connect(DSN)
-        try:
-            await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-        finally:
-            await admin.close()
+        await engine.dispose()
+        await _admin(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
 
 
-async def _audit_count(pool) -> int:
-    async with pool.acquire() as connection:
-        return await connection.fetchval("SELECT count(*) FROM broker_audit")
+async def _scalar(engine, statement: str, **parameters):
+    """Read one value straight from the test's schema."""
+    async with engine.connect() as connection:
+        # sql-text: assertions about rows the repository wrote, and the schema
+        # rewinds below — both deliberately reach past the repository.
+        return await connection.scalar(text(statement), parameters)
+
+
+async def _audit_count(engine) -> int:
+    return await _scalar(engine, "SELECT count(*) FROM broker_audit")
 
 
 async def test_postgres_create_start_running_and_abandon_contract(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds())
 
     created = await ledger.create_job(
@@ -133,13 +150,13 @@ async def test_postgres_create_start_running_and_abandon_contract(
     snapshot = await ledger.inspect_job(OWNER, created.job_id)
     assert snapshot.state is JobState.FINALIZING
     assert snapshot.terminal_outcome is TerminalOutcome.FAILED
-    assert await _audit_count(pool) == 4
+    assert await _audit_count(engine) == 4
 
 
 async def test_postgres_start_failure_allocates_next_generation(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=100))
     created = await ledger.create_job(
         OWNER, "postgres-create-0002", "default", "docker", "postgres"
@@ -175,22 +192,22 @@ async def test_postgres_start_failure_allocates_next_generation(
         execution_lease_seconds=30,
     )
     assert second.generation == 2
-    assert await _audit_count(pool) == 4
+    assert await _audit_count(engine) == 4
 
 
 async def test_postgres_complete_lifecycle_shared_contract(postgres_repository):
-    repository, pool = postgres_repository
+    repository, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=200))
     trace = await exercise_complete_lifecycle(ledger)
     assert trace.snapshots[-1].state is JobState.TERMINAL
     assert trace.snapshots[-1].generation == 2
-    assert await _audit_count(pool) == 15
+    assert await _audit_count(engine) == 15
 
 
 async def test_postgres_restart_preserves_inspection_and_exact_replay(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=300))
     created = await ledger.create_job(
         OWNER, "postgres-restart-001", "default", "docker", "postgres"
@@ -211,7 +228,7 @@ async def test_postgres_restart_preserves_inspection_and_exact_replay(
     await repository.close()
 
     restarted = PostgresBrokerRepository()
-    await restarted.setup(pool)
+    await restarted.setup(engine)
     try:
         restarted_ledger = BrokerLedger(restarted, id_factory=SequenceIds(start=400))
         snapshot = await restarted_ledger.inspect_job(OWNER, created.job_id)
@@ -232,7 +249,7 @@ async def test_postgres_restart_preserves_inspection_and_exact_replay(
             generation=1,
         )
         assert completion.replayed is True
-        assert await _audit_count(pool) == 3
+        assert await _audit_count(engine) == 3
     finally:
         await restarted.close()
 
@@ -240,7 +257,7 @@ async def test_postgres_restart_preserves_inspection_and_exact_replay(
 async def test_postgres_concurrent_same_key_create_is_one_mutation_and_replay(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=500))
     first, second = await asyncio.gather(
         ledger.create_job(
@@ -253,13 +270,13 @@ async def test_postgres_concurrent_same_key_create_is_one_mutation_and_replay(
     assert {first.replayed, second.replayed} == {False, True}
     assert first.operation_id == second.operation_id
     assert first.job_id == second.job_id
-    assert await _audit_count(pool) == 1
+    assert await _audit_count(engine) == 1
 
 
 async def test_postgres_concurrent_conflicting_key_has_one_winner(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=600))
     results = await asyncio.gather(
         ledger.create_job(
@@ -270,13 +287,13 @@ async def test_postgres_concurrent_conflicting_key_has_one_winner(
     )
     assert sum(not isinstance(result, BaseException) for result in results) == 1
     assert sum(isinstance(result, IdempotencyConflict) for result in results) == 1
-    assert await _audit_count(pool) == 1
+    assert await _audit_count(engine) == 1
 
 
 async def test_postgres_concurrent_starts_preserve_one_live_generation(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=700))
     created = await ledger.create_job(
         OWNER, "postgres-race-job001", "default", "docker", "postgres"
@@ -306,23 +323,23 @@ async def test_postgres_concurrent_starts_preserve_one_live_generation(
         )
         == 1
     )
-    async with pool.acquire() as connection:
-        live = await connection.fetchval(
-            """
-            SELECT count(*) FROM broker_generations
-            WHERE job_id = $1
-              AND state IN ('starting', 'running', 'quiescing', 'quiesced', 'releasing')
-            """,
-            created.job_id,
-        )
+    live = await _scalar(
+        engine,
+        """
+        SELECT count(*) FROM broker_generations
+        WHERE job_id = :job_id
+          AND state IN ('starting', 'running', 'quiescing', 'quiesced', 'releasing')
+        """,
+        job_id=created.job_id,
+    )
     assert live == 1
-    assert await _audit_count(pool) == 2
+    assert await _audit_count(engine) == 2
 
 
 async def test_postgres_same_key_quiesce_release_and_completion_races_replay(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=800))
     created = await ledger.create_job(
         OWNER, "postgres-race-flow01", "default", "docker", "postgres"
@@ -396,13 +413,13 @@ async def test_postgres_same_key_quiesce_release_and_completion_races_replay(
         ),
     )
     assert {item.replayed for item in release_results} == {False, True}
-    assert await _audit_count(pool) == 6
+    assert await _audit_count(engine) == 6
 
 
 async def test_postgres_receipt_rejection_rolls_back_operation_and_audit(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=900))
     created = await ledger.create_job(
         OWNER, "postgres-receipt-001", "default", "docker", "postgres"
@@ -430,11 +447,8 @@ async def test_postgres_receipt_rejection_rolls_back_operation_and_audit(
         barrier_id=barrier,
         suffix="reject",
     )
-    before_audit = await _audit_count(pool)
-    async with pool.acquire() as connection:
-        before_operations = await connection.fetchval(
-            "SELECT count(*) FROM broker_operations"
-        )
+    before_audit = await _audit_count(engine)
+    before_operations = await _scalar(engine, "SELECT count(*) FROM broker_operations")
     with pytest.raises(ReceiptBindingMismatch):
         await ledger.begin_release(
             OWNER,
@@ -444,18 +458,15 @@ async def test_postgres_receipt_rejection_rolls_back_operation_and_audit(
             wrong,
             ReleaseTarget.PARKED,
         )
-    async with pool.acquire() as connection:
-        after_operations = await connection.fetchval(
-            "SELECT count(*) FROM broker_operations"
-        )
+    after_operations = await _scalar(engine, "SELECT count(*) FROM broker_operations")
     assert after_operations == before_operations
-    assert await _audit_count(pool) == before_audit
+    assert await _audit_count(engine) == before_audit
 
 
 async def test_postgres_recovery_scan_and_internal_operations_are_durable(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=1000))
     created = await ledger.create_job(
         OWNER, "postgres-recovery-01", "default", "docker", "postgres"
@@ -495,15 +506,24 @@ async def test_postgres_recovery_scan_and_internal_operations_are_durable(
     )
     await ledger.mark_terminal(OWNER, finalize.operation_id, created.job_id)
 
-    async with pool.acquire() as connection:
-        rows = await connection.fetch(
-            """
-            SELECT source, idempotency_key, command_kind, status
-            FROM broker_operations
-            WHERE operation_id = ANY($1::uuid[])
-            ORDER BY command_kind
-            """,
-            [release.operation_id, finalize.operation_id],
+    async with engine.connect() as connection:
+        # sql-text: reads the operations the ledger wrote, by id.
+        rows = (
+            (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT source, idempotency_key, command_kind, status
+                        FROM broker_operations
+                        WHERE operation_id = ANY(CAST(:ids AS uuid[]))
+                        ORDER BY command_kind
+                        """
+                    ),
+                    {"ids": [release.operation_id, finalize.operation_id]},
+                )
+            )
+            .mappings()
+            .all()
         )
     operation_metadata = {
         (row["command_kind"], row["source"], row["idempotency_key"]) for row in rows
@@ -519,7 +539,7 @@ async def test_postgres_recovery_scan_and_internal_operations_are_durable(
 async def test_postgres_recovery_running_expiry_uses_database_time(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, engine = postgres_repository
     ledger = BrokerLedger(repository, id_factory=SequenceIds(start=1100))
     created = await ledger.create_job(
         OWNER, "postgres-expiry-001", "default", "docker", "postgres"
@@ -538,14 +558,18 @@ async def test_postgres_recovery_running_expiry_uses_database_time(
         generation=1,
     )
     assert await ledger.scan_recovery_candidates() == ()
-    async with pool.acquire() as connection:
+    async with engine.begin() as connection:
+        # sql-text: winds the lease back so the recovery sweep sees it expire.
         await connection.execute(
-            """
-            UPDATE broker_generations
-            SET execution_lease_deadline = clock_timestamp() - interval '1 second'
-            WHERE job_id = $1 AND generation = 1
-            """,
-            created.job_id,
+            text(
+                """
+                UPDATE broker_generations
+                SET execution_lease_deadline =
+                    clock_timestamp() - interval '1 second'
+                WHERE job_id = :job_id AND generation = 1
+                """
+            ),
+            {"job_id": created.job_id},
         )
 
     candidates = await ledger.scan_recovery_candidates()
@@ -558,18 +582,14 @@ async def test_postgres_recovery_running_expiry_uses_database_time(
 async def test_postgres_concurrent_repeated_setup_is_idempotent(
     postgres_repository,
 ):
-    repository, pool = postgres_repository
+    repository, engine = postgres_repository
     second = PostgresBrokerRepository()
     third = PostgresBrokerRepository()
     try:
-        await asyncio.gather(second.setup(pool), third.setup(pool))
-        async with pool.acquire() as connection:
-            assert (
-                await connection.fetchval(
-                    "SELECT count(*) FROM broker_schema_migrations"
-                )
-                == 4
-            )
+        await asyncio.gather(second.setup(engine), third.setup(engine))
+        assert (
+            await _scalar(engine, "SELECT count(*) FROM broker_schema_migrations") == 4
+        )
     finally:
         await second.close()
         await third.close()
@@ -577,13 +597,12 @@ async def test_postgres_concurrent_repeated_setup_is_idempotent(
 
 async def test_postgres_concurrent_fresh_setup_serializes_bootstrap():
     await require_postgres(DSN)
-    import asyncpg
 
     schema = f"broker_fresh_{uuid4().hex}"
-    admin = await asyncpg.connect(DSN)
-    await admin.execute(f'CREATE SCHEMA "{schema}"')
-    await admin.close()
-    pool = await asyncpg.create_pool(
+    await _admin(f'CREATE SCHEMA "{schema}"')
+    # One engine, two repositories setting up at once on a fresh schema: the
+    # advisory lock in setup() is what has to serialize them.
+    engine = await create_engine(
         DSN,
         min_size=2,
         max_size=4,
@@ -592,38 +611,32 @@ async def test_postgres_concurrent_fresh_setup_serializes_bootstrap():
     first = PostgresBrokerRepository()
     second = PostgresBrokerRepository()
     try:
-        await asyncio.gather(first.setup(pool), second.setup(pool))
-        async with pool.acquire() as connection:
-            assert (
-                await connection.fetchval(
-                    "SELECT count(*) FROM broker_schema_migrations"
-                )
-                == 4
-            )
-            assert (
-                await connection.fetchval(
-                    """
-                SELECT count(*) FROM information_schema.tables
-                WHERE table_schema = current_schema() AND table_name LIKE 'broker_%'
+        await asyncio.gather(first.setup(engine), second.setup(engine))
+        assert (
+            await _scalar(engine, "SELECT count(*) FROM broker_schema_migrations") == 4
+        )
+        assert (
+            await _scalar(
+                engine,
                 """
-                )
-                == 6
+                SELECT count(*) FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name LIKE 'broker_%'
+                """,
             )
+            == 6
+        )
     finally:
         await first.close()
         await second.close()
-        await pool.close()
-        admin = await asyncpg.connect(DSN)
-        try:
-            await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-        finally:
-            await admin.close()
+        await engine.dispose()
+        await _admin(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
 
 
 async def test_postgres_append_only_upgrade_records_checksum(
     postgres_repository, monkeypatch
 ):
-    repository, pool = postgres_repository
+    repository, engine = postgres_repository
     await repository.close()
     packaged = _load_packaged_migrations()
     upgrade = Migration.from_bytes(
@@ -636,16 +649,26 @@ async def test_postgres_append_only_upgrade_records_checksum(
         lambda: (*packaged, upgrade),
     )
     upgraded = PostgresBrokerRepository()
-    await upgraded.setup(pool)
+    await upgraded.setup(engine)
     try:
-        async with pool.acquire() as connection:
-            row = await connection.fetchrow(
-                "SELECT name, checksum FROM broker_schema_migrations WHERE version = 5"
+        async with engine.connect() as connection:
+            # sql-text: reads the migration ledger the runner wrote.
+            row = (
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT name, checksum FROM broker_schema_migrations "
+                            "WHERE version = 5"
+                        )
+                    )
+                )
+                .mappings()
+                .first()
             )
-            assert dict(row) == {
-                "name": "contract_probe",
-                "checksum": upgrade.checksum,
-            }
+        assert dict(row) == {
+            "name": "contract_probe",
+            "checksum": upgrade.checksum,
+        }
     finally:
         await upgraded.close()
 
@@ -668,23 +691,24 @@ async def test_postgres_append_only_upgrade_records_checksum(
 async def test_postgres_setup_fails_closed_on_drift_or_future_version(
     postgres_repository, mutation, problem
 ):
-    repository, pool = postgres_repository
+    repository, engine = postgres_repository
     await repository.close()
-    async with pool.acquire() as connection:
-        await connection.execute(mutation)
+    async with engine.begin() as connection:
+        # sql-text: drifts the migration ledger on purpose.
+        await connection.execute(text(mutation))
     candidate = PostgresBrokerRepository()
     with pytest.raises(MigrationVersionError) as caught:
-        await candidate.setup(pool)
+        await candidate.setup(engine)
     assert caught.value.problem is problem
-    assert candidate._pool is None
-    async with pool.acquire() as connection:
-        assert await connection.fetchval("SELECT 1") == 1
+    assert candidate._engine is None
+    # The failed setup left the engine usable.
+    assert await _scalar(engine, "SELECT 1") == 1
 
 
 async def test_postgres_failed_pending_migration_rolls_back_and_detaches(
     postgres_repository, monkeypatch
 ):
-    repository, pool = postgres_repository
+    repository, engine = postgres_repository
     await repository.close()
     packaged = _load_packaged_migrations()
     broken = Migration.from_bytes(
@@ -701,16 +725,161 @@ async def test_postgres_failed_pending_migration_rolls_back_and_detaches(
     )
     candidate = PostgresBrokerRepository()
     with pytest.raises(Exception, match="broker_missing_relation"):
-        await candidate.setup(pool)
-    assert candidate._pool is None
-    async with pool.acquire() as connection:
-        assert (
-            await connection.fetchval("SELECT to_regclass('broker_should_rollback')")
-            is None
-        )
-        assert (
-            await connection.fetchval(
-                "SELECT max(version) FROM broker_schema_migrations"
+        await candidate.setup(engine)
+    assert candidate._engine is None
+    assert await _scalar(engine, "SELECT to_regclass('broker_should_rollback')") is None
+    assert (
+        await _scalar(engine, "SELECT max(version) FROM broker_schema_migrations") == 4
+    )
+
+
+async def test_migrations_apply_to_an_empty_schema_through_sqlalchemy(
+    postgres_repository,
+):
+    """Every migration file holds several statements; they must all land.
+
+    The fixture already hands back a schema created for this test alone and a
+    repository whose `setup()` ran against it, so there is nothing to tear down
+    first — which matters, because `execute(text(...))` takes asyncpg's
+    prepared-statement path and cannot run `DROP SCHEMA …; CREATE SCHEMA …` as
+    one statement.
+    """
+    _repository, engine = postgres_repository
+
+    async with engine.connect() as conn:
+        applied = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT version FROM broker_schema_migrations ORDER BY version"
+                    )
+                )
             )
-            == 4
+            .scalars()
+            .all()
         )
+        tables = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT tablename FROM pg_tables "
+                        "WHERE schemaname = current_schema() ORDER BY tablename"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert applied == [1, 2, 3, 4]
+    # 0001 alone holds ten statements; a runner that stopped at the first would
+    # still record the version.
+    assert "broker_audit" in tables
+    assert "broker_rpc_audit" in tables
+
+
+async def test_update_job_refuses_a_stale_expected_revision(postgres_repository):
+    """The optimistic predicate must stay inside the writing statement.
+
+    Driving this through the ledger cannot work: `_job()` reads `FOR UPDATE`
+    inside the same transaction that writes, and hands that freshly-read record
+    straight to `_update_job` as `before` — so a bump made beforehand is simply
+    read as the current revision and the guard passes. The race the guard exists
+    for happens between another transaction's read and write, which a sequential
+    test cannot stage. Calling `_update_job` with a `before` whose revision is
+    deliberately stale reproduces exactly what that race presents to the
+    statement, deterministically.
+    """
+    repository, engine = postgres_repository
+    ledger = BrokerLedger(repository, id_factory=SequenceIds())
+    created = await ledger.create_job(
+        OWNER, "postgres-fence-0001", "default", "docker", "postgres"
+    )
+
+    async with engine.connect() as conn:
+        row = (
+            (
+                await conn.execute(
+                    text("SELECT * FROM broker_jobs WHERE job_id = :job_id"),
+                    {"job_id": created.job_id},
+                )
+            )
+            .mappings()
+            .first()
+        )
+    current = _job_from_row(row)
+
+    stale = replace(current, revision=current.revision + 1)
+    after = replace(current, revision=current.revision + 1)
+
+    with pytest.raises(ConcurrentMutation):
+        async with engine.begin() as conn:
+            await PostgresBrokerRepository._update_job(conn, stale, after)
+
+    # And the matching revision still writes, so the guard is a guard and not a
+    # statement that never matches.
+    async with engine.begin() as conn:
+        await PostgresBrokerRepository._update_job(conn, current, after)
+
+
+async def test_update_generation_refuses_a_stale_expected_revision(
+    postgres_repository,
+):
+    """The generation guard, tested the same way as the job guard.
+
+    `begin_generation_start` is the contract helper that supplies `begin_start`'s
+    nine arguments; it leaves generation 1 in state 'starting' with a pending
+    operation, which is a row every CHECK on the table accepts. `after` changes
+    only the revision, so nothing that held for the stored row stops holding.
+    """
+    repository, engine = postgres_repository
+    ledger = BrokerLedger(repository, id_factory=SequenceIds())
+
+    created = await ledger.create_job(
+        OWNER, "postgres-genfence-0001", "default", "docker", "postgres"
+    )
+    await begin_generation_start(
+        ledger,
+        idempotency_key="postgres-genfence-start-1",
+        job_id=created.job_id,
+        expected_generation=0,
+        execution_lease_seconds=30,
+    )
+
+    async with engine.connect() as conn:
+        row = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT * FROM broker_generations "
+                        "WHERE job_id = :job_id AND generation = :generation"
+                    ),
+                    {"job_id": created.job_id, "generation": 1},
+                )
+            )
+            .mappings()
+            .first()
+        )
+    current = _generation_from_row(row)
+
+    stale = replace(current, revision=current.revision + 1)
+    after = replace(current, revision=current.revision + 1)
+
+    with pytest.raises(ConcurrentMutation):
+        async with engine.begin() as conn:
+            await PostgresBrokerRepository._update_generation(conn, stale, after)
+
+    # The matching revision still writes, so the guard is a guard and not a
+    # statement that never matches.
+    async with engine.begin() as conn:
+        await PostgresBrokerRepository._update_generation(conn, current, after)
+
+    async with engine.connect() as conn:
+        stored = await conn.scalar(
+            text(
+                "SELECT revision FROM broker_generations "
+                "WHERE job_id = :job_id AND generation = :generation"
+            ),
+            {"job_id": created.job_id, "generation": 1},
+        )
+    assert stored == current.revision + 1

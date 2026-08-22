@@ -1,84 +1,14 @@
-"""Unit coverage for shared PostgreSQL pool ownership and sizing."""
+"""Unit coverage for the shared PostgreSQL connection pool's sizing.
 
-import sys
-from types import SimpleNamespace
+Ownership and binding moved to `test_db_engine.py` with the engine seam; the
+pool bounds are still configuration, and still validated here.
+"""
 
 import pytest
 from pydantic import ValidationError
 
-from openloop.postgres import BorrowedPostgresStore, create_pool
 from openloop.usage.postgres import PostgresUsageStore
 from tests.support.settings import IsolatedSettings as Settings
-
-
-class _Pool:
-    def __init__(self):
-        self.closed = False
-
-    async def close(self):
-        self.closed = True
-
-
-async def test_store_close_detaches_without_closing_borrowed_pool():
-    store = BorrowedPostgresStore()
-    pool = _Pool()
-    store._pool = pool
-
-    await store.close()
-
-    assert store._pool is None
-    assert not pool.closed
-
-
-async def test_create_pool_forwards_explicit_bounds(monkeypatch):
-    pool = _Pool()
-
-    async def asyncpg_create_pool(dsn, *, min_size, max_size):
-        assert dsn == "postgresql://test"
-        assert (min_size, max_size) == (2, 9)
-        return pool
-
-    monkeypatch.setitem(
-        sys.modules,
-        "asyncpg",
-        SimpleNamespace(create_pool=asyncpg_create_pool),
-    )
-
-    assert await create_pool("postgresql://test", min_size=2, max_size=9) is pool
-
-
-async def test_create_pool_forwards_an_explicit_password(monkeypatch):
-    pool = _Pool()
-    calls = []
-
-    async def asyncpg_create_pool(dsn, **kwargs):
-        calls.append((dsn, kwargs))
-        return pool
-
-    monkeypatch.setitem(
-        sys.modules,
-        "asyncpg",
-        SimpleNamespace(create_pool=asyncpg_create_pool),
-    )
-
-    created = await create_pool(
-        "postgresql://test",
-        min_size=2,
-        max_size=9,
-        password="mounted-db-secret",
-    )
-
-    assert created is pool
-    assert calls == [
-        (
-            "postgresql://test",
-            {
-                "min_size": 2,
-                "max_size": 9,
-                "password": "mounted-db-secret",
-            },
-        )
-    ]
 
 
 def test_stores_no_longer_accept_a_dsn():

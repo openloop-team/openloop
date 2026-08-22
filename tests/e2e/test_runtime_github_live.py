@@ -88,33 +88,32 @@ def _build_agent(model: str) -> Agent:
 
 
 async def _maybe_postgres_stores():
-    """Return ((memory, usage, approvals, workflows), pool) when reachable."""
+    """Return ((memory, usage, approvals, workflows), engine) when reachable."""
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         return None
-    pool = None
+    engine = None
     try:
-        import asyncpg
-
         from openloop.approvals.postgres import PostgresApprovalStore
+        from openloop.db import create_engine
         from openloop.memory.postgres import PostgresMemoryStore
         from openloop.usage.postgres import PostgresUsageStore
 
-        conn = await asyncpg.connect(dsn, timeout=3)
-        await conn.close()
-        pool = await asyncpg.create_pool(dsn, min_size=1, max_size=10)
+        # min_size=1 makes construction the reachability check this used to do
+        # with a throwaway connection.
+        engine = await create_engine(dsn, min_size=1, max_size=10)
         memory = PostgresMemoryStore(embedding_dim=1536)
         usage = PostgresUsageStore()
         approvals = PostgresApprovalStore()
         workflows = PostgresWorkflowStore()
-        await memory.setup(pool)
-        await usage.setup(pool)
-        await approvals.setup(pool)
-        await workflows.setup(pool)
-        return (memory, usage, approvals, workflows), pool
+        await memory.setup(engine)
+        await usage.setup(engine)
+        await approvals.setup(engine)
+        await workflows.setup(engine)
+        return (memory, usage, approvals, workflows), engine
     except Exception:
-        if pool is not None:
-            await pool.close()
+        if engine is not None:
+            await engine.dispose()
         return None
 
 
@@ -124,7 +123,7 @@ async def test_live_end_to_end():
     model = _model()
 
     postgres = await _maybe_postgres_stores()
-    stores, pool = postgres if postgres else (None, None)
+    stores, engine = postgres if postgres else (None, None)
     memory, usage, approvals, workflows = stores or (
         InMemoryStore(),
         InMemoryUsageStore(),
@@ -191,5 +190,5 @@ async def test_live_end_to_end():
         if stores:
             for store in stores:
                 await store.close()
-        if pool is not None:
-            await pool.close()
+        if engine is not None:
+            await engine.dispose()

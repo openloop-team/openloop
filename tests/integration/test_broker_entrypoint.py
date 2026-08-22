@@ -19,6 +19,7 @@ from uuid import uuid4
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import SecretStr
+from sqlalchemy import text
 
 import openloop.broker_main as broker_entrypoint
 from openloop.broker_config import BrokerClientConfig, BrokerServiceConfig
@@ -26,6 +27,7 @@ from openloop.broker_control import RecoveryPassReport
 from openloop.broker_main import healthcheck, run_broker
 from openloop.broker_rpc.client import BrokerRpcClientProblem
 from openloop.broker_rpc.server import SocketPathProblem, take_over_stale_socket
+from openloop.db import create_engine
 from openloop.wiring.broker import _derive_receipt_key, build_broker_client
 from tests.support.postgres import postgres_dsn, require_postgres
 from tests.support.processes import cleanup_processes
@@ -337,6 +339,17 @@ def _wait_until_healthy(settings: Settings, process: subprocess.Popen) -> None:
     pytest.fail("broker did not become healthy")
 
 
+async def _admin(statement: str) -> None:
+    """Run one statement outside the per-test schema, to create or drop it."""
+    engine = await create_engine(_POSTGRES_DSN, min_size=1, max_size=1)
+    try:
+        async with engine.begin() as connection:
+            # sql-text: DDL naming a schema this suite creates for itself.
+            await connection.execute(text(statement))
+    finally:
+        await engine.dispose()
+
+
 def _dsn_with_search_path(dsn: str, schema: str) -> str:
     parsed = urlsplit(dsn)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
@@ -482,12 +495,9 @@ def test_entrypoint_refuses_cross_boundary_root_reuse(broker_dir):
 @pytest.mark.postgres
 async def test_postgres_entrypoint_owns_broker_migrations(broker_dir):
     await require_postgres(_POSTGRES_DSN)
-    import asyncpg
 
     schema = f"broker_entrypoint_{uuid4().hex}"
-    admin = await asyncpg.connect(_POSTGRES_DSN)
-    await admin.execute(f'CREATE SCHEMA "{schema}"')
-    await admin.close()
+    await _admin(f'CREATE SCHEMA "{schema}"')
     schema_dsn = _dsn_with_search_path(_POSTGRES_DSN, schema)
     settings = _settings(
         broker_dir,
@@ -512,22 +522,21 @@ async def test_postgres_entrypoint_owns_broker_migrations(broker_dir):
         output, error = await asyncio.to_thread(process.communicate, timeout=5)
         assert process.returncode == 0, output + error
 
-        connection = await asyncpg.connect(schema_dsn)
+        engine = await create_engine(schema_dsn, min_size=1, max_size=1)
         try:
-            assert await connection.fetchval(
-                "SELECT to_regclass('broker_jobs') IS NOT NULL"
-            )
-            assert await connection.fetchval(
-                "SELECT to_regclass('broker_rpc_audit') IS NOT NULL"
-            )
+            async with engine.connect() as connection:
+                # sql-text: presence probes for tables the subprocess's own
+                # migration runner created.
+                assert await connection.scalar(
+                    text("SELECT to_regclass('broker_jobs') IS NOT NULL")
+                )
+                assert await connection.scalar(
+                    text("SELECT to_regclass('broker_rpc_audit') IS NOT NULL")
+                )
         finally:
-            await connection.close()
+            await engine.dispose()
     finally:
         try:
             cleanup_processes(process)
         finally:
-            admin = await asyncpg.connect(_POSTGRES_DSN)
-            try:
-                await admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-            finally:
-                await admin.close()
+            await _admin(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
