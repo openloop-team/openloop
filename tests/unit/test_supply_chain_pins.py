@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).parents[2]
 DOCKERFILE = ROOT / "Dockerfile"
 
@@ -66,3 +68,52 @@ def test_project_is_installed_non_editably_into_the_system_environment():
     for flag in ("--locked", "--inexact", "--no-editable"):
         assert flag in sync[0], f"missing {flag}: {sync[0]}"
     assert "pip install" not in text, "pip install ignores uv.lock"
+
+
+WORKFLOWS = ROOT / ".github" / "workflows"
+CI = WORKFLOWS / "ci.yml"
+ACTION_SHA = re.compile(r"^[\w.-]+/[\w.-]+(?:/[^@]+)?@[0-9a-f]{40}$")
+EXPRESSION = re.compile(r"\$\{\{")
+
+
+def _workflow(path: Path) -> dict:
+    return yaml.safe_load(path.read_text())
+
+
+def _steps(path: Path, job: str) -> list[dict]:
+    return _workflow(path)["jobs"][job]["steps"]
+
+
+def test_publish_job_pins_every_action_to_a_commit_sha():
+    steps = _steps(CI, "publish")
+    uses = [step["uses"] for step in steps if "uses" in step]
+    assert uses, "publish job runs no actions"
+    for ref in uses:
+        assert ACTION_SHA.fullmatch(ref), f"unpinned action: {ref}"
+
+
+def test_publish_job_declares_every_permission_it_needs():
+    permissions = _workflow(CI)["jobs"]["publish"]["permissions"]
+    assert permissions == {
+        "contents": "read",
+        "packages": "write",
+        "id-token": "write",
+        "attestations": "write",
+    }
+
+
+def test_publish_job_disables_the_artifact_storage_record():
+    attest = [
+        step for step in _steps(CI, "publish") if "attest" in step.get("uses", "")
+    ]
+    assert len(attest) == 1, "expected exactly one attestation step"
+    # Defaults to true under push-to-registry and would need
+    # artifact-metadata: write, a scope the enumerated block leaves at none.
+    assert attest[0]["with"]["create-storage-record"] is False
+
+
+def test_publish_job_keeps_expressions_out_of_shell():
+    for step in _steps(CI, "publish"):
+        assert not EXPRESSION.search(step.get("run", "")), (
+            f"expression interpolated into run: {step.get('name')}"
+        )
