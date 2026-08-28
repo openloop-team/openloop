@@ -117,3 +117,92 @@ def test_publish_job_keeps_expressions_out_of_shell():
         assert not EXPRESSION.search(step.get("run", "")), (
             f"expression interpolated into run: {step.get('name')}"
         )
+
+
+def _publish_step(name: str) -> dict:
+    steps = [s for s in _steps(CI, "publish") if s.get("name") == name]
+    assert len(steps) == 1, f"expected exactly one {name!r} step"
+    return steps[0]
+
+
+def test_publish_job_builds_for_amd64_only():
+    steps = _steps(CI, "publish")
+    runs = "\n".join(step.get("run", "") for step in steps)
+    platforms = re.findall(r"--platform[ =](\S+)", runs)
+    assert platforms, "no --platform flag found in publish job"
+    # A second, differing --platform anywhere in the job would mean some
+    # step targets an architecture other than what was smoke tested.
+    assert platforms == ["linux/amd64"], f"unexpected --platform values: {platforms}"
+
+
+def test_publish_job_build_step_attests_provenance_and_sbom():
+    run = _publish_step("Build and push to a staging tag")["run"]
+    assert "--provenance=mode=max" in run, "build must emit max-mode provenance"
+    assert "--sbom=true" in run, "build must emit an SBOM"
+
+
+def test_publish_job_build_args_match_dockerfile_arg_defaults():
+    run = _publish_step("Build and push to a staging tag")["run"]
+    for name in ("OPENLOOP_BROKER_UID", "OPENLOOP_DATA_GID"):
+        defaults = [
+            line.split("=", 1)[1]
+            for line in _lines()
+            if line.startswith(f"ARG {name}=")
+        ]
+        assert len(defaults) == 1, f"expected exactly one ARG {name} in Dockerfile"
+        default = defaults[0]
+        # Read the default from the Dockerfile instead of hardcoding it here
+        # so the two sides can't silently drift apart.
+        assert f"--build-arg {name}={default}" in run, (
+            f"--build-arg {name} does not match Dockerfile default {default!r}"
+        )
+
+
+def test_publish_job_staging_tag_is_scoped_to_run_and_attempt():
+    staging_tag = _publish_step("Build and push to a staging tag")["env"]["STAGING_TAG"]
+    # run_id alone is stable across re-runs; without run_attempt, a re-run
+    # would push a different build over a tag an earlier attempt already
+    # smoke tested.
+    assert "github.run_id" in staging_tag, f"staging tag missing run_id: {staging_tag}"
+    assert "github.run_attempt" in staging_tag, (
+        f"staging tag missing run_attempt: {staging_tag}"
+    )
+
+
+def test_publish_job_smoke_test_runs_broker_probe_as_broker_user():
+    run = _publish_step("Smoke test the pushed digest")["run"]
+    # The image's default USER would not exercise /nonexistent as home;
+    # the broker composition always runs as this uid:gid.
+    assert "--user 10002:10777" in run, "broker probe must run as the broker uid:gid"
+
+
+def test_publish_job_smoke_test_reads_claude_version_from_dockerfile_at_run_time():
+    run = _publish_step("Smoke test the pushed digest")["run"]
+    assert "Dockerfile" in run, (
+        "expected Claude version must be sourced from the Dockerfile"
+    )
+    assert "CLAUDE_CODE_VERSION" in run, "must read the ARG CLAUDE_CODE_VERSION default"
+    # A literal X.Y.Z here would mean the step hardcodes the version instead
+    # of reading it, letting it silently drift from the Dockerfile pin.
+    assert not re.search(r"\d+\.\d+\.\d+", run), f"hardcoded version literal in: {run}"
+
+
+def test_publish_job_tags_commit_sha_only_after_smoke_test():
+    names = [step.get("name") for step in _steps(CI, "publish")]
+    smoke_idx = names.index("Smoke test the pushed digest")
+    publish_idx = names.index("Publish the commit tag")
+    assert publish_idx > smoke_idx, (
+        "commit tag must not be published before the image is smoke tested"
+    )
+
+
+def test_publish_job_commit_tag_handles_absent_matching_and_differing_digest():
+    run = _publish_step("Publish the commit tag")["run"]
+    assert 'if [ -z "$existing" ]' in run, "missing branch: create when tag is absent"
+    assert "docker buildx imagetools create" in run, "absent branch must create the tag"
+    assert 'elif [ "$existing" != "$DIGEST" ]' in run, (
+        "missing branch: fail when digest differs"
+    )
+    assert "exit 1" in run, "differing-digest branch must fail the job"
+    # No explicit else: a matching digest falls through as a no-op, which is
+    # the third branch of the present/absent/different check.
