@@ -1,8 +1,9 @@
 # Runtime images
 
 CI publishes `ghcr.io/openloop-team/openloop:main-<sha>` for every commit on
-`main`, and a `v*` Git tag promotes that commit's already-published digest to
-`:<v*>` without rebuilding.
+`main`, and a `v*` Git tag promotes that commit's already-published digest
+without rebuilding. The image tag is the Git tag verbatim, leading `v` and all,
+so pushing `v1.2.3` produces `ghcr.io/openloop-team/openloop:v1.2.3`.
 
 Deploy by digest, never by tag:
 
@@ -10,7 +11,7 @@ Deploy by digest, never by tag:
 
 Read the digest a tag currently resolves to:
 
-    docker buildx imagetools inspect ghcr.io/openloop-team/openloop:<v*> \
+    docker buildx imagetools inspect ghcr.io/openloop-team/openloop:v1.2.3 \
       --format '{{println .Manifest.Digest}}'
 
 Verify where an image came from before deploying it:
