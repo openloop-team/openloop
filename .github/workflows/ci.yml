@@ -192,6 +192,11 @@ jobs:
 
       # Absent creates, same digest no-ops, different digest fails: a re-run
       # must not replace a digest an existing release record may already name.
+      # The destination read has three outcomes, not two: absent (create),
+      # present (compare), or the read itself failed (registry 5xx, rate
+      # limit, DNS blip, scope issue). Only a genuine not-found counts as
+      # absent — any other failure must abort loudly, because treating it as
+      # absent would let a transient error silently repoint an existing tag.
       - name: Publish the commit tag
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -199,8 +204,20 @@ jobs:
         run: |
           set -euo pipefail
           target="$IMAGE:main-$SHA"
+          set +e
           existing="$(docker buildx imagetools inspect "$target" \
-            --format '{{println .Manifest.Digest}}' 2>/dev/null || true)"
+            --format '{{println .Manifest.Digest}}' 2>/tmp/inspect.err)"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            if grep -qiE 'not found|manifest unknown|404' /tmp/inspect.err; then
+              existing=
+            else
+              echo "::error::could not read $target"
+              cat /tmp/inspect.err
+              exit 1
+            fi
+          fi
           if [ -z "$existing" ]; then
             docker buildx imagetools create --tag "$target" "$IMAGE@$DIGEST"
           elif [ "$existing" != "$DIGEST" ]; then

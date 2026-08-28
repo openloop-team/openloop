@@ -80,9 +80,9 @@ ARG CLAUDE_CODE_VERSION=2.1.236
 # The Claude Code CLI for the EXPERIMENTAL claude worker backend
 # (CODING_WORKER_BACKEND=claude), which shells out to `claude -p`. Installed via
 # the native installer (`npm install -g` is deprecated); it drops a
-# self-contained binary into ~/.local/bin — no Node runtime needed. `stable` is
-# the stability channel; replace it with an explicit X.Y.Z to freeze the CLI
-# across rebuilds (the installer also accepts `latest`). Auth is separate (a
+# self-contained binary into ~/.local/bin — no Node runtime needed. Pinned to
+# the version in ARG CLAUDE_CODE_VERSION above, not to a moving channel;
+# bumping the CLI is a deliberate commit that changes that ARG. Auth is separate (a
 # subscription token in CLAUDE_CODE_OAUTH_TOKEN, or a mounted ~/.claude — see
 # the deploy compose). Without this binary the claude backend's probe fails at
 # boot and the coding worker is disabled (fail-closed) — it never runs

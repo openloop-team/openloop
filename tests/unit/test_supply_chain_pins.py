@@ -102,6 +102,29 @@ def test_publish_job_declares_every_permission_it_needs():
     }
 
 
+def test_publish_job_needs_every_test_job():
+    # A missing dependency here is what would let publish start from an
+    # untested state; a push to main only runs jobs it needs, so this is the
+    # only thing standing between a broken test and a published image.
+    needs = _workflow(CI)["jobs"]["publish"]["needs"]
+    assert needs == ["quality", "test", "test-postgres"], (
+        f"publish must depend on every test job, got {needs}"
+    )
+
+
+def test_publish_job_restricted_to_push_on_main():
+    # Without this gate, publish would also try to run on pull_request events
+    # (this workflow triggers on both), pushing images built from unmerged,
+    # unreviewed code.
+    condition = _workflow(CI)["jobs"]["publish"]["if"]
+    assert "github.event_name == 'push'" in condition, (
+        f"publish must be gated on a push event, got {condition!r}"
+    )
+    assert "refs/heads/main" in condition, (
+        f"publish must be gated on the main branch, got {condition!r}"
+    )
+
+
 def test_publish_job_disables_the_artifact_storage_record():
     attest = [
         step for step in _steps(CI, "publish") if "attest" in step.get("uses", "")
@@ -243,3 +266,76 @@ def test_promote_workflow_serializes_by_version_tag():
     # queue: single would cancel a pending run instead of letting it observe
     # the first run's digest and fail on the mismatch.
     assert concurrency["queue"] == "max"
+
+
+def _promote_step(name: str) -> dict:
+    steps = [s for s in _steps(PROMOTE, "promote") if s.get("name") == name]
+    assert len(steps) == 1, f"expected exactly one {name!r} step"
+    return steps[0]
+
+
+def test_promote_job_declares_exact_permissions():
+    permissions = _workflow(PROMOTE)["jobs"]["promote"]["permissions"]
+    assert permissions == {
+        "contents": "read",
+        "packages": "write",
+        "attestations": "read",
+    }
+
+
+def test_promote_workflow_verifies_attestation_with_required_flags():
+    run = _promote_step("Verify the image's attestation")["run"]
+    assert "gh attestation verify" in run, "attestation must actually be verified"
+    for flag in (
+        "--repo",
+        "--signer-workflow",
+        "--source-ref refs/heads/main",
+        "--source-digest",
+    ):
+        assert flag in run, f"missing {flag}: {run}"
+
+    # --signer-workflow's value is built from $REPO, not written out literally,
+    # so resolve it the same way the shell would before checking it is
+    # repository-qualified. A bare "ci.yml" or ".github/workflows/ci.yml"
+    # passes gh's own arg parsing but fails verification at run time.
+    signer = re.search(r'--signer-workflow\s+"([^"]+)"', run)
+    assert signer, f"could not find --signer-workflow value in: {run}"
+    repo_env = _workflow(PROMOTE)["jobs"]["promote"]["env"]["REPO"]
+    resolved = signer.group(1).replace("$REPO", repo_env)
+    assert resolved == "openloop-team/openloop/.github/workflows/ci.yml", (
+        f"signer-workflow must be repository-qualified, resolved to {resolved!r}"
+    )
+
+
+def test_promote_workflow_verifies_attestation_before_attaching_tag():
+    names = [step.get("name") for step in _steps(PROMOTE, "promote")]
+    verify_idx = names.index("Verify the image's attestation")
+    attach_idx = names.index("Attach the version tag")
+    assert attach_idx > verify_idx, (
+        "version tag must not be attached before the attestation is verified"
+    )
+
+
+def test_promote_workflow_tags_from_captured_digest_not_moving_tag():
+    run = _promote_step("Attach the version tag")["run"]
+    assert '"$IMAGE@$DIGEST"' in run, "tag must be created from the captured digest"
+    assert "main-$GITHUB_SHA" not in run, (
+        "tag must never be created from the moving :main-<sha> tag, which can "
+        "move between verification and write"
+    )
+
+
+def test_promote_workflow_validates_tag_before_touching_registry():
+    steps = _steps(PROMOTE, "promote")
+    names = [step.get("name") for step in steps]
+    validate_idx = names.index("Validate the tag as an OCI reference")
+    # A step's run text is the surface where an unvalidated tag could reach a
+    # shell as $GITHUB_REF_NAME; buildx and gh are what actually talk to the
+    # registry with that value.
+    registry_markers = ("docker buildx imagetools", "gh attestation verify")
+    for idx, step in enumerate(steps):
+        run = step.get("run", "")
+        if any(marker in run for marker in registry_markers):
+            assert idx > validate_idx, (
+                f"{step.get('name')!r} touches the registry before the tag is validated"
+            )
