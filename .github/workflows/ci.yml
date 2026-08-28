@@ -225,6 +225,13 @@ jobs:
             exit 1
           fi
 
+      - name: Clean up the staging tag
+        if: always()
+        run: |
+          set -euo pipefail
+          STAGING_TAG="ci-${{ github.run_id }}-${{ github.run_attempt }}"
+          docker buildx imagetools rm "$IMAGE:$STAGING_TAG" || true
+
       - name: Report the digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}

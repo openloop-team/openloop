@@ -2,7 +2,7 @@
 
 CI publishes `ghcr.io/openloop-team/openloop:main-<sha>` for every commit on
 `main`, and a `v*` Git tag promotes that commit's already-published digest to
-`:<version>` without rebuilding.
+`:<v*>` without rebuilding.
 
 Deploy by digest, never by tag:
 
@@ -10,7 +10,7 @@ Deploy by digest, never by tag:
 
 Read the digest a tag currently resolves to:
 
-    docker buildx imagetools inspect ghcr.io/openloop-team/openloop:<version> \
+    docker buildx imagetools inspect ghcr.io/openloop-team/openloop:<v*> \
       --format '{{println .Manifest.Digest}}'
 
 Verify where an image came from before deploying it:
