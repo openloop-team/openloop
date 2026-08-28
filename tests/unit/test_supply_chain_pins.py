@@ -152,8 +152,11 @@ def test_publish_job_build_args_match_dockerfile_arg_defaults():
         assert len(defaults) == 1, f"expected exactly one ARG {name} in Dockerfile"
         default = defaults[0]
         # Read the default from the Dockerfile instead of hardcoding it here
-        # so the two sides can't silently drift apart.
-        assert f"--build-arg {name}={default}" in run, (
+        # so the two sides can't silently drift apart. Anchor the match to require
+        # the value to end at a token boundary (whitespace or end of string) to
+        # catch drift where a longer value is used (e.g. 100025 vs 10002).
+        pattern = re.escape(f"--build-arg {name}={default}") + r"(?:\s|$)"
+        assert re.search(pattern, run), (
             f"--build-arg {name} does not match Dockerfile default {default!r}"
         )
 
