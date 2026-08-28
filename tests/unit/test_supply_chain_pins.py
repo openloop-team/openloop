@@ -209,3 +209,37 @@ def test_publish_job_commit_tag_handles_absent_matching_and_differing_digest():
     assert "exit 1" in run, "differing-digest branch must fail the job"
     # No explicit else: a matching digest falls through as a no-op, which is
     # the third branch of the present/absent/different check.
+
+
+PROMOTE = WORKFLOWS / "promote-image.yml"
+
+
+def test_promote_workflow_pins_every_action_to_a_commit_sha():
+    jobs = _workflow(PROMOTE)["jobs"]
+    uses = [
+        step["uses"] for job in jobs.values() for step in job["steps"] if "uses" in step
+    ]
+    assert uses, "promotion workflow runs no actions"
+    for ref in uses:
+        assert ACTION_SHA.fullmatch(ref), f"unpinned action: {ref}"
+
+
+def test_promote_workflow_keeps_expressions_out_of_shell():
+    # A Git tag may contain shell metacharacters — v$(id) is creatable and
+    # push-triggers this workflow. Interpolation happens before the shell
+    # parses, so the tag must arrive as an environment variable.
+    jobs = _workflow(PROMOTE)["jobs"]
+    for job in jobs.values():
+        for step in job["steps"]:
+            assert not EXPRESSION.search(step.get("run", "")), (
+                f"expression interpolated into run: {step.get('name')}"
+            )
+
+
+def test_promote_workflow_serializes_by_version_tag():
+    concurrency = _workflow(PROMOTE)["concurrency"]
+    assert concurrency["group"] == "promote-${{ github.ref_name }}"
+    assert concurrency["cancel-in-progress"] is False
+    # queue: single would cancel a pending run instead of letting it observe
+    # the first run's digest and fail on the mismatch.
+    assert concurrency["queue"] == "max"
