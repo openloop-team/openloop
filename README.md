@@ -431,7 +431,7 @@ the workflow.
 - OpenHands worker backend + spend ledger (Phase 4) — pluggable worker
   backends behind `CODING_WORKER_BACKEND=builtin|openhands`: the default stays the
   light diff worker; `openhands` drives an agentic OpenHands run over the same
-  prepared, credential-free workspace (`openhands` extra; with
+  prepared, credential-free workspace (`openhands` dependency group; with
   `CODING_WORKER_SANDBOX=docker` the agent server runs containerized with the
   workspace bind-mounted — the container never holds a git credential, the
   host pushes). Every attempt's model spend is recorded to the usage store and

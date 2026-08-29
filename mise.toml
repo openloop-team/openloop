@@ -14,7 +14,7 @@ description = "Install the runtime with dependencies exercised by the test suite
 # version ranges in pyproject, and a release of some transitive dependency could
 # turn an unrelated PR red. --locked additionally fails rather than silently
 # updating the lock, so a dependency change has to be committed to take effect.
-run = "uv sync --locked --extra dev --extra broker --extra openhands"
+run = "uv sync --locked --extra dev --extra broker --group openhands"
 
 [tasks.lint]
 description = "Check lint rules (ruff)"

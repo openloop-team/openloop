@@ -6546,6 +6546,11 @@ githubapp = [
 mcp = [
     { name = "mcp" },
 ]
+redis = [
+    { name = "redis" },
+]
+
+[package.dev-dependencies]
 openhands = [
     { name = "cryptography", marker = "python_full_version >= '3.12'" },
     { name = "openhands-agent-server", marker = "python_full_version >= '3.12'" },
@@ -6553,14 +6558,10 @@ openhands = [
     { name = "openhands-tools", marker = "python_full_version >= '3.12'" },
     { name = "openhands-workspace", marker = "python_full_version >= '3.12'" },
 ]
-redis = [
-    { name = "redis" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.29" },
-    { name = "cryptography", marker = "python_full_version >= '3.12' and extra == 'openhands'", specifier = ">=42" },
     { name = "cryptography", marker = "extra == 'broker'", specifier = ">=42" },
     { name = "fastapi", specifier = ">=0.110" },
     { name = "httpx", specifier = ">=0.27" },
@@ -6568,10 +6569,6 @@ requires-dist = [
     { name = "litellm", specifier = ">=1.40" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = "==2.3.0" },
-    { name = "openhands-agent-server", marker = "python_full_version >= '3.12' and extra == 'openhands'", specifier = "==1.36.0" },
-    { name = "openhands-sdk", marker = "python_full_version >= '3.12' and extra == 'openhands'", git = "https://github.com/openloop-team/software-agent-sdk.git?subdirectory=openhands-sdk&rev=d4e3d7be3c66336e834cde63ed62f22fbccc274f" },
-    { name = "openhands-tools", marker = "python_full_version >= '3.12' and extra == 'openhands'", specifier = "==1.36.0" },
-    { name = "openhands-workspace", marker = "python_full_version >= '3.12' and extra == 'openhands'", specifier = "==1.36.0" },
     { name = "pydantic", specifier = ">=2.6" },
     { name = "pydantic-settings", specifier = ">=2.14.0" },
     { name = "pyjwt", extras = ["crypto"], marker = "extra == 'broker'", specifier = ">=2.8" },
@@ -6586,7 +6583,16 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.51" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29" },
 ]
-provides-extras = ["broker", "dev", "githubapp", "mcp", "openhands", "redis"]
+provides-extras = ["broker", "dev", "githubapp", "mcp", "redis"]
+
+[package.metadata.requires-dev]
+openhands = [
+    { name = "cryptography", marker = "python_full_version >= '3.12'", specifier = ">=42" },
+    { name = "openhands-agent-server", marker = "python_full_version >= '3.12'", specifier = "==1.36.0" },
+    { name = "openhands-sdk", marker = "python_full_version >= '3.12'", git = "https://github.com/openloop-team/software-agent-sdk.git?subdirectory=openhands-sdk&rev=d4e3d7be3c66336e834cde63ed62f22fbccc274f" },
+    { name = "openhands-tools", marker = "python_full_version >= '3.12'", specifier = "==1.36.0" },
+    { name = "openhands-workspace", marker = "python_full_version >= '3.12'", specifier = "==1.36.0" },
+]
 
 [[package]]
 name = "pyotp"
