@@ -30,6 +30,11 @@ from openloop.workflows import InMemoryWorkflowStore, WorkflowEngine
 from openloop.workflows.postgres import PostgresWorkflowStore
 
 APPROVER = "@e2e-runner"
+# The nightly runner is one recurring principal, so its durable id is pinned
+# rather than minted per run: budgets and the usage ledger are keyed on the id
+# (`budget_scope_key`), and a fresh id each night would file every run under a
+# new agent. Pinned literal, like the fixture in tests/e2e/data/agent.yaml.
+AGENT_ID = "6e2ea40fe1594761b452c98ebd6ae7e3"
 
 
 def _model() -> str | None:
@@ -67,7 +72,7 @@ def _build_agent(model: str) -> Agent:
         {
             "apiVersion": "openloop.team/v1alpha1",
             "kind": "Agent",
-            "metadata": {"name": "e2e", "workspace": "e2e"},
+            "metadata": {"name": "e2e", "workspace": "e2e", "id": AGENT_ID},
             "spec": {
                 "model_policy": {"default": model},
                 "tools": [
