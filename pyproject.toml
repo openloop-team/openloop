@@ -51,10 +51,19 @@ broker = [
     "pyjwt[crypto]>=2.8",
     "cryptography>=42",
 ]
-# The heavy agentic worker backend (CODING_WORKER_BACKEND=openhands).
+
+[dependency-groups]
+# The heavy agentic worker backend (CODING_WORKER_BACKEND=openhands). A
+# dependency group, NOT an extra: `openhands-sdk` is pinned to a fork commit
+# carrying the injectable WebSocket client factory the UDS relay needs, and
+# PyPI rejects any distribution whose metadata declares a direct reference.
+# Groups are local-only and never reach published metadata, so this keeps the
+# pin while leaving the project publishable. Revisit when
+# OpenHands/software-agent-sdk#4135 lands upstream and the pin can name a
+# released version instead.
 # openhands-workspace is only needed for the docker-mounted runtime.
 # The SDK needs Python >=3.12 (the project floor stays 3.11; on 3.11 the
-# extra resolves empty and the backend probe fails closed at boot).
+# group resolves empty and the backend probe fails closed at boot).
 openhands = [
     # Pin the server package directly: openhands-workspace only declares a
     # compatible lower bound, so plain pip would otherwise install a newer
@@ -104,17 +113,17 @@ python_version = "3.11"
 # ones, so leaving this to the host would fail on a Mac and pass in CI.
 platform = "linux"
 # Third-party surface this repo leans on (litellm, slack_bolt, the openhands SDK)
-# is largely unannotated or stub-less, and the openhands extra doesn't even
+# is largely unannotated or stub-less, and the openhands group doesn't even
 # resolve on 3.11. Checking our own call sites is the win here; demanding stubs
 # for other people's packages would just mean a wall of unactionable errors.
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-# The openhands extra requires >=3.12 and its sources use 3.12-only syntax, so
+# The openhands group requires >=3.12 and its sources use 3.12-only syntax, so
 # checking this package under the 3.11 target above is a parse error before it
 # is anything else. Our own call sites into it degrade to Any, which is what
 # ignore_missing_imports would already have given us on a 3.11 install where the
-# extra resolves empty.
+# group resolves empty.
 module = ["openhands.*"]
 follow_imports = "skip"
 
